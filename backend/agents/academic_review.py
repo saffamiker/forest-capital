@@ -25,7 +25,9 @@ this feature before the July 1 final.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from dataclasses import dataclass
 from typing import Any
 
 try:
@@ -933,6 +935,404 @@ async def build_critic_context(
         "alternatives) with regime-conditional dynamic allocation")
     lines.append("Submission: June 30 panel defense")
     return "\n".join(lines)
+
+
+# ── Adversarial critic (Concern 7c / 7d / 7e + 7l-v) ──────────────────────────
+
+# Gemini critic system prompt. Concern 7c. Harsh-but-fair framing.
+# Concern 7l-v: every finding MUST include target_document so the
+# downstream merge + fix-proposal arbiter knows whether the finding
+# is per-doc or cross-document.
+_CRITIC_PROMPT_GEMINI = (
+    "You are a harsh but fair academic critic reviewing a graduate "
+    "finance practicum submission for FNA 670 at McColl School of "
+    "Business, Queens University of Charlotte.\n\n"
+    "Your sole objective is to find every significant error, "
+    "weakness, or unsupported claim. You are not here to "
+    "encourage -- you are here to find what would cause an "
+    "experienced finance academic or investment professional to "
+    "reject or downgrade this work.\n\n"
+    "WHAT TO LOOK FOR:\n\n"
+    "Methodological: flawed backtesting logic, look-ahead bias, "
+    "survivorship bias, inappropriate benchmarks, regime detection "
+    "errors, factor model misapplication, invalid statistical "
+    "inference, OOS framing that contains in-sample data.\n\n"
+    "Factual: any numeric claim contradicting the NUMERIC REFERENCE "
+    "values. Any date, period, or citation year inconsistent across "
+    "documents.\n\n"
+    "Logical: conclusions not supported by evidence, internal "
+    "contradictions, circular reasoning, overstated certainty, "
+    "regime detection claims that appear post-hoc rationalized.\n\n"
+    "Presentational: claims without evidence, undefined jargon, "
+    "missing limitations disclosures, audience mismatch.\n\n"
+    "Citation: missing required citations, wrong years, claims "
+    "attributed to wrong authors.\n\n"
+    "Consistency (when supporting context is provided): figures, "
+    "regime labels, or conclusions that differ between the primary "
+    "document and the supporting documents.\n\n"
+    "SEVERITY:\n"
+    "Fatal -- would cause an academic panel to reject the "
+    "submission or an investment committee to dismiss the analysis. "
+    "Examples: look-ahead bias, Sharpe ratio contradicting NUMERIC "
+    "REFERENCE, missing core methodology disclosure.\n"
+    "Major -- significant weakness that would lower the grade or "
+    "raise serious questions. Examples: unsupported claim, missing "
+    "limitation, internal contradiction.\n"
+    "Minor -- should be corrected but would not sink the "
+    "submission.\n\n"
+    "OUTPUT FORMAT:\n"
+    "Return a JSON array of findings only. No preamble. Each "
+    "finding must have:\n"
+    "  severity (Fatal | Major | Minor)\n"
+    "  category (methodological | factual | logical | "
+    "presentational | citation | consistency)\n"
+    "  target_document (executive_brief | analytical_appendix | "
+    "presentation_deck | presentation_script | cross_document)\n"
+    "  document (the human-readable doc name where the issue "
+    "appears -- e.g. 'Executive Brief' or 'cross-document')\n"
+    "  location (section name, slide number, paragraph reference)\n"
+    "  description (what the error is)\n"
+    "  evidence (quote or paraphrase from the document that "
+    "demonstrates the finding)\n"
+    "  recommendation (what should be changed)\n\n"
+    "Use target_document='cross_document' only when the finding "
+    "is a consistency violation BETWEEN documents (e.g. brief "
+    "claims X, deck claims Y for the same metric). Otherwise pin "
+    "target_document to the single document that carries the "
+    "error -- this lets the fix-proposal layer decide which "
+    "document to patch.\n\n"
+    "After the JSON array write:\n"
+    "PROSE_SUMMARY: <3-5 sentence overall assessment of the "
+    "submission package's readiness>"
+)
+
+
+# Grok critic system prompt. Concern 7d. Contrarian framing with
+# attention triggers specific to finance research patterns.
+_CRITIC_PROMPT_GROK = (
+    "You are a contrarian finance professional and academic critic. "
+    "You have seen graduate practicum submissions that oversell "
+    "results, hide assumptions, and confuse backtested performance "
+    "with predictive validity. Your job is to be the skeptic -- "
+    "find what won't survive scrutiny from an experienced allocator "
+    "or rigorous academic reviewer.\n\n"
+    "Pay particular attention to:\n"
+    "- Regime detection claims that may be post-hoc rationalized\n"
+    "- Sharpe ratios and drawdown figures that seem too clean or "
+    "contradict the NUMERIC REFERENCE\n"
+    "- OOS framing that may contain in-sample data\n"
+    "- Conclusions that outrun the evidence in the methodology\n"
+    "- Sharpe ratios not deflated for multiple testing "
+    "(Lo 2002 / Harvey et al. 2016)\n\n"
+    "WHAT TO LOOK FOR:\n\n"
+    "Methodological: flawed backtesting logic, look-ahead bias, "
+    "survivorship bias, inappropriate benchmarks, regime detection "
+    "errors, factor model misapplication, invalid statistical "
+    "inference, OOS framing that contains in-sample data.\n\n"
+    "Factual: any numeric claim contradicting the NUMERIC REFERENCE "
+    "values. Any date, period, or citation year inconsistent across "
+    "documents.\n\n"
+    "Logical: conclusions not supported by evidence, internal "
+    "contradictions, circular reasoning, overstated certainty, "
+    "regime detection claims that appear post-hoc rationalized.\n\n"
+    "Presentational: claims without evidence, undefined jargon, "
+    "missing limitations disclosures, audience mismatch.\n\n"
+    "Citation: missing required citations, wrong years, claims "
+    "attributed to wrong authors.\n\n"
+    "Consistency (when supporting context is provided): figures, "
+    "regime labels, or conclusions that differ between the primary "
+    "document and the supporting documents.\n\n"
+    "SEVERITY:\n"
+    "Fatal -- would cause an academic panel to reject the "
+    "submission or an investment committee to dismiss the "
+    "analysis.\n"
+    "Major -- significant weakness that would lower the grade or "
+    "raise serious questions.\n"
+    "Minor -- should be corrected but would not sink the "
+    "submission.\n\n"
+    "OUTPUT FORMAT:\n"
+    "Return a JSON array of findings only. No preamble. Each "
+    "finding must have:\n"
+    "  severity, category, target_document, document, location, "
+    "description, evidence, recommendation\n\n"
+    "Use target_document='cross_document' only when the finding "
+    "is a consistency violation between documents.\n\n"
+    "After the JSON array write:\n"
+    "PROSE_SUMMARY: <3-5 sentence overall assessment>"
+)
+
+
+_CRITIC_MAX_TOKENS = 3000
+
+# Severity ordering for stable sorting. Concern 7e specifies
+# Fatal first, then agreed=True before agreed=False within each
+# severity tier.
+_CRITIC_SEVERITY_ORDER = {"Fatal": 0, "Major": 1, "Minor": 2}
+
+
+def _critic_parse(
+    raw: str,
+) -> tuple[list[dict[str, Any]], str, bool]:
+    """Parse a critic model's JSON-array-plus-PROSE_SUMMARY output.
+
+    Concern 7e: fault-tolerant. Returns (findings, prose, parsed_ok).
+    Empty raw or any parse failure returns ([], '', False) so the
+    merge layer can degrade gracefully when one model fails.
+    """
+    if not raw:
+        return [], "", False
+    import re as _re
+    marker = "PROSE_SUMMARY:"
+    pos = raw.lower().find(marker.lower())
+    if pos != -1:
+        json_part = raw[:pos].strip()
+        prose = raw[pos + len(marker):].strip()
+    else:
+        json_part = raw.strip()
+        prose = ""
+    if json_part.startswith("```"):
+        json_part = _re.sub(
+            r"^```[a-zA-Z]*\n", "", json_part)
+        json_part = _re.sub(r"\n```\s*$", "", json_part)
+    findings: list[dict[str, Any]] = []
+    try:
+        parsed = json.loads(json_part)
+        if isinstance(parsed, list):
+            findings = [
+                f for f in parsed if isinstance(f, dict)]
+        else:
+            return [], prose, False
+    except Exception:  # noqa: BLE001
+        try:
+            start = json_part.index("[")
+            end = json_part.rindex("]") + 1
+            parsed = json.loads(json_part[start:end])
+            if isinstance(parsed, list):
+                findings = [
+                    f for f in parsed if isinstance(f, dict)]
+            else:
+                return [], prose, False
+        except Exception:  # noqa: BLE001
+            return [], prose, False
+    return findings, prose, True
+
+
+def _normalise_severity(s: Any) -> str:
+    if not isinstance(s, str):
+        return "Minor"
+    cap = s.strip().capitalize()
+    return cap if cap in _CRITIC_SEVERITY_ORDER else "Minor"
+
+
+def _critic_signature(
+    f: dict[str, Any],
+) -> tuple[str, str, str, str]:
+    """Dedup key for merge: target_document + category + location +
+    first 4 normalised words of description. Concern 7e specifies
+    'category + location + similar description' -- adding
+    target_document as a key prevents collapsing a brief finding
+    with a deck finding that share a section name like 'Section 2'.
+    Four words tracks paraphrased descriptions ("Look-ahead bias in
+    backtest implementation" vs "Look-ahead bias in backtest
+    discovered" share the first four words) without false-collapsing
+    distinct findings."""
+    import re as _re
+    def _norm(s: Any) -> str:
+        return _re.sub(
+            r"\s+", " ", str(s or "")).strip().lower()
+    desc_words = _norm(f.get("description")).split()[:4]
+    return (
+        _norm(f.get("target_document")),
+        _norm(f.get("category")),
+        _norm(f.get("location")),
+        " ".join(desc_words),
+    )
+
+
+def _merge_critic_findings(
+    gemini: list[dict[str, Any]],
+    grok: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge per Concern 7e. Same (target_document, category,
+    location, first-4-words) collapses to one entry with
+    agreed=True, raised_by='both', and the harsher severity. Sort
+    by severity (Fatal first) then agreement (true first)."""
+    by_sig: dict[tuple, dict[str, Any]] = {}
+    for f in gemini:
+        sig = _critic_signature(f)
+        by_sig[sig] = {**f, "raised_by": "gemini", "agreed": False}
+    for f in grok:
+        sig = _critic_signature(f)
+        if sig in by_sig:
+            existing = by_sig[sig]
+            sev_existing = _CRITIC_SEVERITY_ORDER.get(
+                _normalise_severity(existing.get("severity")), 2)
+            sev_new = _CRITIC_SEVERITY_ORDER.get(
+                _normalise_severity(f.get("severity")), 2)
+            if sev_new < sev_existing:
+                existing["severity"] = _normalise_severity(
+                    f.get("severity"))
+            existing["agreed"] = True
+            existing["raised_by"] = "both"
+        else:
+            by_sig[sig] = {
+                **f, "raised_by": "grok", "agreed": False}
+    merged = list(by_sig.values())
+    merged.sort(key=lambda f: (
+        _CRITIC_SEVERITY_ORDER.get(
+            _normalise_severity(f.get("severity")), 2),
+        0 if f.get("agreed") else 1,
+    ))
+    return merged
+
+
+def _call_gemini_critic(context_block: str) -> str:
+    """Synchronous Gemini critic call. Returns the raw model output
+    (JSON array + PROSE_SUMMARY) or '' on any failure."""
+    if _is_test_env():
+        return ('[]\nPROSE_SUMMARY: '
+                'Test environment -- no critic findings generated.')
+    try:
+        from agents.base import call_gemini
+        return call_gemini(
+            GEMINI_MODEL,
+            _CRITIC_PROMPT_GEMINI,
+            context_block,
+            trigger="critic_review:gemini",
+            max_output_tokens=_CRITIC_MAX_TOKENS)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "critic_review_gemini_call_failed",
+            error=str(exc))
+        return ""
+
+
+def _call_grok_critic(context_block: str) -> str:
+    """Synchronous Grok critic call. Returns raw model output or ''
+    on any failure."""
+    if _is_test_env():
+        return ('[]\nPROSE_SUMMARY: '
+                'Test environment -- no critic findings generated.')
+    try:
+        from agents._xai_config import (
+            resolve_xai_config, build_headers,
+        )
+        xai = resolve_xai_config()
+        if xai is None:
+            log.warning(
+                "critic_review_grok_call_failed",
+                error="no xai config (no API key)")
+            return ""
+        import httpx
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(
+                xai.chat_url,
+                headers=build_headers(xai.api_key, xai.provider),
+                json={
+                    "model": xai.model,
+                    "messages": [
+                        {"role": "system",
+                         "content": _CRITIC_PROMPT_GROK},
+                        {"role": "user",
+                         "content": context_block},
+                    ],
+                    "max_tokens": _CRITIC_MAX_TOKENS,
+                    "temperature": 0.5,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()[
+                "choices"][0]["message"]["content"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "critic_review_grok_call_failed",
+            error=str(exc))
+        return ""
+
+
+@dataclass
+class CriticResult:
+    """Concern 7e output dataclass. Both per-model raw findings AND
+    the merged list are surfaced so the UI can render Gemini-only /
+    Grok-only badges + the SSE frame can carry the structured
+    payload without re-merging client-side."""
+    gemini_findings: list[dict[str, Any]]
+    grok_findings:   list[dict[str, Any]]
+    merged_findings: list[dict[str, Any]]
+    gemini_prose:    str
+    grok_prose:      str
+    fatal_count:     int
+    major_count:     int
+    minor_count:     int
+    partial_failure: bool
+
+    @property
+    def has_actionable(self) -> bool:
+        """True when the debate round + story-plan injection
+        pipeline should fire. Minor-only findings skip the debate."""
+        return (self.fatal_count + self.major_count) > 0
+
+
+async def run_critic_review(
+    context_block: str,
+    document_type: str | None = None,  # noqa: ARG001
+) -> CriticResult:
+    """Run Gemini + Grok critics in parallel, parse + merge their
+    findings, return a CriticResult. Concern 7e.
+
+    Both helpers are synchronous (httpx + google-genai), so they're
+    spawned via asyncio.to_thread and awaited via asyncio.gather --
+    one model's latency, not two.
+
+    document_type is currently advisory: the context_block already
+    carries scope, so the critics don't need the doc type as a
+    separate input. Kept on the signature for future use (e.g.
+    differential prompts per doc type) without a public API break.
+    """
+    import asyncio as _asyncio
+
+    gemini_raw, grok_raw = await _asyncio.gather(
+        _asyncio.to_thread(_call_gemini_critic, context_block),
+        _asyncio.to_thread(_call_grok_critic,   context_block),
+    )
+
+    gemini_findings, gemini_prose, gemini_parsed = (
+        _critic_parse(gemini_raw))
+    grok_findings, grok_prose, grok_parsed = (
+        _critic_parse(grok_raw))
+
+    # partial_failure -- raised when EITHER model returned empty or
+    # un-parseable output. The merge layer still proceeds with
+    # whichever model succeeded; the UI surfaces a chip so the user
+    # knows the result is one-model-only.
+    partial_failure = (
+        (not gemini_raw or not gemini_parsed)
+        or (not grok_raw or not grok_parsed))
+
+    merged = _merge_critic_findings(
+        gemini_findings, grok_findings)
+
+    fatal = sum(
+        1 for f in merged
+        if _normalise_severity(f.get("severity")) == "Fatal")
+    major = sum(
+        1 for f in merged
+        if _normalise_severity(f.get("severity")) == "Major")
+    minor = sum(
+        1 for f in merged
+        if _normalise_severity(f.get("severity")) == "Minor")
+
+    return CriticResult(
+        gemini_findings=gemini_findings,
+        grok_findings=grok_findings,
+        merged_findings=merged,
+        gemini_prose=gemini_prose,
+        grok_prose=grok_prose,
+        fatal_count=fatal,
+        major_count=major,
+        minor_count=minor,
+        partial_failure=partial_failure,
+    )
 
 
 # ── Peer fan-out ──────────────────────────────────────────────────────────────
