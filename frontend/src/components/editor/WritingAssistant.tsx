@@ -37,6 +37,67 @@ const SUGGESTED = [
   'Check my methodology section',
 ]
 
+
+// Per-document-type review button label. The label names the rubric
+// that will be applied so the user knows what criteria the verdict
+// scores against. June 22 2026 -- replaces the generic "Run Academic
+// Review" label that gave no signal about rubric.
+function reviewButtonLabel(
+  documentType: EditorDocumentType | undefined,
+): string {
+  switch (documentType) {
+    case 'executive_brief':
+      return 'Run Executive Brief Review'
+    case 'analytical_appendix':
+      return 'Run Appendix Review'
+    case 'presentation_deck':
+      return 'Run Deck Review'
+    case 'presentation_script':
+      return 'Run Script Review'
+    default:
+      return 'Run Academic Review'
+  }
+}
+
+
+// Per-document-type rubric note rendered below the review button.
+// Frames WHICH rubric the council will apply so the verdict reads
+// against the right standard. June 22 2026 -- expanded from script-
+// only to all four supported document types after the backend's
+// document-specific rubric switch landed but the frontend wasn't
+// passing the document_type param.
+function reviewFramingNote(
+  documentType: EditorDocumentType,
+): string {
+  switch (documentType) {
+    case 'executive_brief':
+      return (
+        'Executive Brief review applies the 6-section brief rubric '
+        + '(Executive Summary, Methodology, Key Findings, Limitations, '
+        + 'Final Recommendations, Visuals) with weights 15/20/25/15/20/5.')
+    case 'analytical_appendix':
+      return (
+        'Analytical Appendix review evaluates the 8-section appendix '
+        + 'structure (Data + Methodology, Full Performance, Statistical '
+        + 'Tests, Bootstrap CI, Factor Loadings, Crisis Windows, Cost '
+        + 'Sensitivity, Audit Summary) against the appendix-specific '
+        + 'rubric.')
+    case 'presentation_deck':
+      return (
+        'Presentation Deck review evaluates slide flow, visual / data '
+        + 'balance, narrative arc, and time budget against the deck-'
+        + 'specific rubric. Citation formatting does not apply.')
+    case 'presentation_script':
+      return (
+        'Presentation Script review evaluates argument coherence, '
+        + 'audience clarity, slide coverage, and speaker '
+        + 'differentiation. Citation formatting and paragraph '
+        + 'structure do not apply.')
+    default:
+      return ''
+  }
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
@@ -69,13 +130,19 @@ export default function WritingAssistant({
     abortRef.current = controller
     try {
       const token = localStorage.getItem('fc_session_token') ?? ''
-      // For a presentation_script draft, signal to the endpoint that
-      // the SCRIPT-SPECIFIC rubric should be applied — coherence /
-      // clarity / coverage / speaker differentiation, skipping the
-      // written-submission criteria (citation formatting, paragraph
-      // structure). Other document types use the default rubric.
-      const qs = documentType === 'presentation_script'
-        ? '?document_type=presentation_script' : ''
+      // June 22 2026 -- pass document_type for ALL four supported
+      // document types so the backend routes to the document-specific
+      // rubric (executive_brief / analytical_appendix /
+      // presentation_deck / presentation_script). Previously only
+      // presentation_script passed the param; the other three doc
+      // types hit the endpoint with no param and got the midpoint
+      // rubric -- wrong rubric for every document past the May 27
+      // midpoint deadline. The endpoint at
+      // POST /api/council/academic-review already accepts the param
+      // and switches to the matching rubric.
+      const qs = documentType
+        ? `?document_type=${encodeURIComponent(documentType)}`
+        : ''
       const res = await fetch(`/api/council/academic-review${qs}`, {
         method: 'POST',
         headers: { 'X-API-Key': token },
@@ -157,21 +224,25 @@ export default function WritingAssistant({
         <button type="button" onClick={runReview}
           disabled={reviewPhase === 'running'}
           data-tour="editor-academic-review"
+          data-testid="editor-document-review-button"
           className="w-full flex items-center justify-center gap-1.5 text-xs
                      bg-warning/15 text-warning border border-warning/40
                      rounded py-2 hover:bg-warning/25 disabled:opacity-60">
           {reviewPhase === 'running'
             ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Consulting the council…</>
-            : <><GraduationCap className="w-3.5 h-3.5" /> Run Academic Review</>}
+            : <><GraduationCap className="w-3.5 h-3.5" />
+                {' '}{reviewButtonLabel(documentType)}</>}
         </button>
-        {documentType === 'presentation_script' && (
-          // Script-specific framing — the arbiter now applies a rubric
-          // tuned for spoken delivery. Surface what it DOES evaluate
-          // so the presenter reads the verdict correctly.
-          <p className="text-2xs text-muted mt-1.5 leading-relaxed">
-            Academic Review for presentation scripts evaluates argument
-            coherence, audience clarity, and slide coverage. Formatting
-            scores do not apply.
+        {documentType && (
+          // Per-doc framing -- which rubric the review will use.
+          // The user reads this BEFORE clicking so they understand
+          // what criteria the verdict will be scored against.
+          // June 22 2026 -- extended from script-only to all four
+          // supported document types; previously only the script
+          // had a framing note.
+          <p className="text-2xs text-muted mt-1.5 leading-relaxed"
+             data-testid="editor-document-review-framing">
+            {reviewFramingNote(documentType)}
           </p>
         )}
         {reviewPhase === 'error' && (

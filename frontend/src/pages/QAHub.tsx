@@ -769,23 +769,29 @@ export default function QAHub() {
         ) : <AuditViewerSummary />}
       </section>
 
-      {/* Section 3 — Academic Review (read-visible / team-write-gated).
-          Relocated from the Council screen on May 28 2026. The section
-          card + verdict + peer responses are visible to every
-          authenticated user; the Run / Re-run / Cancel buttons are
-          enabled only for team members. State persists across
+      {/* Section 3 — Cross-Document Review (read-visible / team-write-
+          gated). Relocated from the Council screen on May 28 2026.
+          Renamed from "Academic Review" on June 22 2026 to make the
+          cross-document scope explicit -- the same backend endpoint
+          now powers per-document reviews launched from each editor's
+          Writing Assistant panel, and the QA Hub trigger is reserved
+          for the EXPENSIVE all-four-deliverables-together pass run
+          as a final check before submission. State persists across
           navigation via academicReviewStore (Zustand, in-memory,
           keyed on the audit data_hash). */}
       <section
         className="space-y-3"
         data-section-id="academic-review"
-        data-section-label="Academic Review">
+        data-section-label="Cross-Document Review">
         <div>
-          <h2 className="text-base font-semibold text-white">Academic Review</h2>
+          <h2 className="text-base font-semibold text-white">
+            Cross-Document Review
+          </h2>
           <p className="text-xs text-muted mt-0.5">
-            Five-section peer review of the portfolio research by the
-            Council's academic advisor panel. Read-visible to every
-            authenticated user; the Run / Re-run controls are team-only.
+            Reviews all four deliverables together against the panel-
+            defense rubric. Run this after all documents are generated
+            and edited. Individual document reviews live inside each
+            editor's Writing Assistant panel.
           </p>
         </div>
         <AcademicReviewSection />

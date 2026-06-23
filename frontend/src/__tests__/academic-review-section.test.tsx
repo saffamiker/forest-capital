@@ -117,13 +117,17 @@ describe('AcademicReviewSection — Zustand cache survives navigation', () => {
     })
     withPerms(TEAM_PERMS, <AcademicReviewSection />)
     const button = screen.getByTestId('academic-review-run')
-    expect(button.textContent).toContain('Re-run Academic Review')
+    // June 22 2026 -- label changed from "Re-run Academic Review"
+    // to "Re-run Cross-Document Review" to make the QA Hub trigger
+    // distinct from the per-document reviews in each editor's
+    // Writing Assistant panel.
+    expect(button.textContent).toContain('Re-run Cross-Document Review')
   })
 
   it('renders the Run label when no cached verdict exists', () => {
     withPerms(TEAM_PERMS, <AcademicReviewSection />)
     const button = screen.getByTestId('academic-review-run')
-    expect(button.textContent).toContain('Run Academic Review')
+    expect(button.textContent).toContain('Run Cross-Document Review')
   })
 })
 

@@ -32,6 +32,7 @@ import axios from 'axios'
 import {
   GraduationCap, Loader2, X, ChevronDown, ChevronRight, AlertTriangle,
 } from 'lucide-react'
+import CrossDocumentReviewConfirmModal from './CrossDocumentReviewConfirmModal'
 import Markdown from './Markdown'
 import IndependentReviewCard from './IndependentReviewCard'
 import { useIsTeamMember } from '../hooks/usePermissions'
@@ -224,6 +225,14 @@ export default function AcademicReviewSection() {
   const clearStore  = useAcademicReviewStore((s) => s.clear)
 
   const [peersOpen, setPeersOpen] = useState(false)
+  // June 22 2026 -- confirmation gate on the cross-document review
+  // trigger. The cross-document pass fans the council across all
+  // four deliverables + arbiter synthesis -- meaningfully expensive.
+  // Modal opens on click; the actual /api/council/academic-review
+  // POST fires only when the user confirms inside the modal. Per-
+  // document review buttons (in each editor's Writing Assistant)
+  // do NOT have this gate -- those are intentionally one-click.
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
   const running = phase === 'consulting' || phase === 'streaming'
   const hasResult = result !== null
@@ -232,7 +241,14 @@ export default function AcademicReviewSection() {
     && dataHash !== null
     && cachedHash !== dataHash
 
-  const onRun = () => {
+  // Click on the Run / Re-run button opens the confirmation modal.
+  // The actual run is gated behind the modal's confirm action;
+  // see onConfirmRun below.
+  const onRun = (): void => {
+    setConfirmOpen(true)
+  }
+
+  const onConfirmRun = (): void => {
     trackFeature('academic_review_trigger')
     // Re-run path: clear first, then kick a fresh run. The store's
     // runReview also clears its own internal result, so this clear
@@ -264,6 +280,10 @@ export default function AcademicReviewSection() {
 
   return (
     <div className="space-y-3">
+      <CrossDocumentReviewConfirmModal
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        onConfirm={onConfirmRun} />
       {/* Trigger card — prominent border so the action is visible.
           Read content (verdict + peers) renders below; this card is
           the only team-gated surface. */}
@@ -273,15 +293,17 @@ export default function AcademicReviewSection() {
           <div className="min-w-0">
             <h3 className="text-white font-semibold text-sm flex items-center gap-1.5">
               <GraduationCap className="w-4 h-4 text-warning" />
-              Academic Review
+              Cross-Document Review
             </h3>
             {phase === 'idle' && !hasResult && (
               <p className="text-muted text-xs mt-1 leading-relaxed">
-                Five-section academic-review pass on the portfolio
-                research by the Council's academic advisor panel — a
-                rubric-mapped verdict (Strong / Developing /
-                Needs Work). Run it before each deadline to see
-                exactly where the project stands.
+                Full council review across all four deliverables --
+                brief, deck, appendix, and presentation script --
+                against the panel-defense rubric. Expensive to run;
+                most useful as a final check after every document
+                has been generated and edited. Individual document
+                reviews live inside each editor's Writing Assistant
+                panel.
               </p>
             )}
             {phase === 'idle' && hasResult && (
@@ -328,7 +350,9 @@ export default function AcademicReviewSection() {
                 : <GraduationCap className="w-4 h-4" />}
               {running
                 ? 'Reviewing…'
-                : (hasResult ? 'Re-run Academic Review' : 'Run Academic Review')}
+                : (hasResult
+                    ? 'Re-run Cross-Document Review'
+                    : 'Run Cross-Document Review')}
             </TeamActionButton>
           </div>
         </div>
