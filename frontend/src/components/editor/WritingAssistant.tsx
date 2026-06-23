@@ -35,6 +35,19 @@ const REVIEW_LABELS: Record<EditorDocumentType, {
   panelHeading:  string
   framingNote:   string
 }> = {
+  // midpoint_paper is retired post-May 27 but stays in the type
+  // union; ship a stable label here so tsc --noEmit on Vercel
+  // builds accepts the exhaustive Record. The button still routes
+  // through document_type=midpoint_paper on the off chance an
+  // historical draft is opened.
+  midpoint_paper: {
+    buttonLabel:  'Run Academic Review',
+    panelHeading: 'Midpoint Paper Review',
+    framingNote: (
+      'Midpoint paper review (retired May 27 2026) -- the rubric '
+      + 'this evaluates against is the FNA 670 midpoint check '
+      + 'rubric, kept available for historical drafts.'),
+  },
   executive_brief: {
     buttonLabel:  'Review Brief',
     panelHeading: 'Executive Brief Review',
