@@ -234,6 +234,113 @@ class TestDeckStoryPlanBody:
             assert slide_label in text
 
 
+class TestPresentationDisciplineAndSoWhat:
+    """June 22 2026 -- discipline / framing / bullet rules pass
+    added three blocks to _DECK_STORY_PLAN_BODY that constrain
+    the Sonnet writer. These tests pin the blocks against drift
+    so a future edit can't silently weaken the constraints."""
+
+    def test_presentation_discipline_block_present(self):
+        from tools.story_plan import _DECK_STORY_PLAN_BODY
+        text = _DECK_STORY_PLAN_BODY
+        assert "PRESENTATION DISCIPLINE" in text
+        assert "Each slide has exactly ONE job" in text
+        assert "8 seconds" in text
+
+    def test_so_what_framing_block_present(self):
+        from tools.story_plan import _DECK_STORY_PLAN_BODY
+        text = _DECK_STORY_PLAN_BODY
+        assert "SO WHAT FRAMING" in text
+        assert "What does this prove?" in text
+        assert "What is the question?" in text
+
+    def test_locked_titles_list_present(self):
+        """The 12 locked titles must be enumerated explicitly so
+        the Sonnet writer treats them as verbatim."""
+        from tools.story_plan import _DECK_STORY_PLAN_BODY
+        text = _DECK_STORY_PLAN_BODY
+        for snippet in (
+            "Yes -- Regime-Conditional Beats 100% Equity",
+            "Three Strategies, One Question",
+            "53 Months of Unseen Data",
+            "Why Static Allocation Failed in 2022",
+            "Half the Drawdown, Half the Recovery Time",
+            "Does It Hold Up Out-of-Sample? Yes.",
+            "{{CURRENT_REGIME}}",
+            "{{REGIME_CONFIDENCE}}",
+            "2 of 9",
+            "What We Learned",
+            "Live Demo -- analyticsdesk.app",
+            "Yes, With Conditions",
+        ):
+            assert snippet in text, (
+                f"locked title snippet missing: {snippet!r}")
+        # And the "LOCKED -- do not generate alternative" framing.
+        assert "LOCKED" in text
+        assert "verbatim" in text
+
+    def test_bullet_discipline_uses_ceiling_not_target(self):
+        from tools.story_plan import _DECK_STORY_PLAN_BODY
+        text = _DECK_STORY_PLAN_BODY
+        assert "BULLET DISCIPLINE" in text
+        # CEILING framing -- not a target / floor.
+        assert "CEILING" in text
+        assert "Floor is zero" in text
+        assert "Silence beats padding" in text
+
+    def test_bullet_writing_rule_carries_wrong_right_examples(self):
+        from tools.story_plan import _DECK_STORY_PLAN_BODY
+        text = _DECK_STORY_PLAN_BODY
+        assert "BULLET WRITING RULE" in text
+        assert "Wrong:" in text
+        assert "Right:" in text
+        # Pin the substantive content of one example so a refactor
+        # that strips the examples breaks the test.
+        assert "four years of reinvestment" in text
+
+    def test_max_bullets_field_in_schema(self):
+        from tools.story_plan import _DECK_STORY_PLAN_BODY
+        text = _DECK_STORY_PLAN_BODY
+        assert "max_bullets" in text
+        # Schema description must call it a CEILING.
+        assert "CEILING" in text
+
+
+class TestDeckPass1TokenCeiling:
+
+    def test_deck_pass1_max_tokens_at_8000(self):
+        """Pass 1 max_tokens was bumped 6000 -> 8000 to clear the
+        12-slide JSON output plus the new max_bullets field per
+        slide. A regression that drops this back to 6000 risks
+        silent truncation -> fallback -> script gate locked.
+        Pin the value."""
+        import inspect
+        from tools import story_plan
+        source = inspect.getsource(story_plan)
+        # The deck-side Pass 1 invocation is the one inside the
+        # context after the "PRESENTATION ARC" comment block.
+        # Counting deck-side appearances of max_tokens=8000:
+        # there are TWO Pass-1 callsites currently (Pass 1a and
+        # Pass 1b speaker notes); we just need to confirm the
+        # deck-pass-1 (slide_plan) callsite is at 8000.
+        assert "max_tokens=8000" in source
+        # And the explanatory comment justifying the bump.
+        assert ("12-slide structure (PR #375)" in source
+                or "12-slide" in source)
+
+
+class TestDeterministicFallbackCarriesGateComment:
+
+    def test_fallback_docstring_warns_about_gate_behaviour(self):
+        from tools.story_plan import _deterministic_deck_plan
+        doc = (_deterministic_deck_plan.__doc__ or "")
+        assert "GATE BEHAVIOUR" in doc
+        assert "deterministic_fallback" in doc
+        # Pin the actionable guidance: future improvements must
+        # consider gate vs tag.
+        assert "consider whether" in doc
+
+
 # ── 4. _BRIEF_SECTION_PLAN_BODY -- §1 + §3 instructions ──────────────
 
 

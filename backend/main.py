@@ -13789,6 +13789,20 @@ def _generate_one_deck_slide(
     if slide_plan_entry and isinstance(slide_plan_entry, dict):
         anchors = slide_plan_entry.get("numeric_anchors") or {}
         bullets = slide_plan_entry.get("slide_bullets") or []
+        # June 22 2026 -- read max_bullets from the locked plan
+        # entry. CEILING, not target -- "no more than N", never
+        # "write exactly N". Default 3 for slides without an
+        # explicit cap (the spec block's BULLET DISCIPLINE
+        # constraint covers the rest). The locked plan is the
+        # source of truth; without this wire-through the
+        # max_bullets schema field is decorative and the per-
+        # slide writer ignores the slide-specific cap.
+        try:
+            max_bullets = int(
+                slide_plan_entry.get("max_bullets") or 3)
+        except (TypeError, ValueError):
+            max_bullets = 3
+        max_bullets = max(0, min(max_bullets, 3))
         bullets_block = (
             "\n".join(f"  - {b}" for b in bullets)
             if bullets else "  (no bullets -- the headline is the slide)")
@@ -13798,12 +13812,14 @@ def _generate_one_deck_slide(
             f"  Key visual: {slide_plan_entry.get('key_visual', '')}\n"
             "  Numeric anchors (use ONLY these values):\n"
             f"{_json.dumps(anchors, indent=4, default=str)}\n"
-            "  Bullets (render these, max 2):\n"
+            f"  Bullets (ceiling {max_bullets}, "
+            "not target -- fewer is better when bullets do not "
+            "add meaning beyond the title and table):\n"
             f"{bullets_block}\n\n"
             "  Your job is layout and prose formatting only. Do not "
             "invent numbers. Do not change the headline. Do not add "
-            "bullets beyond those listed. Write [DATA PENDING] for any "
-            "value not in numeric_anchors.")
+            f"bullets beyond the {max_bullets} ceiling. Write "
+            "[DATA PENDING] for any value not in numeric_anchors.")
     # Layer 2 (June 21 2026) -- prepend the substitution placeholder
     # guide so the per-slide Sonnet writer uses {{TOKEN}} markers
     # instead of raw figures. The platform substitutes verified

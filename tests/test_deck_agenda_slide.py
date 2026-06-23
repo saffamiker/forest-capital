@@ -40,13 +40,15 @@ class TestAgendaSlidePosition:
 
     def test_oos_proof_still_at_slide_1(self):
         """The agenda goes AFTER the OOS proof slide. Slide 1
-        keeps the verdict-first opener."""
+        keeps the verdict-first opener (June 22 2026 -- locked
+        title now states the proof in the title itself)."""
         from tools.academic_deck import SLIDE_TITLES
-        assert SLIDE_TITLES[0] == "Does Diversification Beat 100% Equity?"
+        assert SLIDE_TITLES[0] == (
+            "Yes -- Regime-Conditional Beats 100% Equity Out-of-Sample")
 
     def test_three_strategy_framing_pushed_to_slide_3(self):
         from tools.academic_deck import SLIDE_TITLES
-        assert SLIDE_TITLES[2] == "Static, Dynamic, or Benchmark?"
+        assert SLIDE_TITLES[2] == "Three Strategies, One Question"
 
     def test_ai_methodology_before_live_demo(self):
         """The flip puts AI methodology at slide 10 and the
@@ -55,9 +57,9 @@ class TestAgendaSlidePosition:
         it operate live."""
         from tools.academic_deck import SLIDE_TITLES
         assert SLIDE_TITLES[9] == (
-            "How We Used AI: What Worked and What Didn't")
+            "How We Used AI: What Worked and What We Learned")
         assert SLIDE_TITLES[10] == (
-            "AnalyticsDesk: The Platform Behind the Analysis")
+            "Live Demo -- analyticsdesk.app")
 
     def test_recommendation_pushed_to_slide_12(self):
         from tools.academic_deck import SLIDE_TITLES
@@ -200,6 +202,11 @@ class TestSlide8MacroContextTitleTokenized:
         from tools.academic_deck import SLIDE_TITLES
         title = SLIDE_TITLES[7]  # zero-indexed; slide 8
         assert "{{CURRENT_REGIME}}" in title
+        # June 22 2026 locked title also surfaces the regime
+        # confidence as a second token. SLIDE_TITLES is a plain
+        # list (not an f-string) so the double-brace form passes
+        # through unchanged to the substitution layer.
+        assert "{{REGIME_CONFIDENCE}}" in title
         # And the human-readable framing.
         assert "Live Regime Signal" in title
 
@@ -210,8 +217,9 @@ class TestSlide8MacroContextTitleTokenized:
         from tools.academic_deck import _slice_slide_spec
         spec = _slice_slide_spec(8)
         assert (
-            "Slide 8 -- Macro Context: Live Regime Signal -- "
-            "{{CURRENT_REGIME}}") in spec
+            "Slide 8 -- Live Regime Signal: "
+            "{{CURRENT_REGIME}} at {{REGIME_CONFIDENCE}} "
+            "Confidence") in spec
 
     def test_slide_8_spec_instructs_llm_to_keep_token_literal(self):
         """The slide spec must instruct the LLM to reproduce the
@@ -240,6 +248,77 @@ class TestSlide8MacroContextTitleTokenized:
         # explicitly.
         assert "watchpoint VALUES are live" in spec
         assert "NARRATIVE CONTEXT" in spec
+
+
+# ── Locked titles + slide discipline (June 22 2026) ─────────────────────
+
+
+class TestLockedTitlesAndDiscipline:
+    """The June 22 2026 SO WHAT framing pass locked all 12
+    slide titles and added BULLET DISCIPLINE constraints to
+    the slide spec block. These tests pin the locked titles
+    against drift and confirm the spec carries the discipline
+    block exactly once at the top."""
+
+    def test_all_12_locked_titles(self):
+        from tools.academic_deck import (
+            DECK_SLIDE_COUNT, SLIDE_TITLES,
+        )
+        assert DECK_SLIDE_COUNT == 12
+        expected = [
+            ("Yes -- Regime-Conditional Beats 100% Equity "
+             "Out-of-Sample"),
+            "Agenda",
+            "Three Strategies, One Question",
+            "The Numbers: 0.86 vs 0.43, 53 Months of Unseen Data",
+            "Why Static Allocation Failed in 2022",
+            ("Capital Preservation: Half the Drawdown, Half the "
+             "Recovery Time"),
+            "Does It Hold Up Out-of-Sample? Yes.",
+            ("Live Regime Signal: {{CURRENT_REGIME}} at "
+             "{{REGIME_CONFIDENCE}} Confidence"),
+            "What the Model Gets Wrong: 2 of 9",
+            "How We Used AI: What Worked and What We Learned",
+            "Live Demo -- analyticsdesk.app",
+            "The Answer: Yes, With Conditions",
+        ]
+        assert list(SLIDE_TITLES) == expected
+
+    def test_slide_format_constraints_block_present(self):
+        """The discipline block must sit at the TOP of
+        SLIDE_SPECIFICATIONS (before the per-slide sections) so
+        each slice via _slice_slide_spec preserves the spec
+        block's reference but the constraint header itself is
+        listed once. Spot-check the canonical phrases."""
+        from tools.academic_deck import SLIDE_SPECIFICATIONS
+        assert (
+            "SLIDE FORMAT CONSTRAINTS (non-negotiable, apply to "
+            "every slide):") in SLIDE_SPECIFICATIONS
+        assert "BULLET DISCIPLINE" in SLIDE_SPECIFICATIONS
+        assert ("max_bullets=2 means \"no more than 2\""
+                in SLIDE_SPECIFICATIONS)
+        assert ("\"because\" or \"which means\""
+                in SLIDE_SPECIFICATIONS)
+        assert "Maximum 12 words per bullet" in SLIDE_SPECIFICATIONS
+
+    def test_table_heavy_slides_carry_max_bullets_2(self):
+        """Slides 4, 6, 7, 8, 9, 12 are table-heavy and carry
+        max_bullets: 2 directives in their spec headers. The
+        per-slide writer reads this off the slide_plan entry,
+        but the slide spec also names the cap so the LLM sees
+        it directly even when the plan field is absent."""
+        from tools.academic_deck import _slice_slide_spec
+        for n in (4, 6, 7, 8, 9, 12):
+            spec = _slice_slide_spec(n)
+            assert "max_bullets: 2" in spec, (
+                f"slide {n} should carry max_bullets: 2 in spec")
+
+    def test_non_table_slides_carry_max_bullets_3(self):
+        from tools.academic_deck import _slice_slide_spec
+        for n in (1, 2, 3, 5, 10, 11):
+            spec = _slice_slide_spec(n)
+            assert "max_bullets: 3" in spec, (
+                f"slide {n} should carry max_bullets: 3 in spec")
 
 
 # ── Timing budget ────────────────────────────────────────────────────────

@@ -148,19 +148,38 @@ _DYNAMIC_STRATEGIES = ["MOMENTUM_ROTATION", "REGIME_SWITCHING", "VOL_TARGETING",
 # the slide still appears with its canonical title and a [DATA PENDING]
 # body. SLIDE_CHARTS maps a slide number to the deck-chart role the
 # builder embeds on it.
+# LOCKED TITLES (June 22 2026 -- SO WHAT framing pass).
+# Every title answers either "what does this prove?" (answer
+# slide) or "what is the question?" (setup slide). The Sonnet
+# per-slide writer must use these verbatim or as the
+# token-resolved equivalent -- no alternative titles. SLIDE_TITLES
+# is a plain Python list (not an f-string) so {{TOKEN}} markers
+# stay literal and pass through to the substitution layer.
 SLIDE_TITLES = [
-    "Does Diversification Beat 100% Equity?",                 # 1
-    "Agenda",                                                 # 2 (NEW June 22 2026)
-    "Static, Dynamic, or Benchmark?",                         # 3
-    "Risk-Adjusted Outperformance: The Numbers",              # 4
-    "The 2022 Break: Why Static Allocation Failed",           # 5
-    "Capital Preservation in Bear Regimes",                   # 6
-    "Does It Hold Up Out-of-Sample?",                         # 7
-    "Macro Context: Live Regime Signal -- {{CURRENT_REGIME}}",  # 8
-    "What the Model Gets Wrong",                              # 9
-    "How We Used AI: What Worked and What Didn't",            # 10 (flipped)
-    "AnalyticsDesk: The Platform Behind the Analysis",        # 11 (flipped)
-    "The Answer: Yes, With Conditions",                       # 12
+    # 1 -- answer slide: states the finding up front
+    "Yes -- Regime-Conditional Beats 100% Equity Out-of-Sample",
+    # 2 -- structural agenda (no so-what needed)
+    "Agenda",
+    # 3 -- setup slide: states the next slide's question
+    "Three Strategies, One Question",
+    # 4 -- answer slide: the headline number IS the title
+    "The Numbers: 0.86 vs 0.43, 53 Months of Unseen Data",
+    # 5 -- answer slide: the cause of the 2022 correlation break
+    "Why Static Allocation Failed in 2022",
+    # 6 -- answer slide: the drawdown finding
+    "Capital Preservation: Half the Drawdown, Half the Recovery Time",
+    # 7 -- answer slide (rhetorical question with the answer)
+    "Does It Hold Up Out-of-Sample? Yes.",
+    # 8 -- live regime watchpoints; two tokens resolve at gen time
+    "Live Regime Signal: {{CURRENT_REGIME}} at {{REGIME_CONFIDENCE}} Confidence",
+    # 9 -- intellectual honesty: 2 of 9 failure scenarios
+    "What the Model Gets Wrong: 2 of 9",
+    # 10 -- AI methodology before the live demo (PR #375 flip)
+    "How We Used AI: What Worked and What We Learned",
+    # 11 -- live demo (PR #375 flip)
+    "Live Demo -- analyticsdesk.app",
+    # 12 -- recommendation
+    "The Answer: Yes, With Conditions",
 ]
 DECK_SLIDE_COUNT = len(SLIDE_TITLES)
 
@@ -261,6 +280,28 @@ covered. The panel reads the deck in order."""
 SLIDE_SPECIFICATIONS = f"""\
 SLIDE SPECIFICATIONS
 
+SLIDE FORMAT CONSTRAINTS (non-negotiable, apply to every slide):
+- BULLET DISCIPLINE: Target 2-3 bullets per slide. Hard ceiling 3
+  (2 for slides 4, 6, 7, 8, 9, 12 where a table carries the
+  evidence). Floor is zero -- if you cannot write a bullet that
+  adds meaning beyond what the title and table already state, do
+  not write it. One strong bullet beats two weak ones. Silence
+  beats padding. The slide_plan's max_bullets field is a CEILING,
+  not a target -- max_bullets=2 means "no more than 2", never
+  "write exactly 2".
+- Each bullet must be a "because" or "which means", never a
+  "what". The title and the table state the WHAT. Bullets
+  interpret. Wrong: "OOS Sharpe of the blend: 0.86" (the title
+  already said this). Right: "Nearly double the benchmark's
+  risk-adjusted return on data the model never trained on".
+- Maximum 12 words per bullet. Fragments only -- no full
+  sentences.
+- One headline number or stat per slide, referenced explicitly
+  in the title or first bullet.
+- No sub-bullets under any circumstance.
+- Speaker notes carry the full explanation. The slide carries
+  the signal.
+
 June 22 2026 -- 12-slide structure (agenda inserted at position 2 + AI
 methodology and live demo flipped to slides 10/11). The deck opens with
 the OOS proof point (slide 1), walks the agenda (slide 2), lays evidence
@@ -269,7 +310,8 @@ runs the demo (slide 11), and closes with the investable recommendation
 (slide 12). The AI-before-demo order is deliberate: the panel needs
 context on how the council works before they watch it operate live.
 
-Slide 1 -- Does Diversification Beat 100% Equity?
+Slide 1 -- Yes -- Regime-Conditional Beats 100% Equity Out-of-Sample
+max_bullets: 3
 Message: The regime-conditional blend outperforms the 100% equity \
 benchmark on a risk-adjusted basis in the out-of-sample period.
 Required bullets (no more than 3, answer-first):
@@ -291,6 +333,7 @@ Guardrails: No more than 3 data points. Do not mention HMM, strategy \
 codes, or factor loadings on this slide. Visible answer in 5 seconds.
 
 Slide 2 -- Agenda
+max_bullets: 3
 Message: Walk the panel through the deck structure before diving into \
 evidence. This slide is purely structural -- no data, no tokens, no \
 chart -- so the audience can anchor each upcoming slide to a known \
@@ -313,7 +356,8 @@ panel sees the detail when each section lands. This slide is excluded \
 from brief grounding (SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING) because it \
 is structural, not analytical.
 
-Slide 3 -- Static, Dynamic, or Benchmark?
+Slide 3 -- Three Strategies, One Question
+max_bullets: 3
 Message: Simplify the strategy set to three categories for the panel. \
 Static = Classic 60/40. Dynamic = Regime-conditional blend. Benchmark = \
 100% S&P 500. Everything else is supporting evidence.
@@ -338,7 +382,8 @@ analytical appendix." Time: ~1.5 minutes.
 Guardrails: Do NOT list all 10 strategies. Do NOT use codes \
 (MIN_VARIANCE, VOL_TARGETING). Use plain English on this slide only.
 
-Slide 4 -- Risk-Adjusted Outperformance: The Numbers
+Slide 4 -- The Numbers: 0.86 vs 0.43, 53 Months of Unseen Data
+max_bullets: 2  (table-heavy slide; let the table do the work)
 Message: The dynamic strategy beats the benchmark on every risk-adjusted \
 metric in the out-of-sample period. Static diversification also \
 outperforms but by less.
@@ -362,7 +407,8 @@ edge is smaller. Benchmark is third on every risk-adjusted metric." \
 Time: ~2 minutes.
 Guardrails: OOS period only. Do NOT mix IS and OOS in the same table.
 
-Slide 5 -- The 2022 Break: Why Static Allocation Failed
+Slide 5 -- Why Static Allocation Failed in 2022
+max_bullets: 3
 Message: Pre-2022 equities and bonds were negatively correlated -- \
 diversification was a free hedge. Post-2022 the correlation flipped to \
 +0.68. Regime-conditional allocation adapts; static does not.
@@ -387,7 +433,8 @@ Guardrails: Causal story, not just numbers. No HMM technical detail. \
 Just the economic intuition: correlation broke, static suffered, regime \
 detection adapted.
 
-Slide 6 -- Capital Preservation in Bear Regimes
+Slide 6 -- Capital Preservation: Half the Drawdown, Half the Recovery Time
+max_bullets: 2  (table-heavy slide; let the table do the work)
 Message: The platform's edge is capital preservation when it matters most, \
 not bull-market outperformance.
 Required bullets:
@@ -412,7 +459,8 @@ not sharp reversals." Time: ~2 minutes.
 Guardrails: Be honest about the April 2025 miss. Cumulative returns \
 chart starts at $1.00 in 2002.
 
-Slide 7 -- Does It Hold Up Out-of-Sample?
+Slide 7 -- Does It Hold Up Out-of-Sample? Yes.
+max_bullets: 2  (table-heavy slide; let the table do the work)
 Message: Strategy was designed on pre-2022 data and tested on \
 {{OOS_WINDOW_MONTHS}}+ months \
 of post-2022 data it never saw. It beats the benchmark OOS -- this \
@@ -438,7 +486,8 @@ genuine out-of-sample. The dynamic blend beats the benchmark on both. \
 The static 60/40 wins IS, ties OOS." Time: ~2 minutes.
 Guardrails: Address overfitting head-on. Panel WILL ask.
 
-Slide 8 -- Macro Context: Live Regime Signal -- {{{{CURRENT_REGIME}}}}
+Slide 8 -- Live Regime Signal: {{{{CURRENT_REGIME}}}} at {{{{REGIME_CONFIDENCE}}}} Confidence
+max_bullets: 2  (table-heavy slide; the watchpoint grid is the evidence)
 Message: Connect the live platform regime signal to real macroeconomic \
 conditions. The current regime classification reflects specific \
 observable factors -- not a black box.
@@ -478,7 +527,8 @@ Guardrails: This slide is FOR DISCUSSION ONLY. Add the label: \
 "Live signal as of [generation date] -- for discussion, not academic \
 submission figures."
 
-Slide 9 -- What the Model Gets Wrong
+Slide 9 -- What the Model Gets Wrong: 2 of 9
+max_bullets: 2  (table-heavy slide; the failure scenarios table is the evidence)
 Message: Intellectual honesty is a strength. Edge is capital preservation \
 in sustained bear regimes. NOT designed to call sharp V-shaped reversals. \
 Acknowledge explicitly.
@@ -504,7 +554,8 @@ reversals like April 2025 Liberation Day." Time: ~1.5 minutes.
 Guardrails: Do NOT spin the misses. {PLAY_BY_PLAY_ADD_VALUE}/{PLAY_BY_PLAY_EVENTS} \
 honest framing is academically stronger than cherry-picking wins.
 
-Slide 10 -- How We Used AI: What Worked and What Didn't
+Slide 10 -- How We Used AI: What Worked and What We Learned
+max_bullets: 3
 Message: Rubric explicitly requires discussion of AI use. The panel \
 needs context on how the council works BEFORE they watch the live \
 demo on slide 11. The generator-evaluator council with dissenting \
@@ -534,7 +585,8 @@ Guardrails: Honest and reflective, not promotional. Do NOT list every \
 AI model used. The callout: "Every number in this presentation was \
 verified by deterministic Python recomputation, not LLM arithmetic."
 
-Slide 11 -- AnalyticsDesk: The Platform Behind the Analysis
+Slide 11 -- Live Demo -- analyticsdesk.app
+max_bullets: 3
 Message: Live demo. The slide-10 AI methodology context primes the \
 panel for what they are about to watch. Show three things on the \
 live platform: live regime + CIO recommendation, council output with \
@@ -558,6 +610,7 @@ Guardrails: Live-demo slide. NO data tables. The demo is the live \
 browser pivot.
 
 Slide 12 -- The Answer: Yes, With Conditions
+max_bullets: 2  (table-heavy slide; the conditions table is the evidence)
 Message: Return to the central question with a direct investable answer. \
 Yes diversification outperforms 100% equity -- but only when allocation \
 is regime-conditional. Static helps but is insufficient post-2022. \
