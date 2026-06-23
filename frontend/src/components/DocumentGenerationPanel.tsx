@@ -18,6 +18,7 @@ import {
   CheckCircle, PenLine, RefreshCw, X, Info, Mic, ShieldCheck, ShieldAlert,
   ShieldX,
 } from 'lucide-react'
+import SlideGuidancePanel from './SlideGuidancePanel'
 import TeamGate from './TeamGate'
 import {
   useGenerationJobs, trackJob, cancelJob, dismissJob, loadExistingJobs,
@@ -653,6 +654,29 @@ export default function DocumentGenerationPanel() {
                     </button>
                   </span>
                 </div>
+              )}
+
+              {/* Slide Guidance (June 23 2026) -- deck-specific
+                  configuration artifact. Moved from a sibling on
+                  Reports.tsx into this tile because it is
+                  conceptually paired with deck generation: the
+                  uploaded guidance overlays SLIDE_SPECIFICATIONS
+                  defaults at deck Pass-1 time. Upload is disabled
+                  while a deck job is in progress to prevent a race
+                  where guidance lands too late to affect the
+                  in-flight pipeline. Download + Reset stay enabled
+                  (read-only / state cleanup -- no race). The
+                  TeamGate wrapper mirrors the Generate button --
+                  a viewer should not see upload controls. */}
+              {doc.documentType === 'presentation_deck' && (
+                <TeamGate
+                  block
+                  permission="generate_documents"
+                  tooltip="Slide guidance upload is available to the project team">
+                  <SlideGuidancePanel
+                    uploadDisabled={inProgress}
+                    uploadDisabledTooltip="Deck generation in progress" />
+                </TeamGate>
               )}
             </div>
           )
