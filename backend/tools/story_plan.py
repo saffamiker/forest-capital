@@ -1390,10 +1390,20 @@ def _generate_deck_speaker_notes(
             "object specified. Every slide_number present in the "
             "LOCKED SLIDE PLAN must have a corresponding key in "
             "the output (as a string, e.g. \"1\", \"2\", ...).")
+        # June 22 2026 -- bumped from 5000 to 7000. The Pass-1b
+        # speaker_notes call was hitting the 5000 ceiling and
+        # truncating mid-JSON, producing
+        # story_plan_deck_pass1b_truncated + n_notes=0 in
+        # production. Same shape as the Pass-1a 6000 -> 8000 bump
+        # rationale (PR #384): the 12-slide expansion plus the
+        # speaker-notes prose-per-slide push the JSON output
+        # close to the boundary. 7000 gives headroom; the
+        # absolute model ceiling is 16k so further bumps stay
+        # safe if a future slide expansion needs them.
         raw = call_claude(
             OPUS_MODEL, _DECK_SPEAKER_NOTES_SYSTEM_PROMPT,
             user_prompt,
-            max_tokens=5000,
+            max_tokens=7000,
             trigger="story_plan_deck_pass1b")
         parsed = _parse_plan_json(
             raw, log_key="story_plan_deck_pass1b")

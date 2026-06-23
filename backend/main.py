@@ -8445,7 +8445,7 @@ async def post_verify_all_for_submission(
                 from tools.academic_export import (
                     load_substitution_metric_sources,
                 )
-                rc_rows, fl_rows, cs_payload = (
+                rc_rows, fl_rows, cs_payload, crisis_payload = (
                     await load_substitution_metric_sources())
                 table = get_substitution_table(
                     cur_hash, strategy_cache, cio_row,
@@ -8455,7 +8455,8 @@ async def post_verify_all_for_submission(
                     post_2022_eq_ig_correlation=CORRELATION_POST_2022,
                     regime_conditional=rc_rows,
                     factor_loadings=fl_rows,
-                    cost_sensitivity=cs_payload)
+                    cost_sensitivity=cs_payload,
+                    crisis_performance=crisis_payload)
                 flags = check_cross_deliverable_consistency(
                     documents, table)
                 cross = {
@@ -10804,7 +10805,7 @@ async def get_data_reference_sheet(
         from tools.academic_export import (
             load_substitution_metric_sources,
         )
-        rc_rows, fl_rows, cs_payload = (
+        rc_rows, fl_rows, cs_payload, crisis_payload = (
             await load_substitution_metric_sources())
         if "regime_conditional" in _sig.parameters:
             _kwargs["regime_conditional"] = rc_rows
@@ -10812,10 +10813,13 @@ async def get_data_reference_sheet(
             _kwargs["factor_loadings"] = fl_rows
         if "cost_sensitivity" in _sig.parameters:
             _kwargs["cost_sensitivity"] = cs_payload
+        if "crisis_performance" in _sig.parameters:
+            _kwargs["crisis_performance"] = crisis_payload
     except Exception as exc:  # noqa: BLE001
         log.warning("data_reference_metric_sources_failed",
                     error=str(exc))
-        rc_rows, fl_rows, cs_payload = [], [], None
+        rc_rows, fl_rows, cs_payload, crisis_payload = (
+            [], [], None, None)
     # June 22 2026 -- Gap A diagnostic. After PR #379 wired the
     # live_signals / implied_allocation / cio_row kwargs through
     # correctly, the user reported CURRENT_*_PCT / BLEND_*_WT /
@@ -12824,7 +12828,7 @@ async def _generate_brief_document(
                 load_substitution_metric_sources,
             )
             regime_conditional_rows, factor_loadings_rows, \
-                cost_sensitivity_payload = (
+                cost_sensitivity_payload, crisis_payload = (
                     await load_substitution_metric_sources())
             substitution_table = get_substitution_table(
                 data_hash or "",
@@ -12848,7 +12852,8 @@ async def _generate_brief_document(
                 live_signals=live_signals,
                 regime_conditional=regime_conditional_rows,
                 factor_loadings=factor_loadings_rows,
-                cost_sensitivity=cost_sensitivity_payload)
+                cost_sensitivity=cost_sensitivity_payload,
+                crisis_performance=crisis_payload)
             log.info("substitution_table_built",
                      document_type="executive_brief",
                      data_hash=(data_hash or "")[:8],
@@ -13363,7 +13368,7 @@ async def _generate_appendix_document(
                 load_substitution_metric_sources,
             )
             regime_conditional_rows, factor_loadings_rows, \
-                cost_sensitivity_payload = (
+                cost_sensitivity_payload, crisis_payload = (
                     await load_substitution_metric_sources())
             substitution_table = get_substitution_table(
                 data_hash or "",
@@ -13380,7 +13385,8 @@ async def _generate_appendix_document(
                 live_signals=live_signals,
                 regime_conditional=regime_conditional_rows,
                 factor_loadings=factor_loadings_rows,
-                cost_sensitivity=cost_sensitivity_payload)
+                cost_sensitivity=cost_sensitivity_payload,
+                crisis_performance=crisis_payload)
             log.info("substitution_table_built",
                      document_type="analytical_appendix",
                      data_hash=(data_hash or "")[:8],
@@ -14505,7 +14511,7 @@ async def _generate_deck_document(
                 load_substitution_metric_sources,
             )
             regime_conditional_rows, factor_loadings_rows, \
-                cost_sensitivity_payload = (
+                cost_sensitivity_payload, crisis_payload = (
                     await load_substitution_metric_sources())
             substitution_table = get_substitution_table(
                 data_hash or "",
@@ -14522,7 +14528,8 @@ async def _generate_deck_document(
                 live_signals=live_signals,
                 regime_conditional=regime_conditional_rows,
                 factor_loadings=factor_loadings_rows,
-                cost_sensitivity=cost_sensitivity_payload)
+                cost_sensitivity=cost_sensitivity_payload,
+                crisis_performance=crisis_payload)
             log.info("substitution_table_built",
                      document_type="presentation_deck",
                      data_hash=(data_hash or "")[:8],
@@ -14777,7 +14784,10 @@ _NUMERIC_PLACEHOLDER_GUIDE = (
     "Available placeholders (brief subset):\n"
     "  {{OOS_SHARPE_BLEND}} -- blend out-of-sample Sharpe\n"
     "  {{OOS_SHARPE_BENCHMARK}} -- benchmark OOS Sharpe (same window)\n"
-    "  {{OOS_SHARPE_IMPROVEMENT_PCT}} -- % improvement over benchmark\n"
+    "  {{OOS_SHARPE_IMPROVEMENT_PCT}} -- % improvement over "
+    "benchmark. Token already includes + prefix and % suffix "
+    "(resolves to e.g. '+98%'); do NOT add surrounding + or % "
+    "characters around it.\n"
     "  {{OOS_WINDOW}} -- the OOS window date range\n"
     "  {{OOS_WINDOW_MONTHS}} -- months in OOS window\n"
     "  {{REGIME_SWITCHING_SHARPE}} -- full-period Sharpe\n"

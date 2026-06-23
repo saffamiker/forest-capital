@@ -80,7 +80,12 @@ _TRADING_DAYS_PER_MONTH = 21
 #         now also encodes which of those are populated, and a
 #         version bump ensures pre-#374 entries miss on first
 #         post-deploy request.
-_CACHE_VERSION = 2
+#   v3 -- June 22 2026; added crisis_performance kwarg + new
+#         per-strategy GFC / Rate Shock 2022 drawdown + post-
+#         2022 CAGR tokens. Cache key adds the bool fingerprint
+#         for crisis_performance; the version bump invalidates
+#         v2 entries on first post-deploy request.
+_CACHE_VERSION = 3
 
 
 def format_sharpe(v: Any) -> str:
@@ -219,6 +224,7 @@ def build_substitution_table(
     regime_conditional: list[dict] | None = None,
     factor_loadings: list[dict] | None = None,
     cost_sensitivity: dict | None = None,
+    crisis_performance: dict | None = None,
 ) -> dict[str, str]:
     """Build the deterministic {token -> value} substitution table
     from verified cache values.
@@ -401,6 +407,59 @@ def build_substitution_table(
         "{{BENCHMARK_PRE2022_SHARPE}}":
             format_sharpe(rc_by_strategy.get(
                 "BENCHMARK", {}).get("pre_2022_sharpe")),
+
+        # ── Post-2022 CAGR per brief-side strategy ─────────────────
+        # June 22 2026 -- same source as the POST2022_SHARPE pair
+        # (regime_conditional rows from
+        # analytics.regime_conditional_performance). The fields
+        # already exist on the row (post_2022_cagr); the tokens
+        # were missing so slides 4 and 6 rendered [DATA PENDING]
+        # for per-strategy post-2022 CAGR.
+        "{{REGIME_SWITCHING_POST2022_CAGR}}":
+            format_pct(rc_by_strategy.get(
+                "REGIME_SWITCHING", {}).get("post_2022_cagr")),
+        "{{BENCHMARK_POST2022_CAGR}}":
+            format_pct(rc_by_strategy.get(
+                "BENCHMARK", {}).get("post_2022_cagr")),
+        "{{CLASSIC_6040_POST2022_CAGR}}":
+            format_pct(rc_by_strategy.get(
+                "CLASSIC_60_40", {}).get("post_2022_cagr")),
+
+        # ── Crisis-window drawdowns (June 22 2026) ─────────────────
+        # Sourced from analytics_metrics_cache[crisis_performance]
+        # written by refresh_diversification_metrics (precomputed
+        # _analytics.py:917). Payload shape:
+        #   {"windows": {...},
+        #    "rows": {strategy: {"GFC_2008-2009": {max_dd, ...},
+        #                        "Rate_Shock_2022": {...}, ...}}}
+        # Slides 4 and 6 cite the GFC + Rate Shock 2022 drawdowns
+        # for the three brief-side strategies; previously
+        # [DATA PENDING] because no token existed.
+        "{{REGIME_SWITCHING_GFC_DRAWDOWN}}": format_pct(
+            ((crisis_performance or {}).get("rows") or {})
+                .get("REGIME_SWITCHING", {})
+                .get("GFC_2008-2009", {}).get("max_dd")),
+        "{{BENCHMARK_GFC_DRAWDOWN}}": format_pct(
+            ((crisis_performance or {}).get("rows") or {})
+                .get("BENCHMARK", {})
+                .get("GFC_2008-2009", {}).get("max_dd")),
+        "{{CLASSIC_6040_GFC_DRAWDOWN}}": format_pct(
+            ((crisis_performance or {}).get("rows") or {})
+                .get("CLASSIC_60_40", {})
+                .get("GFC_2008-2009", {}).get("max_dd")),
+        "{{REGIME_SWITCHING_RATE_SHOCK_2022_DRAWDOWN}}":
+            format_pct(
+                ((crisis_performance or {}).get("rows") or {})
+                    .get("REGIME_SWITCHING", {})
+                    .get("Rate_Shock_2022", {}).get("max_dd")),
+        "{{BENCHMARK_RATE_SHOCK_2022_DRAWDOWN}}": format_pct(
+            ((crisis_performance or {}).get("rows") or {})
+                .get("BENCHMARK", {})
+                .get("Rate_Shock_2022", {}).get("max_dd")),
+        "{{CLASSIC_6040_RATE_SHOCK_2022_DRAWDOWN}}": format_pct(
+            ((crisis_performance or {}).get("rows") or {})
+                .get("CLASSIC_60_40", {})
+                .get("Rate_Shock_2022", {}).get("max_dd")),
 
         # ── Correlation regime ─────────────────────────────────────
         "{{PRE_2022_EQ_IG_CORR}}":
@@ -722,22 +781,29 @@ _substitution_cache: dict[tuple, dict[str, str]] = {}
 
 def _cache_key(
     data_hash: str, kwargs: dict,
-) -> tuple[int, str, bool, bool, bool]:
+) -> tuple[int, str, bool, bool, bool, bool]:
     """Compose the composite cache key for get_substitution_table.
 
     Returns (version, data_hash, has_regime_conditional,
-    has_factor_loadings, has_cost_sensitivity). bool() is used
-    instead of length so callers passing an empty list still get
-    distinct treatment from callers passing None -- but two callers
-    passing non-empty lists land on the same key (the data_hash
-    plus the analytics_metrics_cache version handle deeper content
-    invalidation)."""
+    has_factor_loadings, has_cost_sensitivity,
+    has_crisis_performance). bool() is used instead of length so
+    callers passing an empty list still get distinct treatment
+    from callers passing None -- but two callers passing non-empty
+    lists land on the same key (the data_hash plus the
+    analytics_metrics_cache version handle deeper content
+    invalidation).
+
+    June 22 2026 -- 6th element added for crisis_performance kwarg
+    (PR adding crisis-window drawdown tokens). _CACHE_VERSION
+    bumped to 3 in parallel so pre-fix cached entries miss on
+    the first post-deploy request."""
     return (
         _CACHE_VERSION,
         data_hash,
         bool(kwargs.get("regime_conditional")),
         bool(kwargs.get("factor_loadings")),
         bool(kwargs.get("cost_sensitivity")),
+        bool(kwargs.get("crisis_performance")),
     )
 
 

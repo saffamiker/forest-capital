@@ -62,6 +62,9 @@ class TestBuildSubstitutionTableSignature:
             "regime_conditional",
             "factor_loadings",
             "cost_sensitivity",
+            # June 22 2026 -- crisis_performance kwarg added
+            # for slides 4 + 6 crisis-window drawdown tokens.
+            "crisis_performance",
         ):
             assert kwarg in sig.parameters, (
                 f"build_substitution_table missing kwarg: {kwarg}")
@@ -369,19 +372,22 @@ class TestCvar99BenchmarkRemoved:
 
 class TestLoadSubstitutionMetricSources:
 
-    def test_returns_three_element_tuple(self):
+    def test_returns_four_element_tuple(self):
         """ENVIRONMENT=test short-circuits the DB; the helper
-        must still return the three-element tuple shape rather
-        than raising."""
+        must still return the four-element tuple shape rather
+        than raising.
+
+        June 22 2026 -- 4th element (crisis_performance) added.
+        Previously this test asserted len(result) == 3."""
         import asyncio
         from tools.academic_export import (
             load_substitution_metric_sources,
         )
         result = asyncio.run(load_substitution_metric_sources())
         assert isinstance(result, tuple)
-        assert len(result) == 3
-        rc, fl, cs = result
-        # In test env without a warm DB, all three default to
+        assert len(result) == 4
+        rc, fl, cs, crisis = result
+        # In test env without a warm DB, all four default to
         # empty values.
         assert isinstance(rc, list)
         assert isinstance(fl, list)
@@ -401,9 +407,12 @@ class TestLoadSubstitutionMetricSources:
         monkeypatch.setattr(
             "tools.precomputed_analytics.get_latest_metric",
             _broken)
-        rc, fl, cs = asyncio.run(
+        # June 22 2026 -- helper now returns 4-tuple
+        # (rc, fl, cs, crisis) -- crisis_performance added.
+        rc, fl, cs, crisis = asyncio.run(
             academic_export.load_substitution_metric_sources())
         assert rc == []
+        assert crisis is None
         assert fl == []
         assert cs is None
 
@@ -616,21 +625,213 @@ class TestGetSubstitutionTableCacheKey:
 
     def test_cache_key_helper_includes_version_and_fingerprint(self):
         """_cache_key returns a tuple whose first element is the
-        version constant and whose tail is the three bools."""
+        version constant and whose tail is the bool fingerprints
+        for each metric-source kwarg.
+
+        June 22 2026 -- _CACHE_VERSION bumped to 3; tuple gained
+        a 6th element for crisis_performance kwarg."""
         from tools.numeric_substitution import _cache_key
         key_empty = _cache_key("hash-A", {})
-        assert key_empty == (2, "hash-A", False, False, False)
+        assert key_empty == (
+            3, "hash-A", False, False, False, False)
         key_all = _cache_key("hash-A", {
             "regime_conditional": [{"strategy": "BENCHMARK"}],
             "factor_loadings": [{"strategy": "BENCHMARK"}],
             "cost_sensitivity": {"scenarios": [{"bps": 10}]},
+            "crisis_performance": {"rows": {"BENCHMARK": {}}},
         })
-        assert key_all == (2, "hash-A", True, True, True)
+        assert key_all == (
+            3, "hash-A", True, True, True, True)
         # An empty list / empty dict counts as falsy -- that's
         # intentional, the data wasn't really there.
         key_empty_lists = _cache_key("hash-A", {
             "regime_conditional": [],
             "factor_loadings": [],
             "cost_sensitivity": {},
+            "crisis_performance": {},
         })
-        assert key_empty_lists == (2, "hash-A", False, False, False)
+        assert key_empty_lists == (
+            3, "hash-A", False, False, False, False)
+
+
+class TestCrisisPerformanceTokens:
+    """June 22 2026 -- slides 4 and 6 cited per-strategy GFC +
+    Rate Shock 2022 drawdowns + post-2022 CAGR but those tokens
+    didn't exist; the slides rendered [DATA PENDING] for those
+    cells. Wired in via the crisis_performance kwarg + post-2022
+    CAGR tokens reading from the existing regime_conditional
+    payload."""
+
+    def test_crisis_drawdown_tokens_resolve_from_kwarg(self):
+        from tools.numeric_substitution import build_substitution_table
+        crisis_payload = {
+            "rows": {
+                "BENCHMARK": {
+                    "GFC_2008-2009": {"max_dd": -0.526},
+                    "Rate_Shock_2022": {"max_dd": -0.193},
+                },
+                "REGIME_SWITCHING": {
+                    "GFC_2008-2009": {"max_dd": -0.297},
+                    "Rate_Shock_2022": {"max_dd": -0.082},
+                },
+                "CLASSIC_60_40": {
+                    "GFC_2008-2009": {"max_dd": -0.350},
+                    "Rate_Shock_2022": {"max_dd": -0.165},
+                },
+            },
+        }
+        table = build_substitution_table(
+            strategy_cache={}, cio_recommendation={},
+            crisis_performance=crisis_payload)
+        # 1dp percent format.
+        assert table["{{BENCHMARK_GFC_DRAWDOWN}}"] == "-52.6%"
+        assert (table["{{REGIME_SWITCHING_GFC_DRAWDOWN}}"]
+                == "-29.7%")
+        assert table["{{CLASSIC_6040_GFC_DRAWDOWN}}"] == "-35.0%"
+        assert (table["{{BENCHMARK_RATE_SHOCK_2022_DRAWDOWN}}"]
+                == "-19.3%")
+        assert (table["{{REGIME_SWITCHING_RATE_SHOCK_2022_DRAWDOWN}}"]
+                == "-8.2%")
+        assert (table["{{CLASSIC_6040_RATE_SHOCK_2022_DRAWDOWN}}"]
+                == "-16.5%")
+
+    def test_crisis_tokens_em_dash_when_kwarg_missing(self):
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            strategy_cache={}, cio_recommendation={},
+            crisis_performance=None)
+        assert table["{{BENCHMARK_GFC_DRAWDOWN}}"] == "—"
+        assert (table["{{REGIME_SWITCHING_RATE_SHOCK_2022_DRAWDOWN}}"]
+                == "—")
+
+    def test_post_2022_cagr_tokens_resolve_from_regime_conditional(
+            self):
+        """Post-2022 CAGR per strategy was missing -- not because
+        the source field was absent, but because no token existed.
+        regime_conditional rows already carry post_2022_cagr."""
+        from tools.numeric_substitution import build_substitution_table
+        rc_rows = [
+            {"strategy": "REGIME_SWITCHING",
+             "post_2022_cagr": 0.0823},
+            {"strategy": "BENCHMARK",
+             "post_2022_cagr": 0.0234},
+            {"strategy": "CLASSIC_60_40",
+             "post_2022_cagr": 0.0421},
+        ]
+        table = build_substitution_table(
+            strategy_cache={}, cio_recommendation={},
+            regime_conditional=rc_rows)
+        assert (table["{{REGIME_SWITCHING_POST2022_CAGR}}"]
+                == "8.2%")
+        assert table["{{BENCHMARK_POST2022_CAGR}}"] == "2.3%"
+        assert table["{{CLASSIC_6040_POST2022_CAGR}}"] == "4.2%"
+
+    def test_load_substitution_metric_sources_returns_four_tuple(
+            self):
+        """The helper must now return (rc, fl, cs, crisis) per
+        the June 22 2026 wiring. A regression that drops back to
+        the 3-tuple shape would silently un-wire the crisis
+        tokens."""
+        import asyncio
+        from tools.academic_export import (
+            load_substitution_metric_sources,
+        )
+        result = asyncio.run(load_substitution_metric_sources())
+        assert isinstance(result, tuple)
+        assert len(result) == 4, (
+            f"expected 4-tuple, got {len(result)}-tuple")
+        rc, fl, cs, crisis = result
+        assert isinstance(rc, list)
+        assert isinstance(fl, list)
+        assert cs is None or isinstance(cs, dict)
+        assert crisis is None or isinstance(crisis, dict)
+
+
+class TestOosImprovementPctTokenFormatWarning:
+    """June 22 2026 -- slide 1 rendered "+98%%" / "++98%%" in
+    production. The {{OOS_SHARPE_IMPROVEMENT_PCT}} token
+    already includes the + prefix and % suffix; the writer was
+    adding more formatting around it. The SLIDE_SPECIFICATIONS
+    preamble must carry an explicit TOKEN FORMAT NOTE block so
+    every slide spec inherits the warning."""
+
+    def test_slide_specifications_preamble_carries_format_note(self):
+        from tools.academic_deck import SLIDE_SPECIFICATIONS
+        # Collapse all whitespace runs to single spaces for the
+        # substring check so the assertion doesn't fight Python
+        # source-line wrapping in the f-string.
+        import re
+        normalized = re.sub(r"\s+", " ", SLIDE_SPECIFICATIONS)
+        assert "TOKEN FORMAT NOTE" in normalized
+        # The specific token cited by name.
+        assert "{{OOS_SHARPE_IMPROVEMENT_PCT}}" in normalized
+        # The wrong-answer examples are present so the LLM
+        # sees both the offending pattern AND the correct one.
+        assert "++98%%" in normalized
+        assert "+98%%" in normalized
+        # And the right-answer framing.
+        assert ("an improvement of {{OOS_SHARPE_IMPROVEMENT_PCT}}"
+                in normalized)
+
+    def test_deck_placeholder_guide_carries_inline_format_note(self):
+        """Belt-and-suspenders: the deck placeholder guide in
+        main.py advertises the token; the advertisement must
+        carry the format warning inline so the LLM sees it on
+        every per-slide call."""
+        import inspect
+        import main
+        src = inspect.getsource(main)
+        # The advertisement line (concatenated f-string).
+        assert ("Token already includes + prefix and % suffix"
+                in src)
+        # And the verbatim resolved-example.
+        assert "'+98%'" in src
+
+
+class TestPass1bMaxTokensBumped:
+    """June 22 2026 -- Pass-1b (speaker_notes) was truncating
+    mid-JSON at 5000 tokens, producing
+    story_plan_deck_pass1b_truncated + n_notes=0. Bumped to
+    7000 with comfortable headroom. Pin the ceiling so a
+    regression dropping back to 5000 fails immediately."""
+
+    def test_deck_pass1b_max_tokens_at_7000(self):
+        """Static-source pin -- the trigger string
+        story_plan_deck_pass1b uniquely identifies the
+        Pass-1b call. Grep the source for that string + the
+        max_tokens kwarg in the same call_claude block.
+
+        Avoids the monkeypatch route (call_claude is imported
+        inside the function, not at module level; patching
+        the module attribute doesn't work). Source-level
+        assertion is more brittle but still pins the right
+        contract: a regression dropping back to 5000 fails
+        immediately."""
+        import inspect
+        from tools import story_plan as sp
+        src = inspect.getsource(sp)
+        # Find the Pass-1b block: max_tokens kwarg paired with
+        # trigger="story_plan_deck_pass1b" on the SAME call.
+        # The call structure is:
+        #     call_claude(
+        #         OPUS_MODEL, _DECK_SPEAKER_NOTES_SYSTEM_PROMPT,
+        #         user_prompt,
+        #         max_tokens=7000,
+        #         trigger="story_plan_deck_pass1b")
+        # Match max_tokens=N followed within a few lines by the
+        # trigger string.
+        import re
+        m = re.search(
+            r"max_tokens=(\d+)\s*,\s*\n\s*"
+            r"trigger=[\"']story_plan_deck_pass1b[\"']",
+            src)
+        assert m is not None, (
+            "Could not locate Pass-1b call_claude block "
+            "(max_tokens kwarg paired with "
+            "trigger=story_plan_deck_pass1b)")
+        max_tokens = int(m.group(1))
+        assert max_tokens == 7000, (
+            f"Pass-1b max_tokens is {max_tokens} -- expected "
+            "7000 (June 22 2026 bump from 5000 to stop "
+            "production truncation -- "
+            "story_plan_deck_pass1b_truncated + n_notes=0).")
