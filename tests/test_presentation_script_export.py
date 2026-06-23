@@ -298,12 +298,20 @@ class TestPresentationScriptDocxStructure:
         r = client.post(
             "/api/v1/export/presentation-script", headers=_auth_headers())
         body = _docx_body_xml(r.content)
-        # Slide 1 + slide 9 titles must both appear in the table cells
-        # (they're already in full_script, but the table is the
-        # contract surface the user clicked through for in the spec).
-        assert "Does Diversification Beat 100% Equity?" in body
-        assert "AnalyticsDesk: The Platform Behind the Analysis" in body
-        # Live demo annotation surfaces only on slide 9.
+        # Slide 1 + slide 11 titles must both appear in the table
+        # cells (they're already in full_script, but the table is
+        # the contract surface the user clicked through for in
+        # the spec). June 22 2026 -- locked-title pass updated
+        # slide 1 to the verdict-first opener and renumbered the
+        # live demo from slide 9 (11-slide deck) to slide 11
+        # (12-slide deck after PR #375's agenda insert + AI/demo
+        # flip).
+        assert (
+            "Yes -- Regime-Conditional Beats 100% Equity "
+            "Out-of-Sample") in body
+        assert "Live Demo -- analyticsdesk.app" in body
+        # Live demo annotation surfaces only on slide 11 (was
+        # slide 9 in the 11-slide deck).
         assert "Live demo" in body
 
 

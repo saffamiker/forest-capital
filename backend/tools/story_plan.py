@@ -670,6 +670,69 @@ SLIDE 1 -- NON-NEGOTIABLE OPENING:
   (0.63 / 0.54) for the OOS pair on this slide. The audience sees \
   the answer and the proof point in the first visual.
 
+PRESENTATION DISCIPLINE (applies to every slide):
+Each slide has exactly ONE job stated in its title. Prove that job \
+with one number, one table, or one chart reference. Bullets interpret \
+the evidence -- they never repeat the title or re-describe the table. \
+A panel audience reads a slide in 8 seconds. Every bullet must \
+survive that constraint.
+
+The Sonnet writer for each slide receives these constraints. Your \
+story plan must respect them -- do not specify more than 3 key points \
+per slide in the slide_plan, and set max_bullets explicitly per slide \
+(see schema below).
+
+SO WHAT FRAMING (the single most important slide design principle):
+
+Every slide title must answer one of two questions:
+- "What does this prove?" (answer slides: state the finding)
+- "What is the question?" (setup slides: state what the next slide answers)
+
+The body of the slide proves the title with ONE number, ONE table, \
+or ONE chart. The bullets explain WHY that number matters -- never \
+what it is (the title already said it).
+
+Required title framing per slide (LOCKED -- the Sonnet writer must \
+use these verbatim or as the token-resolved equivalent; do not \
+generate alternative titles):
+- Slide 1:  "Yes -- Regime-Conditional Beats 100% Equity Out-of-Sample"
+- Slide 2:  "Agenda" (structural -- no so-what needed)
+- Slide 3:  "Three Strategies, One Question"
+- Slide 4:  "The Numbers: 0.86 vs 0.43, 53 Months of Unseen Data"
+- Slide 5:  "Why Static Allocation Failed in 2022"
+- Slide 6:  "Capital Preservation: Half the Drawdown, Half the Recovery Time"
+- Slide 7:  "Does It Hold Up Out-of-Sample? Yes."
+- Slide 8:  "Live Regime Signal: {{CURRENT_REGIME}} at {{REGIME_CONFIDENCE}} Confidence"
+- Slide 9:  "What the Model Gets Wrong: 2 of 9"
+- Slide 10: "How We Used AI: What Worked and What We Learned"
+- Slide 11: "Live Demo -- analyticsdesk.app"
+- Slide 12: "The Answer: Yes, With Conditions"
+
+BULLET DISCIPLINE (June 22 2026 supplement):
+Target 2-3 bullets per slide. Hard ceiling: never exceed 3 (or 2 for \
+table-heavy slides 4, 6, 7, 8, 9, 12 where the table carries the \
+evidence). Floor is zero -- if you cannot write a bullet that adds \
+meaning beyond what the title and table already state, do not write \
+it. One strong bullet beats two weak ones. Silence beats padding. \
+The max_bullets field in slide_plan is a CEILING, not a target -- \
+max_bullets=2 means "no more than 2", never "write exactly 2".
+
+BULLET WRITING RULE:
+A bullet is a "because" or a "which means" -- never a "what".
+Wrong: "The blend achieved an OOS Sharpe of 0.86" (that is the \
+title's job).
+Right: "Nearly double the benchmark's risk-adjusted return on data \
+the model never trained on".
+Wrong: "Maximum drawdown was -29.7% for the blend versus -52.6% \
+for the benchmark".
+Right: "32 months to recover versus 71 -- that is four years of \
+reinvestment opportunity".
+
+The brief and analytical appendix provide the full analytical \
+grounding. The deck's only job is to communicate the SO WHAT to a \
+panel audience in 18 minutes. Strip everything that does not serve \
+that job.
+
 PRESENTATION ARC (lock in the central_argument + presentation_arc \
 fields of the JSON output):
   Slide 1:    Answer + OOS proof point (0.86 vs 0.43)
@@ -693,9 +756,15 @@ after generation.
 Output schema (return ONLY this JSON object). NOTE: speaker_notes \
 are intentionally OMITTED from this schema. A subsequent Opus pass \
 generates the per-slide speaker_notes conditioned on this locked \
-slide_plan -- splitting the work keeps this pass under the 4000-\
-token ceiling and lets the speaker_notes pass spend more tokens per \
-slide on prose quality.
+slide_plan -- splitting the work keeps this pass under the token \
+ceiling and lets the speaker_notes pass spend more tokens per slide \
+on prose quality.
+
+The max_bullets field is a CEILING ("no more than N"), not a target \
+("write exactly N"). Set max_bullets=2 for slides 4, 6, 7, 8, 9, 12 \
+(table-heavy -- the table is the evidence). Set max_bullets=3 for \
+slides 1, 2, 3, 5, 10, 11. The per-slide Sonnet writer reads this \
+field and refuses to emit more bullets than the cap.
 {
   "central_argument": "<one-sentence thesis>",
   "presentation_arc": "<two-to-three-sentence narrative thread>",
@@ -707,6 +776,7 @@ slide on prose quality.
       "key_visual": "<chart or table name -- one of the platform visuals>",
       "numeric_anchors": {"metric_name": <value>, ...},
       "slide_bullets": ["<bullet>", ...],
+      "max_bullets": <int -- CEILING; 2 for slides 4/6/7/8/9/12; 3 otherwise>,
       "transition_to_next": "<one sentence linking to next slide>"
     }
   ]
@@ -1074,7 +1144,24 @@ def _deterministic_deck_plan(deck_context: dict[str, Any]) -> dict[str, Any]:
     a valid (slide_plan, full_script, anticipated_questions,
     dissenting_view) tuple so the downstream deck rendering never sees
     a missing field. Uses the validated_constants from context so the
-    anchors are still the locked academic figures."""
+    anchors are still the locked academic figures.
+
+    GATE BEHAVIOUR: this fallback's `_model` field is set to
+    `deterministic_fallback`. The script unlock gate
+    (_deck_story_plan_status at main.py:8261-8304) explicitly checks
+    `plan.get("_model") != "deterministic_fallback"` and returns
+    (False, False) when the cached row carries this tag. Result: a
+    fallback plan IS cached but the script card stays in the
+    "Generate Deck First" state until a real Opus pass succeeds.
+
+    Any future improvement to this fallback (e.g. expanding to all
+    12 slides to give a more useful preview) MUST consider whether
+    to also change the gate logic OR change this fallback's _model
+    tag -- otherwise the improved fallback still won't unlock the
+    script card. Today's behaviour is intentional: the gate
+    deliberately blocks document generation against a fallback row
+    so the user doesn't ship a deck built from incomplete plan
+    data. June 22 2026."""
     constants = (deck_context or {}).get("validated_constants") or {}
     blend = constants.get("oos_sharpe_regime_conditional")
     bench = constants.get("oos_sharpe_benchmark")
@@ -1493,15 +1580,22 @@ def generate_deck_story_plan(
         # ("Generate Deck First" symptom on the script card even
         # though a deck draft existed).
         #
-        # 6000 matches the brief story plan's ceiling at line 1465
-        # and gives headroom for 11 slides + the locked numeric
-        # anchors per slide.
+        # 6000 matched the 11-slide deck with headroom for the
+        # locked numeric anchors. The 12-slide structure (PR #375)
+        # plus the new SO WHAT framing + max_bullets field per
+        # slide (June 22 2026) push the JSON output close to the
+        # boundary; 6000 is borderline and a transient overrun
+        # truncates the JSON mid-slide, fails the parse, and
+        # falls back to _deterministic_deck_plan -- which the
+        # script gate rejects (see comment at
+        # _deterministic_deck_plan). 8000 removes the risk for
+        # the foreseeable future.
         raw, score, attempts = _run_pass1_with_harness(
             system_prompt=grounded_system_prompt,
             user_prompt=user_prompt,
             evaluator_prompt=STORY_PLAN_EVALUATOR_PROMPT,
             agent_id="story_plan_deck",
-            max_tokens=6000)
+            max_tokens=8000)
     except Exception as exc:  # noqa: BLE001
         log.warning("story_plan_deck_pass1_failed", error=str(exc))
         return _deterministic_deck_plan(deck_context)
