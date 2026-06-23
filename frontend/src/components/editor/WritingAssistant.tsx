@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 
 import Markdown from '../Markdown'
+import CriticReviewPanel from '../CriticReviewPanel'
 
 import {
   useAcademicReviewStore,
@@ -222,6 +223,14 @@ export default function WritingAssistant({
           </div>
         )}
       </div>
+
+      {/* Adversarial Critic Review (Concern 7) -- per-document
+          variant below the per-doc academic review trigger. */}
+      {documentType && (
+        <CriticReviewPanel
+          documentType={documentType}
+          variant="editor" />
+      )}
 
 
       {/* AI writing chat */}

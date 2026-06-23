@@ -6327,6 +6327,57 @@ def _parse_overall_rating(verdict: str) -> str | None:
     return m.group(1) if m else None
 
 
+@app.post("/api/council/critic-review")
+@limiter.limit("5/minute")
+async def council_critic_review(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Adversarial critic review using Gemini and Grok in parallel.
+
+    June 23 2026, Concern 7. The existing academic-review council is
+    too collegial. The critic-review endpoint runs an explicitly
+    adversarial pass that hunts for methodological / factual /
+    logical / presentational / citation / consistency errors.
+
+    Two models run via asyncio.gather (one model's latency, not two).
+    Each returns a JSON array of findings + a PROSE_SUMMARY line; the
+    merge layer dedupes overlapping findings, marks them
+    `agreed: True`, and sorts by severity then agreement.
+
+    Query param:
+      document_type — optional. When supplied (executive_brief /
+        presentation_deck / analytical_appendix /
+        presentation_script), runs a per-doc critic review against
+        that draft only. When omitted, runs a full-package review
+        across all four.
+
+    Auth: require_team_member.
+    Rate limit: 5/minute (two external model calls per request).
+    Response: JSON (NOT SSE). Both models run in parallel server-
+    side, then the merged result is returned.
+
+    Fatal findings are surfaced prominently in the response but are
+    NEVER blocking -- the team makes the final call.
+    """
+    from agents.critic_review import run_critic_review
+    document_type_q = request.query_params.get("document_type")
+    if document_type_q not in (
+            None, "", "executive_brief", "presentation_deck",
+            "analytical_appendix", "presentation_script"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be one of executive_brief / "
+                "presentation_deck / analytical_appendix / "
+                "presentation_script, or omitted for full-package "
+                "review."))
+    return await run_critic_review(
+        reviewer_email=session.get("email"),
+        document_type=document_type_q or None)
+
+
 @app.post("/api/council/academic-review")
 @limiter.limit("10/minute")
 async def council_academic_review(request: Request, session: dict = Depends(require_team_member)):

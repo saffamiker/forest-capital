@@ -42,6 +42,9 @@ import {
   AlertCircle, XCircle, AlertTriangle,
 } from 'lucide-react'
 
+import CriticReviewPanel, {
+  type CriticReviewResponse,
+} from './CriticReviewPanel'
 import Markdown from './Markdown'
 import SubmissionReadinessReviewConfirmModal
   from './SubmissionReadinessReviewConfirmModal'
@@ -116,6 +119,10 @@ export default function SubmissionReadinessReview(): React.ReactElement {
   const [verifyData, setVerifyData] =
     useState<VerifyAllResponse | null>(null)
   const [verifyError, setVerifyError] = useState<string | null>(null)
+  // Concern 7h -- critic findings lifted from CriticReviewPanel so
+  // their Fatal / Major counts can fold into the composite verdict.
+  const [criticResponse, setCriticResponse] =
+    useState<CriticReviewResponse | null>(null)
   const [errorsOpen, setErrorsOpen] = useState<
     Record<string, boolean>>({})
   const isTeam = useIsTeamMember()
@@ -140,13 +147,20 @@ export default function SubmissionReadinessReview(): React.ReactElement {
   const academicHasMedium = /\bsevere?ity[:\s]*MEDIUM\b/i
     .test(arbiterText)
 
+  // Concern 7h -- critic findings also feed the verdict:
+  //   Red:   verify-all blocked   OR academic HIGH    OR critic Fatal
+  //   Amber: verify-all attention OR academic MEDIUM  OR critic Major-only
+  //   Green: verify-all ready     AND no academic HIGH AND no critic Fatal
+  const criticHasFatal = (criticResponse?.fatal_count ?? 0) > 0
+  const criticHasMajor = (criticResponse?.major_count ?? 0) > 0
   const compositeVerdict: 'idle' | 'green' | 'amber' | 'red' =
     phase !== 'done' || !verifyData
       ? 'idle'
-      : verifyData.overall === 'blocked' || academicHasHigh
+      : (verifyData.overall === 'blocked' || academicHasHigh
+          || criticHasFatal)
         ? 'red'
-        : verifyData.overall === 'needs_attention'
-          || academicHasMedium
+        : (verifyData.overall === 'needs_attention'
+            || academicHasMedium || criticHasMajor)
           ? 'amber'
           : 'green'
 
@@ -472,6 +486,28 @@ export default function SubmissionReadinessReview(): React.ReactElement {
                 <Markdown content={reviewResult.arbiterText} />
               </div>
             )}
+          </div>
+
+          {/* ── Section C -- Adversarial Critic Review ─────────── */}
+          <div data-testid="submission-readiness-section-c">
+            <h3 className="text-xs font-semibold uppercase
+                          tracking-wide text-slate-300 mb-2">
+              Section C -- Adversarial Critic Review
+            </h3>
+            <p className="text-2xs text-muted leading-relaxed mb-2">
+              Independent Gemini + Grok critics hunt for the
+              methodological, factual, logical, citation, and
+              presentational errors the collegial council in
+              Section B may not surface. Fatal findings flag a
+              non-blocking advisory banner -- the team decides.
+            </p>
+            {/* Pre-flight gate (Concern 5e) at the panel level
+                already ensures all four drafts exist before
+                Section A / B fire; Section C inherits the same
+                guarantee since it shares the same Run button. */}
+            <CriticReviewPanel
+              variant="submission"
+              onResultsChange={(r) => setCriticResponse(r)} />
           </div>
         </div>
       )}
