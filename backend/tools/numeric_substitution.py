@@ -85,7 +85,14 @@ _TRADING_DAYS_PER_MONTH = 21
 #         2022 CAGR tokens. Cache key adds the bool fingerprint
 #         for crisis_performance; the version bump invalidates
 #         v2 entries on first post-deploy request.
-_CACHE_VERSION = 3
+#     v4: Adds the eight data-provenance tokens (EQUITY_SERIES,
+#         IG_SERIES, HY_SERIES, RISK_FREE_SERIES, FACTOR_SERIES,
+#         IG_SPLICE_DATE, HY_EXTENSION_DATE, HY_TRACKING_ERROR)
+#         as static descriptive strings. June 25 2026; the
+#         version bump invalidates v3 entries on first post-
+#         deploy request so the new tokens land in the cached
+#         tables that the editor + audit + receipt all read from.
+_CACHE_VERSION = 4
 
 
 def format_sharpe(v: Any) -> str:
@@ -628,6 +635,41 @@ def build_substitution_table(
             or sum(1 for v in strategy_cache.values()
                    if isinstance(v, dict) and "sharpe_ratio" in v)
             or 10),
+
+        # ── Data provenance (June 25 2026) ──────────────────────
+        # Static descriptive strings naming the canonical data
+        # series the project relies on. These are NOT data-hash
+        # dependent -- the source identities don't change with
+        # the analytics cache -- so they're hardcoded constants
+        # rather than cache reads. Adding them as tokens lets the
+        # Academic Writer reference them verbatim in the brief's
+        # methodology section without paraphrasing, and the
+        # substitution layer resolves them at export time. Every
+        # review flagged the methodology's missing provenance as
+        # MEDIUM severity; with the tokens in place the prompt
+        # can carry the canonical phrasing and the export will
+        # surface it identically across regenerations.
+        "{{EQUITY_SERIES}}": (
+            "S&P 500 total-return index"),
+        "{{IG_SERIES}}": (
+            "iShares iBoxx $ Investment Grade Corporate Bond ETF "
+            "(LQD) prior to 2007, spliced to Vanguard Total Bond "
+            "Market ETF (BND) from 2007 onward"),
+        "{{HY_SERIES}}": (
+            "ICE BofA High Yield Master II Total Return Index "
+            "(FRED: BAMLHYH0A0HYM2TRIV) through December 2025, "
+            "extended via iShares iBoxx $ High Yield Corporate "
+            "Bond ETF (HYG) from January 2026"),
+        "{{RISK_FREE_SERIES}}": (
+            "FRED DTB3 three-month Treasury bill yield "
+            "(time-varying)"),
+        "{{FACTOR_SERIES}}": (
+            "Carhart four-factor series (MKT, SMB, HML, MOM) "
+            "from the Kenneth French data library"),
+        "{{IG_SPLICE_DATE}}": "January 2007",
+        "{{HY_EXTENSION_DATE}}": "January 2026",
+        "{{HY_TRACKING_ERROR}}": (
+            "approximately 0.04% per month"),
     })
 
     return table
