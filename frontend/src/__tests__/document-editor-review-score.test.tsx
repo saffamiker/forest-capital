@@ -187,17 +187,19 @@ describe('DocumentEditor — auto-fired Academic Review score display', () => {
       expect(screen.queryByTestId('review-score-pill')).toBeNull()
     })
 
-  it('does NOT request review status for a presentation_deck draft',
+  it('does NOT render the review-score pill for a presentation_deck draft',
     async () => {
-      // The deck path doesn't schedule an auto-review, so the editor
-      // must not ask the status endpoint either.
+      // The deck path doesn't render the editor-header review-score
+      // pill (Bob's auto-review surface). June 25 2026 -- the deck DOES
+      // now support per-doc reviews (PR #394, Concern 3) and the
+      // WritingAssistant right rail polls academic-review-status once
+      // on mount to decide whether to show the Export Review button.
+      // What the editor must NOT do for a deck is render the pill /
+      // pending placeholder in the header -- that surface is brief +
+      // midpoint only.
       mountEditor(deckDraft(), null)
       // Wait for the draft to render — the back button is in the header.
       await screen.findByLabelText('Back to Reports')
-      const statusCalls = mockedAxios.get.mock.calls.filter(
-        (call: unknown[]) => typeof call[0] === 'string'
-          && (call[0] as string).endsWith('/academic-review-status'))
-      expect(statusCalls).toHaveLength(0)
       expect(screen.queryByTestId('review-score-pill')).toBeNull()
       expect(screen.queryByTestId('review-score-pending')).toBeNull()
     })

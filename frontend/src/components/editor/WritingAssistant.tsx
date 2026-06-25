@@ -13,10 +13,10 @@
  * remain. Below: an AI chat that answers writing questions with the
  * draft's text as context (the document-assistant endpoint).
  */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import {
-  GraduationCap, Loader2, Send, AlertTriangle, Sparkles,
+  GraduationCap, Loader2, Send, AlertTriangle, Sparkles, Download,
 } from 'lucide-react'
 
 import AuditExportButton from '../AuditExportButton'
@@ -148,6 +148,74 @@ export default function WritingAssistant({
     await runPerDocReview(documentType, null, token)
   }
 
+  // June 25 2026 -- "Export Review" button. Visible when a completed
+  // review exists for this draft (either a verdict just streamed
+  // in-session OR the academic-review-status endpoint reports
+  // has_review=true from a previous run). Click downloads the assembled
+  // DOCX via the new /review-export endpoint.
+  const [hasReview, setHasReview] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const verdictPresent = (verdict || '').trim().length > 0
+
+  const refreshHasReview = useCallback(async () => {
+    if (!draftId) return
+    try {
+      const r = await axios.get<{ has_review?: boolean }>(
+        `/api/v1/documents/drafts/${draftId}`
+        + '/academic-review-status')
+      setHasReview(Boolean(r.data?.has_review))
+    } catch {
+      setHasReview(false)
+    }
+  }, [draftId])
+
+  useEffect(() => {
+    void refreshHasReview()
+  }, [refreshHasReview])
+
+  // Flip hasReview true the moment a verdict appears in-session
+  // so the button surfaces immediately after a fresh run without
+  // re-polling.
+  useEffect(() => {
+    if (verdictPresent) setHasReview(true)
+  }, [verdictPresent])
+
+  const handleExportReview = async () => {
+    if (!draftId || exporting) return
+    setExportError(null)
+    setExporting(true)
+    try {
+      const res = await axios.get(
+        `/api/v1/documents/drafts/${draftId}/review-export`,
+        { responseType: 'blob' })
+      const dispo = String(res.headers['content-disposition'] ?? '')
+      const match = /filename="?([^";]+)"?/i.exec(dispo)
+      const filename = match?.[1]
+        ?? `academic-review-draft-${draftId}.docx`
+      const contentType = String(
+        res.headers['content-type'] ?? 'application/octet-stream')
+      const url = URL.createObjectURL(
+        new Blob([res.data], { type: contentType }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.status === 404
+          ? 'No completed review found for this draft.'
+          : err.message)
+        : 'Export failed.'
+      setExportError(msg || 'Export failed.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const send = async (text: string) => {
     const message = text.trim()
     if (!message || chatLoading) return
@@ -234,6 +302,30 @@ export default function WritingAssistant({
               </h4>
             )}
             <Markdown content={verdict} />
+          </div>
+        )}
+        {hasReview && (
+          <div className="mt-2">
+            <button type="button"
+              onClick={() => { void handleExportReview() }}
+              disabled={exporting}
+              data-testid="export-review-button"
+              className="w-full flex items-center justify-center gap-1.5
+                         text-xs bg-electric/15 text-electric border
+                         border-electric/40 rounded py-1.5
+                         hover:bg-electric/25 disabled:opacity-60">
+              {exporting
+                ? <><Loader2 className="w-3 h-3 animate-spin" />
+                    Building DOCX…</>
+                : <><Download className="w-3 h-3" />
+                    Export Review (DOCX)</>}
+            </button>
+            {exportError && (
+              <p className="text-2xs text-danger mt-1"
+                data-testid="export-review-error">
+                {exportError}
+              </p>
+            )}
           </div>
         )}
       </div>
