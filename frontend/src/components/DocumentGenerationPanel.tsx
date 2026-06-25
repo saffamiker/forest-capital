@@ -362,6 +362,41 @@ export default function DocumentGenerationPanel() {
   // completed ones (e.g. generation finished while the user was away).
   useEffect(() => { void loadExistingJobs() }, [])
 
+  // June 25 2026 -- current draft per document_type, regardless of
+  // which team member generated it. The generation-jobs store only
+  // knows about jobs the current session kicked; Bob generating the
+  // brief used to mean Mike couldn't see an Open in Editor button
+  // because no job was tracked in Mike's store. This fetch surfaces
+  // the current draft id for every doc_type so the button renders
+  // for any team member when a draft exists. Default endpoint
+  // already returns one row per document_type max (PR #402).
+  const [currentDraftIdByType, setCurrentDraftIdByType] =
+    useState<Record<string, number>>({})
+  useEffect(() => {
+    let cancelled = false
+    axios.get<{
+      drafts: Array<{
+        id: number
+        document_type: string
+        is_current?: boolean
+      }>
+    }>('/api/v1/documents/drafts')
+      .then((res) => {
+        if (cancelled) return
+        const map: Record<string, number> = {}
+        for (const d of res.data.drafts ?? []) {
+          // The endpoint already scopes to is_current=true but
+          // belt-and-braces filter here in case a caller flips
+          // include_all=true upstream.
+          if (d.is_current === false) continue
+          map[d.document_type] = d.id
+        }
+        setCurrentDraftIdByType(map)
+      })
+      .catch(() => { /* no-op -- button stays hidden on failure */ })
+    return () => { cancelled = true }
+  }, [])
+
   // Stamp "last generated" the first time a job for a type completes.
   const jobs = useGenerationJobs()
   useEffect(() => {
@@ -540,6 +575,13 @@ export default function DocumentGenerationPanel() {
             || job?.status === 'running' || postingId === doc.id
           const error = errors[doc.id]
           const ts = generatedAt[doc.id]
+          // June 25 2026 -- the current draft id for this doc_type
+          // (regardless of who generated it), pulled from the
+          // drafts list endpoint. Used as the Open-in-Editor target
+          // when no generation job is tracked for this session
+          // (e.g. another team member generated the doc).
+          const currentDraftId: number | null =
+            currentDraftIdByType[doc.documentType] ?? null
           const verificationStatus: ExportVerificationStatus | null = (
             exportVerification
               ? (exportVerification[
@@ -732,16 +774,54 @@ export default function DocumentGenerationPanel() {
                       Generation cancelled.
                     </div>
                   )}
+                  {/* June 25 2026 -- when another team member
+                      generated this document and the current
+                      session has no tracked job for it, surface
+                      Open in Editor + Regenerate from the
+                      current-drafts fetch above. The job-only
+                      gate used to leave Bob's brief invisible
+                      to Mike on his Reports page. */}
+                  {currentDraftId !== null
+                    && job?.status !== 'cancelled' && (
+                      <button type="button"
+                        onClick={() => navigate(
+                          `/editor/${currentDraftId}`)}
+                        data-testid={
+                          `open-existing-draft-${doc.id}`}
+                        className="w-full flex items-center
+                                    justify-center gap-1.5
+                                    px-3 py-2 rounded text-xs
+                                    font-semibold bg-electric
+                                    text-white hover:bg-blue-500">
+                        <PenLine className="w-3 h-3" />
+                        Open in Editor
+                      </button>
+                    )}
                   <TeamGate block permission="generate_documents"
                     tooltip="Document generation is available to the project team">
                     <button type="button"
-                      onClick={() => void handleGenerate(doc)}
-                      className="w-full flex items-center justify-center gap-1.5
-                                 px-3 py-2 rounded text-xs font-semibold
-                                 transition-colors bg-electric text-white
-                                 hover:bg-blue-500">
-                      <Download className="w-3 h-3" />
-                      {ts ? 'Regenerate' : 'Generate'}
+                      onClick={() => void handleGenerate(
+                        doc,
+                        currentDraftId !== null
+                          ? { regenerate: true } : undefined)}
+                      className={
+                        currentDraftId !== null
+                          ? 'w-full flex items-center '
+                            + 'justify-center gap-1.5 px-3 py-1.5 '
+                            + 'rounded text-xs border '
+                            + 'border-border text-muted '
+                            + 'hover:text-white hover:bg-navy-700'
+                          : 'w-full flex items-center '
+                            + 'justify-center gap-1.5 px-3 py-2 '
+                            + 'rounded text-xs font-semibold '
+                            + 'transition-colors bg-electric '
+                            + 'text-white hover:bg-blue-500'}>
+                      {currentDraftId !== null
+                        ? <RefreshCw className="w-3 h-3" />
+                        : <Download className="w-3 h-3" />}
+                      {currentDraftId !== null
+                        ? 'Regenerate'
+                        : (ts ? 'Regenerate' : 'Generate')}
                     </button>
                   </TeamGate>
                 </div>
