@@ -142,12 +142,21 @@ def _add_heading(doc: Document, text: str, *, size: int = 13) -> None:
     run.font.size = Pt(size)
 
 
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*(?P<inner>[^*\n]+)\*\*")
+
+
 def _add_body(doc: Document, text: str) -> None:
     """
     Renders blank-line-separated prose — one Word paragraph per block.
     Any [[VERIFY: …]] marker the Academic Writer emitted for an uncertain
     value is rendered bold with a yellow highlight, so it is unmissable
     to whoever refines the draft rather than a silently-trusted figure.
+
+    June 25 2026 -- also parses **markdown bold** runs. The brief's
+    Academic Writer agents emit ``**Finding 1**`` style emphasis;
+    before this change those rendered as literal asterisks. Bold
+    sequences are split out into their own run with run.bold=True so
+    they render correctly in the DOCX.
     """
     for block in (text or "").strip().split("\n\n"):
         block = block.strip()
@@ -157,12 +166,37 @@ def _add_body(doc: Document, text: str) -> None:
         for part in _VERIFY_RE.split(block):
             if not part:
                 continue
-            run = para.add_run(part)
-            run.font.name = _BODY_FONT
-            run.font.size = Pt(12)
             if _VERIFY_RE.fullmatch(part):
+                # The whole part is a [[VERIFY: ...]] marker --
+                # render as a single yellow-highlighted bold run
+                # and skip the markdown bold pass (markers don't
+                # contain ** by contract).
+                run = para.add_run(part)
+                run.font.name = _BODY_FONT
+                run.font.size = Pt(12)
                 run.bold = True
                 run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+                continue
+            # Split on **markdown bold** and emit one run per
+            # segment with the appropriate bold flag.
+            last_end = 0
+            for m in _MARKDOWN_BOLD_RE.finditer(part):
+                if m.start() > last_end:
+                    plain = part[last_end:m.start()]
+                    if plain:
+                        r = para.add_run(plain)
+                        r.font.name = _BODY_FONT
+                        r.font.size = Pt(12)
+                bold_run = para.add_run(m.group("inner"))
+                bold_run.font.name = _BODY_FONT
+                bold_run.font.size = Pt(12)
+                bold_run.bold = True
+                last_end = m.end()
+            tail = part[last_end:]
+            if tail:
+                r = para.add_run(tail)
+                r.font.name = _BODY_FONT
+                r.font.size = Pt(12)
 
 
 def _shade_cell(cell, hex_color: str) -> None:
@@ -940,11 +974,84 @@ def _tiptap_text(node: Any) -> str:
     return "".join(_tiptap_text(c) for c in (node.get("content") or []))
 
 
+def _tiptap_runs(node: Any) -> list[tuple[str, dict[str, bool]]]:
+    """June 25 2026. Walks a TipTap node and emits a flat list of
+    (text, marks_dict) tuples preserving per-text-node formatting.
+    Each tuple's marks dict carries the inline marks the segment
+    should render with:
+
+        {"bold": True}     -> run.bold = True
+        {"italic": True}   -> run.italic = True
+        {"code": True}     -> monospace face
+
+    Used by the editor-export walker so a TipTap text node like
+        {"type": "text", "text": "Finding 1",
+         "marks": [{"type": "bold"}]}
+    becomes a bold run in the DOCX instead of plain text. The
+    previous walker (_tiptap_text) flattened to a plain string and
+    dropped marks entirely, so headings / verdict labels / Section
+    callouts that the generator emitted as bold lost their
+    emphasis in the editor export."""
+    if not isinstance(node, dict):
+        return []
+    if node.get("text"):
+        marks_list = node.get("marks") or []
+        marks: dict[str, bool] = {}
+        for m in marks_list:
+            if isinstance(m, dict) and isinstance(
+                    m.get("type"), str):
+                marks[str(m["type"])] = True
+        return [(str(node["text"]), marks)]
+    out: list[tuple[str, dict[str, bool]]] = []
+    for c in (node.get("content") or []):
+        out.extend(_tiptap_runs(c))
+    return out
+
+
+def _add_body_from_runs(
+    doc: Document,
+    runs: list[tuple[str, dict[str, bool]]],
+    *,
+    prefix: str = "",
+) -> None:
+    """Write one paragraph with per-segment runs that honour the
+    TipTap marks. Mirrors _add_body's [[VERIFY: ...]] yellow-bold
+    highlight pass on each segment so markers nested inside a
+    bolded text node still surface correctly. prefix is prepended
+    as a plain run -- used by the bulletList branch in the editor
+    walker to emit '•  ' before the first text node."""
+    if not runs:
+        return
+    para = doc.add_paragraph()
+    if prefix:
+        p = para.add_run(prefix)
+        p.font.name = _BODY_FONT
+        p.font.size = Pt(12)
+    for text, marks in runs:
+        if not text:
+            continue
+        for part in _VERIFY_RE.split(text):
+            if not part:
+                continue
+            run = para.add_run(part)
+            run.font.name = _BODY_FONT
+            run.font.size = Pt(12)
+            if _VERIFY_RE.fullmatch(part):
+                run.bold = True
+                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+            else:
+                if marks.get("bold"):
+                    run.bold = True
+                if marks.get("italic"):
+                    run.italic = True
+
+
 def build_editor_docx(
     draft: dict[str, Any],
     appendix_data: dict[str, Any] | None = None,
     *,
     brief_data: dict[str, Any] | None = None,
+    brief_substitution_table: dict[str, str] | None = None,
 ) -> bytes:
     """
     Renders an editor draft (a midpoint_paper, executive_brief, or
@@ -1004,19 +1111,33 @@ def build_editor_docx(
             continue
         ntype = node.get("type")
         if ntype == "heading":
+            # Headings are already bold via _add_heading -- inline
+            # marks on the heading's text node don't add new
+            # formatting beyond what the style gives, so the flat
+            # _tiptap_text path stays correct here.
             text = _tiptap_text(node).strip()
             if text:
                 level = (node.get("attrs") or {}).get("level", 1)
                 _add_heading(doc, text, size=13 if level <= 1 else 12)
         elif ntype == "paragraph":
-            text = _tiptap_text(node).strip()
-            if text:
-                _add_body(doc, text)
+            # June 25 2026 -- use the marks-aware walker so bold /
+            # italic text nodes (e.g. **Finding 1** the generator
+            # emits as inline marks) render with their formatting
+            # instead of dropping the marks via _tiptap_text.
+            runs = _tiptap_runs(node)
+            # Trim leading / trailing whitespace on the run sequence
+            # without losing inner whitespace.
+            if runs and not "".join(t for t, _ in runs).strip():
+                continue
+            _add_body_from_runs(doc, runs)
         elif ntype in ("bulletList", "orderedList"):
             for item in (node.get("content") or []):
-                text = _tiptap_text(item).strip()
-                if text:
-                    _add_body(doc, f"•  {text}")
+                runs = _tiptap_runs(item)
+                if not runs:
+                    continue
+                if not "".join(t for t, _ in runs).strip():
+                    continue
+                _add_body_from_runs(doc, runs, prefix="•  ")
 
     # An empty draft still produces a structurally valid document.
     if not nodes:
@@ -1037,7 +1158,8 @@ def build_editor_docx(
     if (draft.get("document_type") == "executive_brief"
             and brief_data is not None):
         _embed_brief_figures(
-            doc, brief_data, substitution_table=None)
+            doc, brief_data,
+            substitution_table=brief_substitution_table)
 
     _add_submission_checklist(doc)
     buf = BytesIO()
