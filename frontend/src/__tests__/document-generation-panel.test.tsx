@@ -194,28 +194,32 @@ describe('DocumentGenerationPanel — async generation', () => {
     expect(button.textContent).toMatch(/Regenerate/i)
   })
 
-  it('Regenerate POSTs the generation endpoint after the user confirms (bridge #90)', async () => {
-    const confirmSpy = vi.spyOn(window, 'confirm')
-      .mockImplementation(() => true)
-    mockedAxios.post.mockResolvedValue({
-      data: { job_id: 'j-deck-2', status: 'pending' } })
-    renderPanel(<DocumentGenerationPanel />)
-    trackJob({
-      job_id: 'j-deck', document_type: 'presentation_deck',
-      status: 'complete', draft_id: 33,
-      download_url: '/api/v1/jobs/j-deck/download', error: null,
+  it('Deck Regenerate opens the RegenConfirmModal and POSTs after '
+    + 'confirm (June 24 2026 -- window.confirm replaced with the '
+    + 'team-replacement modal)', async () => {
+      mockedAxios.post.mockResolvedValue({
+        data: { job_id: 'j-deck-2', status: 'pending' } })
+      renderPanel(<DocumentGenerationPanel />)
+      trackJob({
+        job_id: 'j-deck', document_type: 'presentation_deck',
+        status: 'complete', draft_id: 33,
+        download_url: '/api/v1/jobs/j-deck/download', error: null,
+      })
+      const deckCard = (
+        await screen.findByText(
+          'Final Presentation Deck')).closest(
+          '.card') as HTMLElement
+      const button = await within(deckCard).findByTestId(
+        'regenerate-deck')
+      fireEvent.click(button)
+      // Modal opens (replaces the old window.confirm path).
+      const confirm = await screen.findByTestId(
+        'regen-confirm-modal-confirm')
+      fireEvent.click(confirm)
+      await waitFor(() => expect(mockedAxios.post)
+        .toHaveBeenCalledWith(
+          '/api/v1/export/presentation-deck'))
     })
-    const deckCard = (
-      await screen.findByText('Final Presentation Deck')).closest(
-        '.card') as HTMLElement
-    const button = await within(deckCard).findByTestId(
-      'regenerate-deck')
-    fireEvent.click(button)
-    expect(confirmSpy).toHaveBeenCalled()
-    await waitFor(() => expect(mockedAxios.post)
-      .toHaveBeenCalledWith('/api/v1/export/presentation-deck'))
-    confirmSpy.mockRestore()
-  })
 
   it('Brief Regenerate is a no-op when the user dismisses the '
     + 'BriefRegenConfirmModal (June 23 2026 -- replaces the old '
