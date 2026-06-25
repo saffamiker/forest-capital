@@ -414,16 +414,29 @@ function triggerDownload(blob: Blob, filename: string): void {
  * so the backend renders synchronously in ~200ms and returns the
  * .docx directly as a blob -- no job_id, no polling.
  *
- * The button state mirrors deck_story_plan_available from
- * /api/v1/report/readiness: true -> "Download Script" enabled;
- * false / null -> "Generate Deck First" disabled with a helper line.
+ * Button states:
+ *   - currentDraft exists -> Open in Editor (primary) + Download +
+ *     Regenerate. June 25 2026 -- the script lands as a real
+ *     editor_drafts row (document_type='presentation_script') with
+ *     TipTap content_json, so it edits identically to the brief /
+ *     appendix. The editor already dispatches on isScript at
+ *     DocumentEditor:455 -- no editor changes needed.
+ *   - deckPlanAvailable=true, no draft yet -> Download Script (the
+ *     download itself triggers a generation+persistence path
+ *     server-side; the draft lands on first Download).
+ *   - deckPlanAvailable=false -> Generate Deck First (disabled).
  */
 function PresentationScriptCard({
-  deckPlanAvailable,
-}: { deckPlanAvailable: boolean | null }) {
+  deckPlanAvailable, currentDraft,
+}: {
+  deckPlanAvailable: boolean | null
+  currentDraft: { id: number } | null
+}) {
+  const navigate = useNavigate()
   const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const available = deckPlanAvailable === true
+  const draftId: number | null = currentDraft?.id ?? null
 
   const handleDownload = async () => {
     if (!available || downloading) return
@@ -486,7 +499,56 @@ function PresentationScriptCard({
         Deadline: July 3 (presentation date)
       </div>
 
-      {available ? (
+      {draftId !== null ? (
+        // June 25 2026 -- a current script draft exists; mirror
+        // the brief / appendix tile chrome: Open in Editor as
+        // primary, Download as secondary, Regenerate as tertiary.
+        // Bob/Molly edit the word-for-word text in the same TipTap
+        // editor the other deliverables use; Download fetches a
+        // fresh DOCX server-side (the export endpoint regenerates
+        // the .docx from the editor draft's current state).
+        <div className="flex flex-col gap-1.5">
+          <button type="button"
+            onClick={() => navigate(`/editor/${draftId}`)}
+            data-testid="open-existing-script"
+            className="w-full flex items-center justify-center gap-1.5
+                       px-3 py-2 rounded text-xs font-semibold
+                       bg-electric text-white hover:bg-blue-500">
+            <PenLine className="w-3 h-3" /> Open in Editor
+          </button>
+          <TeamGate block permission="generate_documents"
+            tooltip="Document generation is available to the project team">
+            <button type="button"
+              data-testid="download-presentation-script"
+              onClick={() => void handleDownload()}
+              disabled={downloading}
+              className="w-full flex items-center justify-center
+                         gap-1.5 px-3 py-1.5 rounded text-xs
+                         border border-electric/40 text-electric
+                         hover:bg-electric/10 disabled:opacity-60">
+              {downloading
+                ? <><Loader2 className="w-3 h-3 animate-spin" />
+                    Building script…</>
+                : <><Download className="w-3 h-3" /> Download</>}
+            </button>
+          </TeamGate>
+          <TeamGate block permission="generate_documents"
+            tooltip="Document generation is available to the project team">
+            <button type="button"
+              data-testid="regenerate-presentation-script"
+              onClick={() => void handleDownload()}
+              disabled={downloading || !available}
+              className="w-full flex items-center justify-center
+                         gap-1.5 px-3 py-1.5 rounded text-xs
+                         border border-border text-muted
+                         hover:text-white hover:bg-navy-700
+                         disabled:opacity-50
+                         disabled:cursor-not-allowed">
+              <RefreshCw className="w-3 h-3" /> Regenerate
+            </button>
+          </TeamGate>
+        </div>
+      ) : available ? (
         <TeamGate block permission="generate_documents"
           tooltip="Document generation is available to the project team">
           <button type="button"
@@ -1220,7 +1282,9 @@ export default function DocumentGenerationPanel() {
             but uses its own direct-download flow because there is
             no LLM call to gate behind a job. */}
         <PresentationScriptCard
-          deckPlanAvailable={readinessGate.deck_story_plan_available} />
+          deckPlanAvailable={readinessGate.deck_story_plan_available}
+          currentDraft={
+            currentDraftByType['presentation_script'] ?? null} />
       </div>
       <p className="text-2xs text-muted mt-2">
         Generated documents are first drafts for review — every file carries
