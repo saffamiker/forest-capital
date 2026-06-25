@@ -355,7 +355,7 @@ class TestDeckAppendixGateOnMissingBrief:
         import main as main_module
         from fastapi import HTTPException
 
-        async def _fake_no_brief(_email):
+        async def _fake_no_brief():
             return None
 
         monkeypatch.setattr(
@@ -377,7 +377,7 @@ class TestDeckAppendixGateOnMissingBrief:
         import main as main_module
         from fastapi import HTTPException
 
-        async def _fake_no_brief(_email):
+        async def _fake_no_brief():
             return None
 
         monkeypatch.setattr(
@@ -516,14 +516,14 @@ class TestDeckRequiresAppendixGate:
         import main as main_module
         from fastapi import HTTPException
 
-        async def _fake_brief(_email):
+        async def _fake_brief():
             return {
                 "content_text": "brief body",
                 "content_hash": "abc123",
                 "draft_id": 1,
             }
 
-        async def _fake_no_appendix(_email):
+        async def _fake_no_appendix():
             return None
 
         monkeypatch.setattr(
@@ -552,18 +552,20 @@ class TestDeckRequiresAppendixGate:
     def test_get_appendix_for_grounding_returns_none_when_no_draft(
         self, monkeypatch,
     ):
-        # The grounding helper returns None when the user has no
-        # appendix draft. Same shape as get_brief_for_grounding.
+        # The grounding helper returns None when no appendix
+        # draft exists for the team. June 25 2026 -- team-shared
+        # lookup; the underlying call is now
+        # get_current_draft_by_type (no email arg).
         import asyncio
         from tools import brief_grounding as bg
 
-        async def _no_draft(_email, _doc_type):
+        async def _no_draft(_doc_type):
             return None
 
         monkeypatch.setattr(
-            "tools.editor_drafts.get_current_draft", _no_draft)
-        out = asyncio.run(bg.get_appendix_for_grounding(
-            "ruurdsm@queens.edu"))
+            "tools.editor_drafts.get_current_draft_by_type",
+            _no_draft)
+        out = asyncio.run(bg.get_appendix_for_grounding())
         assert out is None
 
     def test_get_appendix_for_grounding_returns_payload_when_draft_exists(
@@ -572,7 +574,7 @@ class TestDeckRequiresAppendixGate:
         import asyncio
         from tools import brief_grounding as bg
 
-        async def _draft(_email, doc_type):
+        async def _draft(doc_type):
             assert doc_type == "analytical_appendix"
             return {
                 "id": 42,
@@ -580,9 +582,9 @@ class TestDeckRequiresAppendixGate:
             }
 
         monkeypatch.setattr(
-            "tools.editor_drafts.get_current_draft", _draft)
-        out = asyncio.run(bg.get_appendix_for_grounding(
-            "ruurdsm@queens.edu"))
+            "tools.editor_drafts.get_current_draft_by_type",
+            _draft)
+        out = asyncio.run(bg.get_appendix_for_grounding())
         assert out is not None
         assert out["content_text"] == "appendix body content"
         assert out["draft_id"] == 42
