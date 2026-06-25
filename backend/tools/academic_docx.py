@@ -565,6 +565,12 @@ def build_executive_brief(
     # Factor-loading table accompanies the validation prose.
     _add_heading(doc, "2. Methodology Overview")
     _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
+    # June 25 2026 -- Figure 2 (Rolling Correlation) lands inline
+    # after the methodology prose. Section 2 discusses the
+    # regime-conditional model and the 2022 correlation regime
+    # break -- the rolling correlation chart visualises that break.
+    embed_brief_figure_by_key(
+        doc, "rolling_correlation", data, substitution_table)
     h, r = table_factor_loadings(data.get("factor_loadings", []))
     _add_table(doc, "Table 2. Carhart Four-Factor Loadings "
                     "(* significant at p < .05)", h, r)
@@ -574,6 +580,14 @@ def build_executive_brief(
     # the findings (summary statistics + regime-conditional performance).
     _add_heading(doc, "3. Key Findings and Insights")
     _add_body(doc, narratives.get("key_findings", "[DATA PENDING]"))
+    # June 25 2026 -- Figures 1 + 3 land inline in Section 3.
+    # Figure 1 (Cumulative Return) anchors the three-strategy
+    # comparison; Figure 3 (Efficient Frontier) anchors the
+    # volatility-return discussion.
+    embed_brief_figure_by_key(
+        doc, "cumulative_returns", data, substitution_table)
+    embed_brief_figure_by_key(
+        doc, "efficient_frontier", data, substitution_table)
     # Audit-readiness one-liner -- surfaces the platform's audit
     # verdict here (the validation context for the findings claims).
     from tools.audit_summary import audit_summary_sentence
@@ -609,19 +623,31 @@ def build_executive_brief(
     _add_heading(doc, "5. Final Recommendations")
     _add_body(doc, narratives.get(
         "final_recommendations", "[DATA PENDING]"))
+    # June 25 2026 -- Figure 4 (OOS Sharpe Comparison) lands inline
+    # at the end of Section 5; it anchors the OOS Sharpe 0.86 vs
+    # 0.43 conclusion in the final recommendations.
+    embed_brief_figure_by_key(
+        doc, "strategy_comparison", data, substitution_table)
 
-    # Section 6 -- VISUALS. Layer 3b (June 21 2026) wires four inline
-    # APA-formatted figures (Cumulative Return, Rolling Correlation,
-    # Efficient Frontier, OOS Sharpe Comparison). The Section 6 prose
-    # is retained as the introductory paragraph; the four figures are
-    # then embedded below it with APA Figure N / italic title / italic
-    # Note. caption. Each figure renderer is wrapped in
-    # _embed_brief_figure so an unavailable chart (cold cache, render
-    # failure) inserts a placeholder paragraph instead of crashing
-    # brief generation.
+    # Section 6 -- VISUALS. June 25 2026: figures are now placed
+    # inline next to the prose that references them (Section 2:
+    # rolling correlation; Section 3: cumulative return + efficient
+    # frontier; Section 5: OOS Sharpe). Section 6 retains a brief
+    # summary describing what each chart shows so the rubric's
+    # Visuals section still has anchoring prose. The skip_keys
+    # argument prevents duplicate embeds if any inline call failed
+    # silently -- defensive against the (unlikely) case where the
+    # inline embed produced no visible figure.
     _add_heading(doc, "6. Visuals to Demonstrate the Insights")
     _add_body(doc, narratives.get("visuals", "[DATA PENDING]"))
-    _embed_brief_figures(doc, data, substitution_table)
+    _embed_brief_figures(
+        doc, data, substitution_table,
+        skip_keys={
+            "cumulative_returns",
+            "rolling_correlation",
+            "efficient_frontier",
+            "strategy_comparison",
+        })
 
     # Audit Disclosure Appendix carries the platform's audit trail.
     _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
@@ -694,17 +720,92 @@ def _embed_brief_figures(
     doc: Document,
     data: dict[str, Any],
     substitution_table: dict[str, str] | None,
+    *,
+    skip_keys: set[str] | None = None,
 ) -> None:
-    """Layer 3b -- embed the four APA figures into Section 6.
+    """Layer 3b -- embed the four APA figures.
 
     Each figure is added by _embed_brief_figure (see below). The
     iteration is wrapped so a single renderer error never breaks the
     whole loop: each figure stands or falls on its own and produces a
-    placeholder paragraph on failure."""
+    placeholder paragraph on failure.
+
+    skip_keys (June 25 2026) -- a set of renderer keys to skip in
+    this call. Used by the inline-placement path so figures already
+    embedded inline (e.g. cumulative_returns inside Section 3) are
+    not duplicated when Section 6 sweeps up any leftovers."""
+    skip = skip_keys or set()
     for idx, (title, note, renderer_key) in enumerate(
             _BRIEF_FIGURES, start=1):
+        if renderer_key in skip:
+            continue
         _embed_brief_figure(
             doc, idx, title, note, renderer_key, data, substitution_table)
+
+
+# June 25 2026 -- inline-placement triggers. The brief prose
+# references specific concepts that anchor each chart. When the
+# Academic Writer's prose contains a trigger substring (case-
+# insensitive) the corresponding figure renders inline immediately
+# after that paragraph instead of being appended to Section 6.
+# Triggers are intentionally broad -- the agent's exact wording
+# varies between generations. First-trigger wins: a figure that
+# already embedded inline won't re-fire on a later match.
+INLINE_FIGURE_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("cumulative_returns", (
+        "cumulative return",
+        "cumulative portfolio return",
+        "cumulative_returns chart",
+    )),
+    ("rolling_correlation", (
+        "equity-bond correlation",
+        "equity-ig correlation",
+        "correlation regime",
+        "correlation shift",
+        "regime break",
+    )),
+    ("efficient_frontier", (
+        "efficient frontier",
+        "volatility-return",
+        "risk-return frontier",
+    )),
+    ("strategy_comparison", (
+        "oos sharpe",
+        "out-of-sample sharpe",
+        "0.86",   # the canonical OOS_SHARPE_BLEND
+    )),
+)
+
+
+def _figure_index_for_key(renderer_key: str) -> int:
+    """1-based index of the renderer_key within _BRIEF_FIGURES so
+    inline embeds preserve the canonical 'Figure N' numbering even
+    when figures appear out of declaration order in the document."""
+    for idx, (_, _, key) in enumerate(_BRIEF_FIGURES, start=1):
+        if key == renderer_key:
+            return idx
+    return 0
+
+
+def embed_brief_figure_by_key(
+    doc: Document,
+    renderer_key: str,
+    data: dict[str, Any],
+    substitution_table: dict[str, str] | None,
+) -> bool:
+    """Render and embed ONE brief figure identified by its
+    renderer_key. Returns True if the figure was found in
+    _BRIEF_FIGURES and the embed call ran (success or graceful
+    placeholder), False if the key was unknown. Caller is
+    responsible for tracking which keys have been embedded to
+    avoid duplicates."""
+    idx = _figure_index_for_key(renderer_key)
+    if idx == 0:
+        return False
+    title, note, key = _BRIEF_FIGURES[idx - 1]
+    _embed_brief_figure(
+        doc, idx, title, note, key, data, substitution_table)
+    return True
 
 
 def _embed_brief_figure(
@@ -1106,6 +1207,33 @@ def build_editor_docx(
 
     content = draft.get("content_json") or {}
     nodes = content.get("content", []) if isinstance(content, dict) else []
+
+    # June 25 2026 -- inline-figure trigger tracking for the brief
+    # editor export. As we walk paragraphs, check each one's plain
+    # text against INLINE_FIGURE_TRIGGERS. First trigger wins.
+    # Any figures NOT fired inline are appended at the end as a
+    # fallback so the export always carries all four images even
+    # when the author's edits drop the anchor phrases.
+    is_brief = (
+        draft.get("document_type") == "executive_brief"
+        and brief_data is not None)
+    embedded_figure_keys: set[str] = set()
+
+    def _maybe_embed_inline(plain_text: str) -> None:
+        if not is_brief or not plain_text:
+            return
+        lower = plain_text.lower()
+        for key, triggers in INLINE_FIGURE_TRIGGERS:
+            if key in embedded_figure_keys:
+                continue
+            for trig in triggers:
+                if trig in lower:
+                    if embed_brief_figure_by_key(
+                            doc, key, brief_data,
+                            brief_substitution_table):
+                        embedded_figure_keys.add(key)
+                    break
+
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -1124,20 +1252,24 @@ def build_editor_docx(
             # italic text nodes (e.g. **Finding 1** the generator
             # emits as inline marks) render with their formatting
             # instead of dropping the marks via _tiptap_text.
+            # ALSO check the paragraph's plain text against
+            # INLINE_FIGURE_TRIGGERS so the four brief APA figures
+            # land inline next to the prose that references them.
             runs = _tiptap_runs(node)
-            # Trim leading / trailing whitespace on the run sequence
-            # without losing inner whitespace.
-            if runs and not "".join(t for t, _ in runs).strip():
-                continue
-            _add_body_from_runs(doc, runs)
+            joined = "".join(t for t, _ in runs)
+            if runs and joined.strip():
+                _add_body_from_runs(doc, runs)
+                _maybe_embed_inline(joined)
         elif ntype in ("bulletList", "orderedList"):
             for item in (node.get("content") or []):
                 runs = _tiptap_runs(item)
                 if not runs:
                     continue
-                if not "".join(t for t, _ in runs).strip():
+                joined = "".join(t for t, _ in runs)
+                if not joined.strip():
                     continue
                 _add_body_from_runs(doc, runs, prefix="•  ")
+                _maybe_embed_inline(joined)
 
     # An empty draft still produces a structurally valid document.
     if not nodes:
@@ -1150,16 +1282,19 @@ def build_editor_docx(
             and appendix_data is not None):
         _add_appendix_tables(doc, appendix_data)
 
-    # Executive Brief: re-render the four APA chart figures after the
-    # author's prose so the in-editor export carries the visuals the
-    # non-editor regen path embeds. The Section 6 heading and prose
-    # already live in the TipTap nodes from generation, so we append
-    # the figures directly without a duplicate heading. June 25 2026.
+    # Executive Brief: re-render the four APA chart figures. June 25
+    # 2026: each figure is FIRST attempted inline next to the prose
+    # that references it (see _maybe_embed_inline above in the
+    # walker). The remaining figures that didn't match any inline
+    # trigger are appended here as a fallback so the export always
+    # carries all four. skip_keys carries the set of inline-embedded
+    # keys so we don't double up.
     if (draft.get("document_type") == "executive_brief"
             and brief_data is not None):
         _embed_brief_figures(
             doc, brief_data,
-            substitution_table=brief_substitution_table)
+            substitution_table=brief_substitution_table,
+            skip_keys=embedded_figure_keys)
 
     _add_submission_checklist(doc)
     buf = BytesIO()
