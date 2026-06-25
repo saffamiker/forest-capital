@@ -535,6 +535,14 @@ def build_substitution_table(
             strategy_cache.get("play_by_play_value_add", 2)),
         "{{PLAY_BY_PLAY_TOTAL}}": str(
             strategy_cache.get("play_by_play_total", 9)),
+        # June 25 2026 -- the brief's Executive Summary references
+        # the named-event scorecard as PLAY_BY_PLAY_EVENTS. Same
+        # locked constant as PLAY_BY_PLAY_TOTAL (9); kept as a
+        # distinct token so the brief prompt can address it under
+        # the name the prompt template actually uses without
+        # silently leaving a {{TOKEN}} placeholder in the export.
+        "{{PLAY_BY_PLAY_EVENTS}}": str(
+            strategy_cache.get("play_by_play_events", 9)),
 
         # Turnover + net-of-cost Sharpe sensitivity. June 22 2026
         # (wiring fix) -- read from the cost_sensitivity kwarg

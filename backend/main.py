@@ -12300,12 +12300,69 @@ async def _editor_export(editor_draft_id: int) -> Response:
         # re-render the four figures inline, matching the
         # non-editor regen DOCX.
         brief_data = None
+        brief_substitution_table: dict[str, str] | None = None
         if draft.get("document_type") == "executive_brief":
             from tools.academic_export import gather_document_data
             brief_data = await gather_document_data()
+            # June 25 2026 -- build the substitution table so the
+            # four APA figure captions (Figure 1-4 Note. lines)
+            # render with substituted cache values instead of
+            # leaving literal {{DATA_HASH}} / {{OOS_SHARPE_BLEND}} /
+            # {{PRE_2022_EQ_IG_CORR}} / {{N_STRATEGIES}} /
+            # {{OOS_WINDOW}} / {{PLAY_BY_PLAY_EVENTS}} markers.
+            # PR #403 wired _embed_brief_figures into the editor
+            # export but passed substitution_table=None; without
+            # the table the figure captions show raw placeholders.
+            try:
+                from tools.academic_export import (
+                    load_substitution_metric_sources,
+                )
+                from tools.audit_assembler import (
+                    current_data_hash as _ee_cur_hash,
+                )
+                from tools.cio_recommendation import (
+                    get_latest_recommendation as _ee_cio,
+                )
+                from tools.numeric_substitution import (
+                    get_substitution_table,
+                )
+                from tools.academic_deck import (
+                    CORRELATION_POST_2022,
+                    CORRELATION_PRE_2022,
+                    OOS_SHARPE_BENCHMARK,
+                    OOS_SHARPE_REGIME_CONDITIONAL,
+                )
+                cur_hash = await _ee_cur_hash() or ""
+                cio_row = await _ee_cio()
+                rc_rows, fl_rows, cs_payload, crisis_payload = (
+                    await load_substitution_metric_sources())
+                brief_substitution_table = get_substitution_table(
+                    cur_hash,
+                    brief_data.get("strategy_results") or {},
+                    cio_row,
+                    oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
+                    oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                    pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
+                    post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                    regime_conditional=rc_rows,
+                    factor_loadings=fl_rows,
+                    cost_sensitivity=cs_payload,
+                    crisis_performance=crisis_payload)
+            except Exception as _exc:  # noqa: BLE001
+                # Fail-open: a substitution-table build failure
+                # leaves the figure captions with literal
+                # placeholders, but the rest of the brief still
+                # exports. Same posture as the audit -- it'll
+                # surface the unresolved placeholders on the next
+                # regen.
+                log.warning(
+                    "editor_export_substitution_table_failed",
+                    error=str(_exc))
+                brief_substitution_table = None
         content = await asyncio.to_thread(
             build_editor_docx, draft, appendix_data,
-            brief_data=brief_data)
+            brief_data=brief_data,
+            brief_substitution_table=brief_substitution_table)
         media, ext = _DOCX_MEDIA, "docx"
 
     # PR #336 Gap D -- re-run the audit on the EDITED content_text

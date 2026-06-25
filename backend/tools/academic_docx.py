@@ -945,6 +945,7 @@ def build_editor_docx(
     appendix_data: dict[str, Any] | None = None,
     *,
     brief_data: dict[str, Any] | None = None,
+    brief_substitution_table: dict[str, str] | None = None,
 ) -> bytes:
     """
     Renders an editor draft (a midpoint_paper, executive_brief, or
@@ -1037,7 +1038,8 @@ def build_editor_docx(
     if (draft.get("document_type") == "executive_brief"
             and brief_data is not None):
         _embed_brief_figures(
-            doc, brief_data, substitution_table=None)
+            doc, brief_data,
+            substitution_table=brief_substitution_table)
 
     _add_submission_checklist(doc)
     buf = BytesIO()
