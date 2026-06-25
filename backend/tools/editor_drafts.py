@@ -35,11 +35,11 @@ CREATED_FROM = ("generated", "uploaded", "manual")
 _DRAFT_COLS = (
     "id, document_type, owner_email, title, content_json, content_text, "
     "word_count, version, is_current, is_deleted, created_from, "
-    "created_at, updated_at, audit_warnings"
+    "created_at, updated_at, audit_warnings, data_hash"
 )
 _DRAFT_COLS_LAYER3 = (
     _DRAFT_COLS
-    + ", value_manifest, export_verification, data_hash"
+    + ", value_manifest, export_verification"
 )
 _VERSION_COLS = (
     "id, draft_id, version, content_json, content_text, word_count, "
@@ -67,15 +67,20 @@ def _draft_row(r: Any) -> dict[str, Any]:
         "created_at": r[11].isoformat() if r[11] else None,
         "updated_at": r[12].isoformat() if r[12] else None,
         "audit_warnings": r[13],
+        # June 25 2026 (migration 063) -- data_hash is now part of
+        # the base _DRAFT_COLS shape so every selector surfaces it.
+        # NULL on historical drafts created before migration 063;
+        # backfilled to f2e87dec7dcabe71 for is_current=true drafts
+        # by the migration itself.
+        "data_hash": r[14] if len(r) > 14 else None,
     }
-    # Layer 3 columns (value_manifest, export_verification,
-    # data_hash) -- only populated when the caller used the LAYER3
-    # SELECT shape. Defaults to None for the legacy SELECT so
-    # downstream consumers can `.get("value_manifest") or {}`
-    # uniformly without checking for KeyError.
-    base["value_manifest"] = r[14] if len(r) > 14 else None
-    base["export_verification"] = r[15] if len(r) > 15 else None
-    base["data_hash"] = r[16] if len(r) > 16 else None
+    # Layer 3 columns (value_manifest, export_verification) -- only
+    # populated when the caller used the LAYER3 SELECT shape.
+    # Defaults to None for the legacy SELECT so downstream consumers
+    # can `.get("value_manifest") or {}` uniformly without checking
+    # for KeyError.
+    base["value_manifest"] = r[15] if len(r) > 15 else None
+    base["export_verification"] = r[16] if len(r) > 16 else None
     return base
 
 
@@ -435,6 +440,7 @@ async def create_draft(
     content_json: Any, content_text: str | None,
     created_from: str = "manual",
     audit_warnings: Any | None = None,
+    data_hash: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Creates a draft and makes it the current one for this owner +
@@ -480,17 +486,74 @@ async def create_draft(
                 "AND is_current = true "
                 "AND is_deleted = false"),
                 {"t": document_type})
-            row = await s.execute(text(
-                "INSERT INTO editor_drafts (document_type, owner_email, "
-                "title, content_json, content_text, word_count, "
-                "created_from, is_current, audit_warnings) VALUES "
-                "(:t, :e, :ti, CAST(:cj AS JSONB), :ct, :wc, :cf, true, "
-                "CAST(:aw AS JSONB)) "
-                f"RETURNING {_DRAFT_COLS}"),
-                {"t": document_type, "e": owner_email, "ti": title,
-                 "cj": cj, "ct": content_text,
-                 "wc": word_count(content_text), "cf": created_from,
-                 "aw": aw})
+            # June 25 2026 -- INSERT data_hash with a defensive
+            # fallback for environments that haven't yet run
+            # migration 063 (test DBs spun up from an older
+            # baseline, partially-rolled-back staging, etc).
+            # Mirrors the get_draft_with_layer3 pattern: try the
+            # full column set first; on UndefinedColumnError fall
+            # back to the legacy INSERT that omits data_hash. The
+            # legacy fallback's RETURNING shape is also reduced
+            # so _draft_row can still parse the result without
+            # advancing past the missing column.
+            insert_cols = _DRAFT_COLS
+            try:
+                row = await s.execute(text(
+                    "INSERT INTO editor_drafts ("
+                    "document_type, owner_email, "
+                    "title, content_json, content_text, word_count, "
+                    "created_from, is_current, audit_warnings, "
+                    "data_hash"
+                    ") VALUES "
+                    "(:t, :e, :ti, CAST(:cj AS JSONB), :ct, :wc, "
+                    ":cf, true, CAST(:aw AS JSONB), :dh) "
+                    f"RETURNING {insert_cols}"),
+                    {
+                        "t": document_type, "e": owner_email,
+                        "ti": title, "cj": cj,
+                        "ct": content_text,
+                        "wc": word_count(content_text),
+                        "cf": created_from, "aw": aw,
+                        "dh": data_hash,
+                    })
+            except Exception:  # noqa: BLE001
+                # Pre-migration-063 DB: data_hash column doesn't
+                # exist. Rollback the aborted transaction then
+                # retry with the legacy column set. The returned
+                # row carries no data_hash; _draft_row's len(r)
+                # guard surfaces None for the field.
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                # Have to re-run the same is_current clear after
+                # rollback, otherwise the next test sees stale
+                # is_current=true rows from the failed attempt.
+                await s.execute(text(
+                    "UPDATE editor_drafts SET is_current = false "
+                    "WHERE document_type = :t "
+                    "AND is_current = true "
+                    "AND is_deleted = false"),
+                    {"t": document_type})
+                legacy_cols = ", ".join(
+                    c.strip() for c in insert_cols.split(",")
+                    if c.strip() != "data_hash")
+                row = await s.execute(text(
+                    "INSERT INTO editor_drafts ("
+                    "document_type, owner_email, "
+                    "title, content_json, content_text, word_count, "
+                    "created_from, is_current, audit_warnings"
+                    ") VALUES "
+                    "(:t, :e, :ti, CAST(:cj AS JSONB), :ct, :wc, "
+                    ":cf, true, CAST(:aw AS JSONB)) "
+                    f"RETURNING {legacy_cols}"),
+                    {
+                        "t": document_type, "e": owner_email,
+                        "ti": title, "cj": cj,
+                        "ct": content_text,
+                        "wc": word_count(content_text),
+                        "cf": created_from, "aw": aw,
+                    })
             found = row.fetchone()
             # June 25 2026 -- regeneration cascade. Applies only
             # to generated drafts; manual / uploaded paths leave

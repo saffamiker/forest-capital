@@ -5579,10 +5579,21 @@ async def generate_presentation_script(
     result = await asyncio.to_thread(
         generate_script, deck, exec_brief, midpoint)
 
+    # Stamp the live strategy hash on the draft so the tile chip
+    # + Light Refresh status table show 'Data current' rather than
+    # 'No hash' (migration 063 added the column; June 25 2026).
+    try:
+        from tools.audit_assembler import (
+            current_data_hash as _curr_hash,
+        )
+        _script_hash = await _curr_hash()
+    except Exception:  # noqa: BLE001
+        _script_hash = None
     new_draft = await create_draft(
         "presentation_script", email, "Presentation Script",
         result["content_json"], result["content_text"],
-        created_from="generated")
+        created_from="generated",
+        data_hash=_script_hash)
     if new_draft is None:
         ref = uuid.uuid4().hex[:8]
         log.error("script_draft_create_failed", ref=ref)
@@ -14989,12 +15000,22 @@ async def _generate_brief_document(
             audit_warnings = await _run_document_audit(
                 content_text, "executive_brief", email)
 
+            # Stamp the live strategy hash on the draft (migration
+            # 063) so the tile + editor chips render 'Data current'.
+            try:
+                from tools.audit_assembler import (
+                    current_data_hash as _curr_hash_brief,
+                )
+                _brief_hash = await _curr_hash_brief()
+            except Exception:  # noqa: BLE001
+                _brief_hash = None
             draft = await create_draft(
                 "executive_brief", email,
                 f"Executive Brief — {date.today().isoformat()}",
                 content_json, content_text,
                 created_from="generated",
-                audit_warnings=audit_warnings)
+                audit_warnings=audit_warnings,
+                data_hash=_brief_hash)
             if draft is not None:
                 draft_id = draft["id"]
             await _write_audit_metrics(
@@ -15595,10 +15616,19 @@ async def _generate_appendix_document(
                     document_type="analytical_appendix",
                     error=str(_exc))
 
+            # Stamp the live strategy hash (migration 063).
+            try:
+                from tools.audit_assembler import (
+                    current_data_hash as _curr_hash_app,
+                )
+                _app_hash = await _curr_hash_app()
+            except Exception:  # noqa: BLE001
+                _app_hash = None
             draft = await create_draft(
                 "analytical_appendix", email,
                 f"Analytical Appendix — {date.today().isoformat()}",
-                content_json, content_text, created_from="generated")
+                content_json, content_text, created_from="generated",
+                data_hash=_app_hash)
             if draft is not None:
                 draft_id = draft["id"]
 
@@ -16415,12 +16445,21 @@ async def _finalize_deck(
 
         audit_warnings = await _run_document_audit(
             content_text, "presentation_deck", email)
+        # Stamp the live strategy hash (migration 063).
+        try:
+            from tools.audit_assembler import (
+                current_data_hash as _curr_hash_deck,
+            )
+            _deck_hash = await _curr_hash_deck()
+        except Exception:  # noqa: BLE001
+            _deck_hash = None
         draft = await create_draft(
             "presentation_deck", email,
             f"Presentation Deck — {date.today().isoformat()}",
             content_json, content_text,
             created_from="generated",
-            audit_warnings=audit_warnings)
+            audit_warnings=audit_warnings,
+            data_hash=_deck_hash)
         if draft is not None:
             draft_id = draft["id"]
         await _write_audit_metrics(
