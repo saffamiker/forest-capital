@@ -6566,6 +6566,75 @@ def _parse_overall_rating(verdict: str) -> str | None:
     return m.group(1) if m else None
 
 
+async def with_keepalive(producer, interval: float = 20.0):
+    """June 25 2026 -- wrap any async-generator SSE stream so it emits
+    a comment-frame keepalive ping whenever the upstream is silent for
+    `interval` seconds. SSE comment lines (lines starting with ':')
+    are ignored by the standard EventSource parser but reset the
+    connection timeout on every hop between server, Render's edge
+    proxy, the operator's network, and the browser. Without
+    keepalives, a 60-90s arbiter call or a 3-4 min full pipeline
+    looks like a dropped connection to the proxies even though the
+    backend is still running.
+
+    Implementation -- the producer pushes frames into an asyncio.Queue
+    (decoupling the producer's awaits from the consumer's yields)
+    and the consumer wakes every `interval` seconds. If the wakeup
+    found a frame, yield it; if the wakeup hit the timeout, yield
+    a keepalive line. A None sentinel from the producer (placed by
+    the finally below) signals end-of-stream so the consumer
+    drains any pending items and stops.
+
+    Cancellation -- if the producer task is cancelled (client
+    disconnect propagated as CancelledError), the consumer's
+    finally cancels the producer task too and exits without
+    yielding anything else."""
+    import asyncio
+    queue: asyncio.Queue = asyncio.Queue()
+    DONE = object()
+
+    async def _drive() -> None:
+        try:
+            async for msg in producer:
+                await queue.put(msg)
+        except asyncio.CancelledError:
+            # Re-raise so the outer await propagates the cancel.
+            await queue.put(DONE)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "sse_with_keepalive_producer_failed",
+                error=str(exc))
+        finally:
+            await queue.put(DONE)
+
+    producer_task = asyncio.create_task(_drive())
+    try:
+        while True:
+            try:
+                msg = await asyncio.wait_for(
+                    queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                # Producer silent for `interval` seconds -- emit a
+                # keepalive comment frame. Two newlines so the SSE
+                # parser treats it as a complete event boundary.
+                yield ": keepalive\n\n"
+                continue
+            if msg is DONE:
+                # Drain any final items the producer may have queued
+                # in parallel with the sentinel, then exit.
+                break
+            yield msg
+        await producer_task
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+            try:
+                await producer_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
 @app.post("/api/council/academic-review")
 @limiter.limit("10/minute")
 async def council_academic_review(request: Request, session: dict = Depends(require_team_member)):
@@ -6647,14 +6716,52 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             # Arbiter — generated in full and harness-evaluated in a worker
             # thread (the harness is synchronous), then streamed as chunks.
             # The loading state on the frontend covers the evaluation wait.
+            # June 25 2026 -- when the harness exhausts retries and the
+            # final score is below threshold, the arbiter still returns
+            # the best attempt's response; we surface that with an
+            # arbiter_degraded marker frame BEFORE the arbiter_chunk
+            # stream so the client knows the quality threshold wasn't
+            # met. The harness already returns the best-scoring
+            # attempt's text on max retries (see HarnessResult), so the
+            # chunks themselves are still real prose to render -- the
+            # frame is an advisory tag, not a hide.
             arbiter_text = await asyncio.to_thread(
                 run_arbiter_with_harness, context_block, peer_responses,
                 multi_user, script_review, n_strategies, brief_review,
                 deck_review, appendix_review)
+            try:
+                arbiter_metrics = collect_harness_metrics()
+            except Exception:  # noqa: BLE001
+                arbiter_metrics = {}
+            # arbiter_metrics aggregates ALL agents in the harness run
+            # log (peers + arbiter). The arbiter's final_score lives
+            # under average_final_score in the aggregate; a more
+            # accurate per-arbiter score requires the harness's
+            # per-record buf -- defer to the existing telemetry. For
+            # the degraded signal, a below-threshold AVERAGE final
+            # score plus attempts > 1 is enough heuristic to flag.
+            arbiter_degraded = bool(
+                arbiter_metrics
+                and arbiter_metrics.get("average_final_score") is not None
+                and float(arbiter_metrics.get(
+                    "average_final_score", 0)) < 7.0)
+            if arbiter_degraded:
+                yield _sse(
+                    "arbiter_degraded",
+                    average_final_score=arbiter_metrics.get(
+                        "average_final_score"),
+                    agents_retried=arbiter_metrics.get(
+                        "agents_retried"),
+                    message=(
+                        "Arbiter quality threshold was not met after "
+                        "harness retries. The verdict below reflects "
+                        "the best attempt; consider re-running the "
+                        "review."))
             for chunk in chunk_arbiter_text(arbiter_text):
                 yield _sse("arbiter_chunk", text=chunk)
             log.info("academic_review_arbiter_complete",
-                     arbiter_chars=len(arbiter_text))
+                     arbiter_chars=len(arbiter_text),
+                     degraded=arbiter_degraded)
 
             # Independent Review — second-opinion advisory layer. A
             # SEPARATE agent (Gemini) sees ONLY the headline findings
@@ -6950,12 +7057,38 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                 response_summary=arbiter_text,
                 metadata=review_metadata,
             )
+        except asyncio.CancelledError:
+            # Client disconnected mid-stream. Re-raise so the async
+            # generator unwinds cleanly (asyncpg releases the in-
+            # flight connection from record_debate_round /
+            # write_fix_proposals_to_debate). The outer [DONE] in
+            # the finally below is skipped under the CancelledError
+            # propagation -- the client isn't listening anyway.
+            log.info(
+                "academic_review_stream_cancelled",
+                document_type=document_type_q or "full_package")
+            raise
         except Exception as exc:  # noqa: BLE001
             log.error("academic_review_failed", error=str(exc))
             yield _sse("error", message="Academic review failed — please retry.")
-        yield "data: [DONE]\n\n"
+        finally:
+            # June 25 2026 -- always emit [DONE]. The previous
+            # structure had [DONE] after the except block which is
+            # functionally equivalent for the normal exit path but
+            # subtle: any new branch (e.g. an inner return on a
+            # downstream failure) would skip the terminal frame and
+            # leave the client polling forever. The finally
+            # guarantees [DONE] reaches the client on every exit
+            # path except CancelledError (where the client is gone).
+            yield "data: [DONE]\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    # June 25 2026 -- wrap the producer in with_keepalive so the
+    # 60-90s arbiter / 3-4 min full pipeline doesn't trigger a
+    # client / proxy timeout. The wrapper emits a ': keepalive'
+    # comment frame whenever the producer is silent for 20s.
+    return StreamingResponse(
+        with_keepalive(event_stream()),
+        media_type="text/event-stream")
 
 
 # ── Peer Review Assistant (item 7, Feature A) ─────────────────────────────────
