@@ -3577,14 +3577,56 @@ async def post_light_refresh(
         })
 
     all_ok = all(step.get("ok") for step in steps)
+
+    # June 25 2026 -- after a successful refresh, stamp the new
+    # strategy_hash onto every current draft so the editor's hash
+    # status chip reads "Data current" against the fresh cache
+    # rather than showing every draft stale. The light refresh is
+    # explicitly opt-in by a team member with generate_documents
+    # rights; the assumption is that the team intends the refreshed
+    # cache to be the new authoritative baseline. Generation of any
+    # given document is still the user's explicit action -- the
+    # data_hash stamp tracks 'what cache did the team last sync to'
+    # not 'what was the cache when each section was written'.
+    drafts_updated = 0
+    if strategy_hash and all_ok:
+        try:
+            from sqlalchemy import text as _text
+            from database import (
+                AsyncSessionLocal as _ASL,  # type: ignore
+            )
+            if _ASL is not None:
+                async with _ASL() as _s:
+                    r = await _s.execute(_text(
+                        "UPDATE editor_drafts "
+                        "SET data_hash = :h, "
+                        "    updated_at = NOW() "
+                        "WHERE is_current = true "
+                        "  AND is_deleted = false "
+                        "  AND document_type IN ("
+                        "    'executive_brief', "
+                        "    'analytical_appendix', "
+                        "    'presentation_deck', "
+                        "    'presentation_script') "
+                        "RETURNING id"),
+                        {"h": strategy_hash})
+                    drafts_updated = len(r.fetchall())
+                    await _s.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "light_refresh_draft_hash_update_failed",
+                error=str(exc))
+
     log.info(
         "light_refresh_complete",
         all_ok=all_ok,
         strategy_hash=strategy_hash,
+        drafts_updated=drafts_updated,
         actor=session.get("email"))
     return {
         "ok": all_ok,
         "strategy_hash": strategy_hash,
+        "drafts_updated": drafts_updated,
         "steps": steps,
     }
 
