@@ -206,6 +206,90 @@ def academic_review_arbiter_evaluator_prompt() -> str:
     )
 
 
+def academic_review_arbiter_evaluator_prompt_per_doc(
+    document_type: str,
+) -> str:
+    """June 25 2026 -- generic rubric-aware evaluator for the four
+    per-document Academic Review arbiter verdicts (brief / deck /
+    appendix / script).
+
+    The midpoint-specific evaluator (academic_review_arbiter_
+    evaluator_prompt above) was the only one in play before this;
+    its midpoint_appropriateness + section-count checks scored every
+    non-midpoint verdict near zero, dragging the weighted overall to
+    ~0.9 and tripping three harness retries on every brief/deck/
+    appendix/script review. This evaluator drops the midpoint-
+    specific structural assertions and scores the prose on rubric-
+    agnostic quality dimensions that work for any of the four
+    submission rubrics.
+
+    document_type is one of: 'executive_brief' /
+    'analytical_appendix' / 'presentation_deck' /
+    'presentation_script'. The body of the prompt is the same
+    across all four; the doc_type is named only so the evaluator
+    knows the scope of the response it's scoring (which rubric the
+    arbiter was applying).
+    """
+    doc_label = {
+        "executive_brief":     "Executive Brief",
+        "analytical_appendix": "Analytical Appendix",
+        "presentation_deck":   "Final Presentation Deck",
+        "presentation_script": "Presentation Script",
+    }.get(document_type, document_type)
+    return (
+        "You are a strict quality evaluator for a per-document "
+        f"Academic Review verdict. An arbiter has synthesised peer "
+        f"reviews into a final verdict for the {doc_label}. The "
+        "arbiter's rubric is doc-specific (six sections for the "
+        "brief, eight evidence sections for the appendix, slide "
+        "flow for the deck, spoken-delivery criteria for the "
+        "script). Score the verdict on rubric-agnostic quality "
+        "dimensions -- the evaluator does NOT assert a particular "
+        "section count or naming, because that varies between the "
+        "four rubrics.\n\n"
+        "Score the RESPONSE TO EVALUATE in the user message on "
+        "five criteria, each an integer 0-10.\n\n"
+        "CRITERIA:\n"
+        "- structure_clear: Does the verdict carry an explicit "
+        "structure that maps to the rubric the arbiter was "
+        "applying? Markdown headings + per-section ratings count "
+        "as clear structure regardless of which doc type's "
+        "section names appear.\n"
+        "- ratings_present: Does each scored section carry an "
+        "explicit Strong / Developing / Needs Work (or doc-type "
+        "equivalent like Strong / Needs Work / Incomplete for the "
+        "script) rating? Strict -- a section without a rating is "
+        "a structural defect.\n"
+        "- synthesis_quality: Does the arbiter synthesise and weigh "
+        "the peer input rather than merely restate it? Reward "
+        "verdicts that cite peer agreements / disagreements and "
+        "resolve them.\n"
+        "- specificity: Does the verdict cite specific quotes / "
+        "figures / section names from the document being reviewed? "
+        "Penalise vague generalities that could apply to any "
+        "submission.\n"
+        "- doc_appropriateness: Is the verdict's framing "
+        f"appropriate to the {doc_label} as a deliverable type? "
+        "For the brief, an investment-audience tone; for the "
+        "appendix, an evidentiary / data-traceability tone; for "
+        "the deck, slide flow and so-what argumentation; for the "
+        "script, spoken delivery + audience clarity. Reward "
+        "rubric-fit framing; penalise framing that applies the "
+        "wrong rubric (e.g. evaluating the script against a "
+        "written submission's citation-formatting standards).\n\n"
+        "WEIGHTS for the overall score: structure_clear 0.25, "
+        "ratings_present 0.20, synthesis_quality 0.20, "
+        "specificity 0.20, doc_appropriateness 0.15.\n\n"
+        "A well-formed per-document verdict that scores the "
+        "deliverable against its proper rubric should land in the "
+        "7.0-8.5 range without needing a harness retry. Drag "
+        f"scores below threshold only when a structural defect "
+        f"(missing ratings, no synthesis, off-rubric framing) is "
+        f"genuinely present."
+        + _JSON_CONTRACT
+    )
+
+
 def triage_evaluator_prompt() -> str:
     """Evaluator for an automated feedback-triage report."""
     return (

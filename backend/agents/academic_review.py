@@ -3446,7 +3446,10 @@ def run_arbiter_with_harness(
 
     from agents.academic_advisor import _SYSTEM_PROMPT as advisor_prompt
     from agents.harness import GeneratorEvaluatorHarness
-    from agents.evaluator_prompts import academic_review_arbiter_evaluator_prompt
+    from agents.evaluator_prompts import (
+        academic_review_arbiter_evaluator_prompt,
+        academic_review_arbiter_evaluator_prompt_per_doc,
+    )
 
     # ACADEMIC_REVIEW_CHARTS snapshots for the arbiter's synthesis.
     # Captured in the generator closure so a harness retry reuses the
@@ -3460,11 +3463,42 @@ def run_arbiter_with_harness(
                            visual_context=visual_context,
                            trigger="academic_review_arbiter")
 
+    # June 25 2026 -- pick the rubric-appropriate evaluator. The
+    # midpoint evaluator's midpoint_appropriateness + section-count
+    # assertions used to score every non-midpoint verdict at ~0.9,
+    # forcing three harness retries on every brief / deck /
+    # appendix / script review. Per-doc reviews now route through
+    # the generic per-doc evaluator (structure / ratings /
+    # synthesis / specificity / doc-fit), which scores 7.0-8.5 on
+    # a well-formed verdict and clears threshold on first attempt.
+    if brief_review:
+        evaluator_prompt = (
+            academic_review_arbiter_evaluator_prompt_per_doc(
+                "executive_brief"))
+    elif appendix_review:
+        evaluator_prompt = (
+            academic_review_arbiter_evaluator_prompt_per_doc(
+                "analytical_appendix"))
+    elif deck_review:
+        evaluator_prompt = (
+            academic_review_arbiter_evaluator_prompt_per_doc(
+                "presentation_deck"))
+    elif script_review:
+        evaluator_prompt = (
+            academic_review_arbiter_evaluator_prompt_per_doc(
+                "presentation_script"))
+    else:
+        # Midpoint / cross-document path retains the legacy
+        # midpoint-specific evaluator (5 sections, 2 top-line
+        # rating lines, midpoint_appropriateness).
+        evaluator_prompt = (
+            academic_review_arbiter_evaluator_prompt())
+
     try:
         harness = GeneratorEvaluatorHarness()
         result = harness.run(
             generator_fn=_generate,
-            evaluator_prompt=academic_review_arbiter_evaluator_prompt(),
+            evaluator_prompt=evaluator_prompt,
             generator_prompt=user_message,
             context=context_block[:6000],
             agent_id="academic_advisor",
