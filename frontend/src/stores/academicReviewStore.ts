@@ -240,6 +240,94 @@ interface AcademicReviewStore {
 }
 
 
+// June 25 2026 -- fallback polling. When the per-document SSE
+// connection drops before [DONE] (silence timeout or transient
+// network error), the backend pipeline may still be running and
+// the council_debates row + agent_interactions row may still land.
+// _pollAcademicReviewStatus walks the academic-review-status
+// endpoint every POLL_INTERVAL_MS until has_review=true or the
+// POLL_CEILING_MS budget is exhausted. On success it populates
+// the per-doc slice with the late-arriving verdict so the user
+// sees the result even though the SSE stream broke.
+const POLL_INTERVAL_MS = 10_000
+const POLL_CEILING_MS = 5 * 60_000
+
+
+async function _resolveCurrentDraftId(
+  docType: string,
+): Promise<number | null> {
+  try {
+    const { default: axios } = await import('axios')
+    const res = await axios.get<{
+      drafts: Array<{
+        id: number
+        document_type: string
+        is_current?: boolean
+      }>
+    }>('/api/v1/documents/drafts')
+    const match = (res.data?.drafts ?? []).find(
+      (d) => d.document_type === docType
+        && d.is_current !== false)
+    return match?.id ?? null
+  } catch {
+    return null
+  }
+}
+
+
+async function _pollAcademicReviewStatus(
+  draftId: number,
+  docType: EditorDocumentType,
+  set: (
+    fn: (s: AcademicReviewStore) => Partial<AcademicReviewStore>,
+  ) => void,
+): Promise<void> {
+  const { default: axios } = await import('axios')
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < POLL_CEILING_MS) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+    try {
+      const r = await axios.get<{
+        has_review?:      boolean
+        last_review_at?:  string | null
+        arbiter_score?:   number | null
+        verdict_summary?: string | null
+      }>(
+        `/api/v1/documents/drafts/${draftId}`
+        + '/academic-review-status')
+      if (r.data?.has_review) {
+        // Populate the slice with the late-arriving verdict.
+        // verdict_summary lands in arbiterText so the existing
+        // renderer surfaces it; the user can re-run the review
+        // for the full peer + critic stream.
+        set((s) => ({
+          perDocument: {
+            ...s.perDocument,
+            [docType]: {
+              ...s.perDocument[docType],
+              phase: 'done',
+              errorMsg: '',
+              completedAt: r.data?.last_review_at
+                ?? new Date().toISOString(),
+              result: {
+                arbiterText: r.data?.verdict_summary
+                  ?? 'Review completed but verdict text was not '
+                    + 'returned by the fallback status endpoint. '
+                    + 'Re-run the review to see the full output.',
+                peerResponses: {},
+              },
+            },
+          },
+        }))
+        return
+      }
+    } catch {
+      // Network blip mid-poll -- keep trying until the ceiling.
+    }
+  }
+}
+
+
 const EMPTY_PER_DOC_MAP: Record<EditorDocumentType, PerDocumentReviewSlice> = {
   // midpoint_paper stays in EditorDocumentType post-retirement so
   // historical drafts still type-check; seed an empty slice to keep
@@ -606,6 +694,12 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         },
       }))
 
+      // Hoisted to the function scope so the catch block can read it
+      // and distinguish a silence-timeout abort from a user-initiated
+      // cancel. The inner try block flips this to true via the
+      // setInterval below.
+      let timedOut = false
+
       try {
         const res = await fetch(
           `/api/council/academic-review?document_type=${
@@ -647,7 +741,6 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         // above. See the SILENCE_MS comment there for the rationale.
         const SILENCE_MS = 60_000
         let lastActivity = Date.now()
-        let timedOut = false
         const silenceTimer: ReturnType<typeof setInterval> =
           setInterval(() => {
             if (Date.now() - lastActivity > SILENCE_MS) {
@@ -822,7 +915,8 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
           completedAt: new Date().toISOString(),
         })
       } catch (err) {
-        if (controller.signal.aborted) {
+        if (controller.signal.aborted && !timedOut) {
+          // User-initiated cancel (not the silence-timer abort).
           set((s) => ({
             perDocument: {
               ...s.perDocument,
@@ -833,18 +927,34 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
           }))
           return
         }
+        // June 25 2026 -- fallback status polling. The SSE
+        // connection dropped (timeout or transient error) but the
+        // backend may still complete; poll
+        // /api/v1/documents/drafts/{id}/academic-review-status
+        // until has_review=true OR the 5-minute ceiling fires.
+        // On success, populate the slice with the late-arriving
+        // verdict so the user sees the result even though the SSE
+        // stream broke. Skipped when no draft_id can be resolved
+        // for this docType.
+        const errMsg = err instanceof Error
+          ? err.message : 'Per-document review failed.'
         set((s) => ({
           perDocument: {
             ...s.perDocument,
             [docType]: {
               ...s.perDocument[docType],
               phase:    'error',
-              errorMsg: err instanceof Error
-                ? err.message
-                : 'Per-document review failed.',
+              errorMsg: errMsg,
             },
           },
         }))
+        try {
+          const draftId = await _resolveCurrentDraftId(docType)
+          if (draftId !== null) {
+            void _pollAcademicReviewStatus(
+              draftId, docType, set)
+          }
+        } catch { /* polling kickoff failed -- error phase stands */ }
       } finally {
         set((s) => {
           const next = { ...s._perDocControllers }
