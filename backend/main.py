@@ -4681,16 +4681,23 @@ async def charts_render(
 
 @app.get("/api/v1/documents/drafts")
 async def editor_list_drafts(session: dict = Depends(require_team_member)):
-    """Every non-deleted draft owned by the current user."""
-    from tools.editor_drafts import list_drafts
-    return {"drafts": await list_drafts(session["email"])}
+    """Every non-deleted draft across all owners. June 24 2026:
+    team members share access to every document, so the list is
+    no longer owner-scoped. The endpoint stays behind
+    require_team_member so viewers (Dr. Panttser) still cannot
+    reach it -- they get the same 403 they got before."""
+    from tools.editor_drafts import list_all_drafts
+    return {"drafts": await list_all_drafts()}
 
 
 @app.get("/api/v1/documents/drafts/{draft_id}")
 async def editor_get_draft(
     draft_id: int, session: dict = Depends(require_team_member),
 ):
-    """A single draft with its current working content."""
+    """A single draft with its current working content. June 24
+    2026: get_draft is not owner-scoped; the team_member gate
+    is the authoritative access boundary. Viewers cannot reach
+    this endpoint."""
     from tools.editor_drafts import get_draft
     draft = await get_draft(draft_id)
     if draft is None:
@@ -6652,7 +6659,30 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                     "debate_recorded",
                     debate_id=debate_id,
                     fix_proposals=auto_proposals)
+            except asyncio.CancelledError:
+                # Client disconnected mid-stream. Re-raise so the
+                # SSE generator unwinds cleanly; without this catch
+                # the asyncpg pool would leak the in-flight
+                # connection from record_debate_round /
+                # write_fix_proposals_to_debate. The outer
+                # event_stream's [DONE] frame is skipped (the
+                # client is gone) but the connections are released
+                # by the async-with blocks unwinding under the
+                # CancelledError propagation.
+                log.info(
+                    "academic_review_critic_cancelled",
+                    document_type=(
+                        document_type_q or "full_package"))
+                raise
             except Exception as exc:  # noqa: BLE001
+                # All other exceptions are advisory -- the critic
+                # pipeline is fail-open. Log and continue so the
+                # primary verdict still streams to the user. Partial
+                # critic results (one of Gemini/Grok failed parse)
+                # are NOT exceptions -- they surface via the
+                # partial_failure field on the critic_findings
+                # frame, and the debate round still fires on
+                # whatever findings the other model produced.
                 log.warning(
                     "academic_review_critic_pipeline_failed",
                     error=str(exc),

@@ -110,6 +110,19 @@ async def get_draft_with_layer3(
                 # Pre-Layer-3 schema -- retry with legacy columns.
                 # The export path tolerates None on Layer-3 fields
                 # (verification short-circuits as 'no_value_manifest').
+                # The first SELECT failed and the session is now in
+                # an aborted-transaction state; PostgreSQL refuses
+                # every subsequent statement on the same connection
+                # with InFailedSQLTransactionError until a rollback
+                # clears the state. Mirror the rollback the sibling
+                # get_current_draft_with_layer3 already does so the
+                # legacy fallback SELECT can actually run instead of
+                # poisoning the session for the SSE flow's later
+                # queries.
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
                 row = await s.execute(text(
                     f"SELECT {_DRAFT_COLS} FROM editor_drafts "
                     "WHERE id = :i AND is_deleted = false"),
@@ -132,7 +145,10 @@ def _version_row(r: Any) -> dict[str, Any]:
 
 
 async def list_drafts(owner_email: str) -> list[dict[str, Any]]:
-    """Every non-deleted draft owned by this user, newest update first."""
+    """Every non-deleted draft owned by this user, newest update first.
+    Owner-scoped retained for tests / legacy callers; the API list
+    endpoint now uses list_all_drafts (June 24 2026 -- team members
+    share access to every document)."""
     try:
         from sqlalchemy import text
         sf = _session()
@@ -146,6 +162,27 @@ async def list_drafts(owner_email: str) -> list[dict[str, Any]]:
             return [_draft_row(r) for r in rows.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("editor_list_drafts_failed", error=str(exc))
+        return []
+
+
+async def list_all_drafts() -> list[dict[str, Any]]:
+    """Every non-deleted draft across all owners, newest update
+    first. Used by the team-member-gated drafts list endpoint --
+    documents are team-shared, so Mike can open a brief Bob
+    generated and vice versa."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return []
+        async with sf() as s:
+            rows = await s.execute(text(
+                f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                "WHERE is_deleted = false "
+                "ORDER BY updated_at DESC"))
+            return [_draft_row(r) for r in rows.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_list_all_drafts_failed", error=str(exc))
         return []
 
 
@@ -279,11 +316,22 @@ async def create_draft(
         aw = (json.dumps(audit_warnings)
               if audit_warnings is not None else None)
         async with sf() as s:
+            # June 24 2026 -- clear is_current on EVERY existing row
+            # for this document_type, not just rows owned by the
+            # generating user. Documents are team-shared (any team
+            # member can open any draft), so two team members
+            # generating the same doc_type used to leave both rows
+            # with is_current=true. The unique partial index
+            # editor_drafts_one_current_per_type (migration 062)
+            # enforces this at the DB layer; this UPDATE is the
+            # application-layer guard that runs first so the index
+            # never has to reject.
             await s.execute(text(
                 "UPDATE editor_drafts SET is_current = false "
-                "WHERE owner_email = :e AND document_type = :t "
-                "AND is_current = true"),
-                {"e": owner_email, "t": document_type})
+                "WHERE document_type = :t "
+                "AND is_current = true "
+                "AND is_deleted = false"),
+                {"t": document_type})
             row = await s.execute(text(
                 "INSERT INTO editor_drafts (document_type, owner_email, "
                 "title, content_json, content_text, word_count, "
