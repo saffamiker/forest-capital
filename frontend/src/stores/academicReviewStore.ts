@@ -327,10 +327,58 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         const fixProposals: Record<number, FixProposalPayload> = {}
         let phaseSeen: AcademicReviewPhase = 'consulting'
 
+        // June 25 2026 -- rolling timeout. The backend now emits
+        // ': keepalive' comment frames every 20s during long
+        // pipeline phases (PR earlier in this session). The
+        // client resets lastActivity on EVERY chunk read,
+        // including those keepalive comment frames; the timer
+        // only fires when no chunk has arrived for SILENCE_MS.
+        // 60s is comfortably above the 20s keepalive cadence so
+        // a single missed keepalive doesn't trip the timeout,
+        // but two missed in a row signals a genuinely dropped
+        // connection. controller.abort() on timeout makes the
+        // next reader.read() throw an AbortError which the outer
+        // catch routes to a non-failure 'taking longer than
+        // expected' phase so fallback polling can still pick up
+        // the result when the backend completes.
+        const SILENCE_MS = 60_000
+        let lastActivity = Date.now()
+        let timedOut = false
+        const silenceTimer: ReturnType<typeof setInterval> =
+          setInterval(() => {
+            if (Date.now() - lastActivity > SILENCE_MS) {
+              timedOut = true
+              try { controller.abort() } catch { /* noop */ }
+              clearInterval(silenceTimer)
+            }
+          }, 5_000)
+
         // eslint-disable-next-line no-constant-condition
         while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
+          let chunk: { done: boolean; value: Uint8Array | undefined }
+          try {
+            chunk = await reader.read()
+          } catch (readErr) {
+            // AbortError fired by the silence timer or by a
+            // user-initiated cancel. Either way, exit the loop;
+            // the outer catch handles routing (timedOut -> error
+            // phase with the non-failure message; cancel ->
+            // existing idle phase).
+            clearInterval(silenceTimer)
+            if (timedOut) {
+              throw new Error(
+                'Review is taking longer than expected. The '
+                + 'council is still deliberating — please wait '
+                + 'or retry.')
+            }
+            throw readErr
+          }
+          lastActivity = Date.now()
+          const { done, value } = chunk
+          if (done) {
+            clearInterval(silenceTimer)
+            break
+          }
           buffer += decoder.decode(value, { stream: true })
           let sep: number
           // SSE frames are separated by a blank line.
@@ -595,10 +643,41 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
           }))
         }
 
+        // Rolling silence timeout, mirrors the cross-document path
+        // above. See the SILENCE_MS comment there for the rationale.
+        const SILENCE_MS = 60_000
+        let lastActivity = Date.now()
+        let timedOut = false
+        const silenceTimer: ReturnType<typeof setInterval> =
+          setInterval(() => {
+            if (Date.now() - lastActivity > SILENCE_MS) {
+              timedOut = true
+              try { controller.abort() } catch { /* noop */ }
+              clearInterval(silenceTimer)
+            }
+          }, 5_000)
+
         // eslint-disable-next-line no-constant-condition
         while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
+          let chunk: { done: boolean; value: Uint8Array | undefined }
+          try {
+            chunk = await reader.read()
+          } catch (readErr) {
+            clearInterval(silenceTimer)
+            if (timedOut) {
+              throw new Error(
+                'Review is taking longer than expected. The '
+                + 'council is still deliberating — please wait '
+                + 'or retry.')
+            }
+            throw readErr
+          }
+          lastActivity = Date.now()
+          const { done, value } = chunk
+          if (done) {
+            clearInterval(silenceTimer)
+            break
+          }
           buffer += decoder.decode(value, { stream: true })
           let sep: number
           while ((sep = buffer.indexOf('\n\n')) !== -1) {
