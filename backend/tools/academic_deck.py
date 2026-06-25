@@ -731,8 +731,43 @@ def slide_generation_prompt(slide_number: int) -> str:
         f'  "bullets": ["...", "..."],\n'
         f'  "table_data": null or {{"headers": [...], "rows": [[...], ...]}},\n'
         f'  "speaker_notes": "..."\n'
-        f'}}'
+        f'}}\n\n'
+        # June 25 2026 -- table-data discipline.
+        "TABLE DISCIPLINE: table_data must always use the structured "
+        "{headers: [...], rows: [[...]]} object. NEVER emit pipe-"
+        "delimited markdown tables ('| col1 | col2 |\\n| --- | --- |"
+        "\\n| a | b |') as bullets or as a string in table_data. The "
+        "PPTX renderer expects the structured object; a markdown "
+        "string lands in a text frame as raw text and reads as "
+        "garbage on the slide.\n\n"
+        + _chart_bullet_discipline_for_slide(slide_number)
     )
+
+
+def _chart_bullet_discipline_for_slide(slide_number: int) -> str:
+    """June 25 2026 -- per-slide chart-discipline instruction. Slides
+    in SLIDE_CHARTS have an embedded chart image AT GENERATION TIME;
+    the LLM doesn't know that and tends to emit bullets that
+    describe the chart ('the chart shows...', 'as illustrated in
+    Figure 1...', 'see chart at right'). Both the bullet AND the
+    image render -- visual duplication. This injects an explicit
+    instruction for chart-bearing slides so the bullets stick to
+    interpretive context (what the chart MEANS) rather than
+    describing it (what it SHOWS). The slide spec's own bullets
+    list already covers the desired content; this is reinforcement.
+    Non-chart slides get an empty string -- no instruction needed."""
+    if slide_number not in SLIDE_CHARTS:
+        return ""
+    return (
+        "CHART DISCIPLINE: This slide has an embedded chart image. "
+        "Do not include bullets that describe, reference, or "
+        "summarize the chart visually. Bullets on this slide must "
+        "provide INTERPRETIVE context only -- what the chart means "
+        "for the investment thesis, not what the chart shows. "
+        "Forbidden phrases: 'see chart', 'shown above', 'the chart "
+        "shows', 'as illustrated', 'depicted in', 'visualized in', "
+        "'Figure N shows'. The chart speaks for itself; the bullets "
+        "anchor the so-what.\n\n")
 
 
 # LLM preamble patterns that should never appear in a slide bullet.
@@ -1269,16 +1304,89 @@ def _normalize_slides(raw_slides: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _parse_markdown_table(s: str) -> tuple[list[str], list[list[str]]]:
+    """June 25 2026 -- defence-in-depth pre-parser for the case
+    where the LLM ignores the structured-table_data prompt and
+    emits a pipe-delimited markdown table as a string. Returns
+    (headers, rows) or ([], []) if the input can't be parsed.
+
+    Recognised shapes:
+      '| Col1 | Col2 |\\n| --- | --- |\\n| a | b |\\n| c | d |'
+      '| Col1 | Col2 |\\n| a | b |'   (no separator row)
+
+    Surrounding whitespace + leading/trailing pipes are stripped
+    per cell. The separator row ('|---|---|' style) is detected by
+    cell content being only dashes/colons/spaces + dropped."""
+    if not s or "|" not in s:
+        return [], []
+    raw_lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    rows: list[list[str]] = []
+    for ln in raw_lines:
+        if not ln.startswith("|"):
+            continue
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        # Separator row -- every cell is dashes/colons/spaces.
+        if cells and all(
+                c == "" or set(c) <= set("-: ") for c in cells):
+            continue
+        rows.append(cells)
+    if len(rows) < 2:
+        return [], []
+    return rows[0], rows[1:]
+
+
 def _slide_table(sl: dict[str, Any]) -> tuple[list[str], list[list[str]]]:
     """Extract (headers, rows-of-strings) from a slide's table_data, or
-    ([], []) when the slide carries no usable table."""
+    ([], []) when the slide carries no usable table.
+
+    June 25 2026 -- string fallback. The prompt forbids markdown
+    tables in table_data but a model that doesn't honour the
+    instruction could emit a string containing pipes; the legacy
+    code returned ([], []) and the slide rendered with no table.
+    Now: if table_data is a string carrying '|', route through
+    _parse_markdown_table and surface the parsed structure so the
+    slide still gets a real PPTX table object."""
     td = sl.get("table_data")
+    if isinstance(td, str) and "|" in td:
+        return _parse_markdown_table(td)
     if not isinstance(td, dict):
         return [], []
     headers = [str(h) for h in (td.get("headers") or [])]
     rows = [[str(c) for c in r] for r in (td.get("rows") or [])
             if isinstance(r, (list, tuple))]
     return (headers, rows) if headers and rows else ([], [])
+
+
+# Chart-description phrases that should be stripped from bullets on
+# slides that already carry an embedded chart image. The prompt
+# forbids them (see _chart_bullet_discipline_for_slide); this is
+# defence-in-depth for when the model ignores the instruction.
+_CHART_REFERENCE_PHRASES: tuple[str, ...] = (
+    "see chart", "shown above", "shown below", "the chart shows",
+    "as illustrated", "depicted in", "visualized in",
+    "figure 1 shows", "figure 2 shows", "figure 3 shows",
+    "figure 4 shows", "the figure shows", "(see chart)",
+)
+
+
+def _strip_chart_bullets(
+    bullets: list[str], slide_number: int,
+) -> list[str]:
+    """Remove bullets that describe a chart on slides whose
+    slide_number is in SLIDE_CHARTS (the slide already has the
+    chart image embedded; the bullet would be a duplicate).
+    Lower-cases the bullet for substring detection so case
+    variations don't slip through. Non-chart slides pass through
+    unchanged."""
+    if slide_number not in SLIDE_CHARTS:
+        return bullets
+    keep: list[str] = []
+    for b in bullets:
+        lowered = (b or "").lower()
+        if any(p in lowered for p in _CHART_REFERENCE_PHRASES):
+            continue
+        keep.append(b)
+    return keep
 
 
 def _render_content_slide(prs, sl, chart_png, idx, total) -> None:
@@ -1292,6 +1400,15 @@ def _render_content_slide(prs, sl, chart_png, idx, total) -> None:
     try:
         _title_bar(s, title)
         bullets = sl.get("bullets") or [_DATA_PENDING_BULLET]
+        # June 25 2026 -- strip chart-describing bullets on slides
+        # that already have an embedded chart image (SLIDE_CHARTS).
+        # Defence-in-depth alongside _chart_bullet_discipline_for_
+        # slide in the prompt; the chart speaks for itself, the
+        # bullet would be a visual duplicate. Non-chart slides
+        # pass through unchanged.
+        bullets = _strip_chart_bullets(bullets, idx)
+        if not bullets:
+            bullets = [_DATA_PENDING_BULLET]
         headers, rows = _slide_table(sl)
         has_table = bool(headers and rows)
         has_chart = idx in SLIDE_CHARTS
