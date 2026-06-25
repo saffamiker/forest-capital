@@ -5340,7 +5340,12 @@ async def get_draft_academic_review_status(
     from tools.academic_review_score import ADVISORY_THRESHOLD
 
     draft = await get_draft(draft_id)
-    if draft is None or draft.get("owner_email") != session.get("email"):
+    # June 25 2026 -- documents are team-shared (PR #399), so the
+    # owner_email filter was producing spurious 404s for team
+    # members opening a draft someone else generated. The endpoint
+    # already gates on require_team_member; that's the authoritative
+    # access check.
+    if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found.")
 
     document_type = draft.get("document_type") or ""
@@ -5353,12 +5358,24 @@ async def get_draft_academic_review_status(
         "section_ratings": {},
         "run_at":          None,
         "threshold":       ADVISORY_THRESHOLD,
+        # June 25 2026 -- new fields per the editor's review-status
+        # badge contract. Backward-compatible additions; legacy
+        # callers ignore them.
+        "draft_id":        draft_id,
+        "has_review":      False,
+        "last_review_at":  None,
+        "arbiter_score":   None,
+        "verdict_summary": None,
     }
 
-    # Auto-review only fires for these two document types. A deck
-    # or script draft has no review to surface; return the empty
-    # shape so the frontend can hide the indicator cleanly.
-    if document_type not in ("midpoint_paper", "executive_brief"):
+    # Auto-review tracking covers all four submission doc types now.
+    # The midpoint legacy is preserved for advisory; per-doc reviews
+    # fire from the editor's per-doc trigger (Concern 3) which logs
+    # an agent_interactions row tied to the draft_id.
+    if document_type not in (
+            "midpoint_paper", "executive_brief",
+            "analytical_appendix", "presentation_deck",
+            "presentation_script"):
         return empty
 
     try:
@@ -5383,6 +5400,16 @@ async def get_draft_academic_review_status(
         and isinstance(score, (int, float))
         and score < ADVISORY_THRESHOLD
     )
+    response_summary = latest.get("response_summary") or ""
+    verdict_summary: str | None = None
+    if response_summary:
+        # Strip markdown headings + collapse whitespace; first
+        # ~280 chars is enough for the editor's badge tooltip.
+        compact = " ".join(
+            response_summary.replace("#", "").split())
+        verdict_summary = (
+            compact[:280] + "…" if len(compact) > 280
+            else (compact or None))
     return {
         "status":          "complete",
         "score":           score,
@@ -5392,6 +5419,12 @@ async def get_draft_academic_review_status(
         "section_ratings": meta.get("section_ratings") or {},
         "run_at":          latest.get("timestamp"),
         "threshold":       ADVISORY_THRESHOLD,
+        # New fields (June 25 2026) -- additive, legacy-safe.
+        "draft_id":        draft_id,
+        "has_review":      True,
+        "last_review_at":  latest.get("timestamp"),
+        "arbiter_score":   score,
+        "verdict_summary": verdict_summary,
     }
 
 
