@@ -188,25 +188,48 @@ async def list_all_drafts(
     include_all=True keeps the old behaviour (full history -- used by
     the DraftVersionSelector in the editor toolbar, which lists every
     version of the current document_type). Default False = one row per
-    document_type maximum: the current draft."""
+    document_type maximum: the current draft.
+
+    June 25 2026 (PR #421 follow-up) -- defensive fallback when the
+    data_hash column doesn't exist (pre-migration-063 environments).
+    Without the fallback the SELECT raised UndefinedColumnError and
+    the function returned an empty list, which the frontend
+    interpreted as 'no current drafts exist' -- making team members
+    see their tile metadata silently disappear after the column was
+    referenced but before the migration shipped."""
     try:
         from sqlalchemy import text
         sf = _session()
         if sf is None:
             return []
         async with sf() as s:
-            if include_all:
+            where = (
+                "is_deleted = false AND is_current = true"
+                if not include_all
+                else "is_deleted = false")
+            try:
                 rows = await s.execute(text(
                     f"SELECT {_DRAFT_COLS} FROM editor_drafts "
-                    "WHERE is_deleted = false "
+                    f"WHERE {where} "
                     "ORDER BY updated_at DESC"))
-            else:
+                return [_draft_row(r) for r in rows.fetchall()]
+            except Exception:  # noqa: BLE001
+                # Pre-migration-063 schema: data_hash column missing.
+                # Rollback the aborted transaction and retry with the
+                # legacy column shape (data_hash gets None via
+                # _draft_row's len(r) guard).
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                legacy_cols = ", ".join(
+                    c.strip() for c in _DRAFT_COLS.split(",")
+                    if c.strip() != "data_hash")
                 rows = await s.execute(text(
-                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
-                    "WHERE is_deleted = false "
-                    "AND is_current = true "
+                    f"SELECT {legacy_cols} FROM editor_drafts "
+                    f"WHERE {where} "
                     "ORDER BY updated_at DESC"))
-            return [_draft_row(r) for r in rows.fetchall()]
+                return [_draft_row(r) for r in rows.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("editor_list_all_drafts_failed", error=str(exc))
         return []
