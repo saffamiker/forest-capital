@@ -615,6 +615,12 @@ export default function DocumentGenerationPanel() {
   ] = useState<Record<string, CurrentDraftSummary>>({})
   const [liveDataHash, setLiveDataHash] = useState<string | null>(
     null)
+  // June 25 2026 -- bump to force a re-fetch when a generation job
+  // completes. The job-completion useEffect below increments this
+  // and the dependency array on the fetch effect triggers a fresh
+  // GET /drafts + GET /audit/runs/latest. Refresh is also a noop
+  // on first mount (counter starts at 0; useEffect runs anyway).
+  const [draftsRefreshTick, setDraftsRefreshTick] = useState(0)
   useEffect(() => {
     let cancelled = false
     axios.get<{
@@ -651,16 +657,21 @@ export default function DocumentGenerationPanel() {
       })
       .catch(() => { if (!cancelled) setLiveDataHash(null) })
     return () => { cancelled = true }
-  }, [])
+  }, [draftsRefreshTick])
 
   // Stamp "last generated" the first time a job for a type completes.
   const jobs = useGenerationJobs()
+  const readinessReload = useReportReadinessStore((s) => s.reload)
   useEffect(() => {
+    let sawTerminalStateChange = false
     for (const job of jobs) {
-      if (job.status !== 'complete' || recorded.current.has(job.job_id)) {
+      const terminal = (
+        job.status === 'complete' || job.status === 'failed')
+      if (!terminal || recorded.current.has(job.job_id)) {
         continue
       }
       recorded.current.add(job.job_id)
+      sawTerminalStateChange = true
       const doc = DOCS.find((d) => d.documentType === job.document_type)
       if (!doc) continue
       const now = new Date().toISOString()
@@ -671,7 +682,24 @@ export default function DocumentGenerationPanel() {
         return next
       })
     }
-  }, [jobs])
+    // June 25 2026 -- when a job transitions to a terminal state
+    // (complete OR failed) re-fetch the drafts list, the live
+    // strategy hash, and the readiness verdict. Previously the
+    // user had to F5 to see the new draft's metadata on the tile
+    // because the fetch was mount-only.
+    //   draftsRefreshTick bump  -> re-runs the drafts + hash fetch
+    //   readinessReload()       -> re-fetches /api/v1/report/readiness
+    //                              (which the warning banner +
+    //                              ReportReadinessBanner read from)
+    // The hash banner on the Reports page mounts its own fetch
+    // against /api/v1/audit/runs/latest -- LiveDataHashBanner is
+    // separate from this panel and re-mounts when its parent re-
+    // renders, so the audit-hash refresh fires there.
+    if (sawTerminalStateChange) {
+      setDraftsRefreshTick((n) => n + 1)
+      void readinessReload()
+    }
+  }, [jobs, readinessReload])
 
   const handleGenerate = async (
     doc: DocSpec,
