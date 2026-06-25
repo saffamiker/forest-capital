@@ -3447,6 +3447,148 @@ async def get_story_plans_exists(
         return {"exists": False, "types": {t: False for t in types}}
 
 
+@app.post("/api/v1/data/light-refresh")
+@limiter.limit("10/minute")
+async def post_light_refresh(
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
+):
+    """June 24 2026 -- light analytics-cache refresh for the team
+    member's "I want to see if there's new market data" workflow.
+
+    Runs the same three compute steps as the admin
+    refresh-appendix-caches endpoint (backtester + academic
+    analytics + OOS cost sensitivity) but is bound to the
+    generate_documents permission rather than team_member so
+    every doc-generator user can self-serve a refresh without
+    a sysadmin escalation. The response shape is identical to
+    refresh-appendix-caches so the frontend can reuse the same
+    rendering.
+
+    What this endpoint does NOT do:
+      - Touch story_plans (those clear on brief regen via the
+        existing _generate_brief_document hook)
+      - Touch editor_drafts (no document_content is mutated)
+      - Touch the canonical data_hash unless the data fetcher
+        reports new rows that change it
+      - Trigger document regeneration -- the user runs Generate /
+        Regenerate themselves on the doc tiles when they want
+        new prose. This endpoint just refreshes the underlying
+        analytics so the next regen sees the latest figures.
+
+    Returns: {ok, strategy_hash, steps[]} -- per-step status so
+    a partial failure (e.g. academic_analytics refresh fails but
+    backtester + cost_sens succeed) surfaces every step's
+    individual outcome.
+    """
+    import asyncio
+    if ENVIRONMENT == "test":
+        return {
+            "ok": True,
+            "note": "test environment -- compute chain skipped",
+            "steps": [],
+            "strategy_hash": None,
+        }
+    steps: list[dict] = []
+    strategy_hash: str | None = None
+
+    # Step 1 -- backtester + strategy_results_cache write.
+    try:
+        from tools.backtester import run_all_strategies
+        from tools.cache import (
+            _compute_data_hash, set_strategy_cache,
+        )
+        from tools.data_fetcher import get_full_history_async
+        history = await get_full_history_async()
+        monthly = history.get("equity_monthly")
+        n_rows = len(monthly) if monthly is not None else 0
+        last_date = (
+            str(monthly.index[-1].date())
+            if monthly is not None and len(monthly) > 0
+            else "unknown")
+        strategy_hash = _compute_data_hash(
+            n_rows, last_date, n_strategies=10)
+        results_dict = await asyncio.to_thread(
+            run_all_strategies, history)
+        await set_strategy_cache(
+            strategy_hash, results_dict, n_observations=n_rows,
+            risk_free_monthly=history.get("risk_free_monthly"))
+        steps.append({
+            "step": "backtester",
+            "ok": True,
+            "strategy_hash": strategy_hash,
+            "n_strategies": len(results_dict),
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "light_refresh_backtester_failed", error=str(exc))
+        steps.append({
+            "step": "backtester",
+            "ok": False,
+            "error": str(exc),
+        })
+        # Same short-circuit as refresh-appendix-caches --
+        # downstream metrics need the strategy_hash this step
+        # produces. Surface the failure as a 500 so the UI can
+        # render an error rather than a partial-success summary.
+        raise HTTPException(
+            status_code=500,
+            detail={"steps": steps,
+                    "blocked_at": "backtester"})
+
+    # Step 2 -- academic_analytics refresh.
+    try:
+        from tools.precomputed_analytics import (
+            refresh_academic_analytics,
+        )
+        await refresh_academic_analytics(strategy_hash)
+        steps.append({
+            "step": "refresh_academic_analytics",
+            "ok": True,
+            "data_hash": strategy_hash,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "light_refresh_academic_failed", error=str(exc))
+        steps.append({
+            "step": "refresh_academic_analytics",
+            "ok": False,
+            "error": str(exc),
+        })
+
+    # Step 3 -- OOS cost sensitivity refresh.
+    try:
+        from tools.regime_meta_validation import (
+            refresh_oos_cost_sensitivity,
+        )
+        ok = await refresh_oos_cost_sensitivity(strategy_hash)
+        steps.append({
+            "step": "refresh_oos_cost_sensitivity",
+            "ok": bool(ok),
+            "data_hash": strategy_hash,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "light_refresh_cost_sens_failed", error=str(exc))
+        steps.append({
+            "step": "refresh_oos_cost_sensitivity",
+            "ok": False,
+            "error": str(exc),
+        })
+
+    all_ok = all(step.get("ok") for step in steps)
+    log.info(
+        "light_refresh_complete",
+        all_ok=all_ok,
+        strategy_hash=strategy_hash,
+        actor=session.get("email"))
+    return {
+        "ok": all_ok,
+        "strategy_hash": strategy_hash,
+        "steps": steps,
+    }
+
+
 @app.post("/api/v1/admin/refresh-appendix-caches")
 async def post_refresh_appendix_caches(
     session: dict = Depends(require_team_member),
