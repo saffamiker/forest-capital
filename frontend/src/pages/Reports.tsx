@@ -34,6 +34,7 @@ import SubmissionReadinessReview from '../components/SubmissionReadinessReview'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import KeyMetricsPanel from '../components/KeyMetricsPanel'
 import LightRefreshButton from '../components/LightRefreshButton'
+import LiveDataHashBanner from '../components/LiveDataHashBanner'
 import PreSubmissionCheckPanel from '../components/PreSubmissionCheckPanel'
 import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
 import SubmissionFreezeBanner from '../components/SubmissionFreezeBanner'
@@ -119,6 +120,13 @@ export default function Reports() {
         data-section-label="Submission Readiness">
         <ReportReadinessBanner />
       </div>
+
+      {/* June 25 2026 -- Live platform data hash banner. Surfaces
+          the current strategy_hash + flags any current drafts that
+          were generated against a stale hash. Hides entirely when
+          the live hash isn't loaded yet so the page doesn't flash
+          an indeterminate state. */}
+      <LiveDataHashBanner />
 
       {/* Layer 3b (June 21 2026) -- Pre-submission verification check.
           One-click button that fires POST /api/v1/export/verify-all

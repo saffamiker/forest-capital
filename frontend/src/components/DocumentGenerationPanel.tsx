@@ -112,6 +112,117 @@ function ExportVerificationPill(
   )
 }
 
+
+/**
+ * TileMetadataBlock -- June 25 2026.
+ *
+ * Generated / Updated / Data-hash strip on each Generate Documents
+ * tile when a current draft exists. Sourced from
+ * /api/v1/documents/drafts (canonical) instead of in-memory job
+ * completion stamps (stale after a page reload).
+ *
+ * Updated line only renders when updated_at differs from created_at
+ * by more than 60 seconds -- the threshold filters out the no-op
+ * UPDATE the create_draft path runs at insert time. When equal
+ * within tolerance, only Generated shows.
+ *
+ * Data hash renders the first 8 chars + a colour indicator (green
+ * when matching the live strategy_hash, amber on mismatch).
+ */
+interface TileMetadataDraft {
+  id:         number
+  created_at: string | null
+  updated_at: string | null
+  data_hash:  string | null
+}
+
+function _formatTileTimestamp(iso: string | null): string {
+  if (!iso) return '—'
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
+
+function TileMetadataBlock(
+  { draft, liveDataHash, hashStale }: {
+    draft: TileMetadataDraft
+    liveDataHash: string | null
+    hashStale: boolean
+  },
+) {
+  const generated = _formatTileTimestamp(draft.created_at)
+  const updated = _formatTileTimestamp(draft.updated_at)
+  // Show updated only when it diverges from created by more than
+  // a minute -- create_draft writes both at the same NOW() so the
+  // initial draft would otherwise render two identical timestamps.
+  let showUpdated = false
+  try {
+    if (draft.created_at && draft.updated_at) {
+      const c = new Date(draft.created_at).getTime()
+      const u = new Date(draft.updated_at).getTime()
+      if (!Number.isNaN(c) && !Number.isNaN(u)
+          && Math.abs(u - c) > 60_000) {
+        showUpdated = true
+      }
+    }
+  } catch {
+    showUpdated = false
+  }
+  const hashShort = draft.data_hash
+    ? draft.data_hash.slice(0, 8) : null
+  return (
+    <div className="text-2xs text-muted space-y-0.5"
+      data-testid="tile-metadata-block">
+      <div className="flex items-center gap-1.5">
+        <CheckCircle className="w-3 h-3 text-success shrink-0" />
+        <span>Generated: {generated}</span>
+      </div>
+      {showUpdated && (
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 inline-block" />
+          <span>Updated: {updated}</span>
+        </div>
+      )}
+      {hashShort && (
+        <div className="flex items-center gap-1.5">
+          <span className={`inline-block w-2 h-2 rounded-full ${
+            hashStale ? 'bg-warning' : 'bg-success'}`} />
+          <span>
+            Data hash:{' '}
+            <span className="font-mono"
+              title={draft.data_hash || ''}>
+              {hashShort}
+            </span>
+            {hashStale && liveDataHash && (
+              <span className="text-warning ml-1.5">
+                (live: <span className="font-mono">
+                  {liveDataHash.slice(0, 8)}
+                </span>)
+              </span>
+            )}
+          </span>
+        </div>
+      )}
+      {hashStale && (
+        <div className="flex items-start gap-1.5 text-warning
+                        bg-warning/10 border border-warning/30
+                        rounded px-1.5 py-1 mt-1"
+          data-testid="tile-stale-chip">
+          <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+          <span>Data stale — Light Refresh recommended</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 const DOCS: DocSpec[] = [
   {
     id: 'brief',
@@ -370,8 +481,24 @@ export default function DocumentGenerationPanel() {
   // the current draft id for every doc_type so the button renders
   // for any team member when a draft exists. Default endpoint
   // already returns one row per document_type max (PR #402).
-  const [currentDraftIdByType, setCurrentDraftIdByType] =
-    useState<Record<string, number>>({})
+  // June 25 2026 -- carry the full current draft summary per
+  // document_type so tile metadata (Generated / Updated / Data
+  // hash) reads directly from the canonical drafts endpoint
+  // rather than from job completion events (which can be stale
+  // after a page reload) or local timestamp stamps (which were
+  // an editor-job-side concept). One row per document_type max
+  // since the endpoint defaults to is_current=true (PR #402).
+  interface CurrentDraftSummary {
+    id:         number
+    created_at: string | null
+    updated_at: string | null
+    data_hash:  string | null
+  }
+  const [
+    currentDraftByType, setCurrentDraftByType,
+  ] = useState<Record<string, CurrentDraftSummary>>({})
+  const [liveDataHash, setLiveDataHash] = useState<string | null>(
+    null)
   useEffect(() => {
     let cancelled = false
     axios.get<{
@@ -379,21 +506,34 @@ export default function DocumentGenerationPanel() {
         id: number
         document_type: string
         is_current?: boolean
+        created_at?: string | null
+        updated_at?: string | null
+        data_hash?:  string | null
       }>
     }>('/api/v1/documents/drafts')
       .then((res) => {
         if (cancelled) return
-        const map: Record<string, number> = {}
+        const map: Record<string, CurrentDraftSummary> = {}
         for (const d of res.data.drafts ?? []) {
-          // The endpoint already scopes to is_current=true but
-          // belt-and-braces filter here in case a caller flips
-          // include_all=true upstream.
           if (d.is_current === false) continue
-          map[d.document_type] = d.id
+          map[d.document_type] = {
+            id:         d.id,
+            created_at: d.created_at ?? null,
+            updated_at: d.updated_at ?? null,
+            data_hash:  d.data_hash ?? null,
+          }
         }
-        setCurrentDraftIdByType(map)
+        setCurrentDraftByType(map)
       })
-      .catch(() => { /* no-op -- button stays hidden on failure */ })
+      .catch(() => { /* no-op -- tile stays metadata-less */ })
+    // Also fetch the live strategy hash for the mismatch check.
+    axios.get<{ current_data_hash?: string | null }>(
+      '/api/v1/audit/runs/latest')
+      .then((res) => {
+        if (cancelled) return
+        setLiveDataHash(res.data?.current_data_hash ?? null)
+      })
+      .catch(() => { if (!cancelled) setLiveDataHash(null) })
     return () => { cancelled = true }
   }, [])
 
@@ -575,13 +715,21 @@ export default function DocumentGenerationPanel() {
             || job?.status === 'running' || postingId === doc.id
           const error = errors[doc.id]
           const ts = generatedAt[doc.id]
-          // June 25 2026 -- the current draft id for this doc_type
+          // June 25 2026 -- the current draft for this doc_type
           // (regardless of who generated it), pulled from the
-          // drafts list endpoint. Used as the Open-in-Editor target
-          // when no generation job is tracked for this session
-          // (e.g. another team member generated the doc).
+          // drafts list endpoint. Drives Open-in-Editor + the new
+          // Generated / Updated / Data-hash metadata block. When
+          // no current draft exists for the doc_type, the tile
+          // omits all metadata (no 'Last generated', no
+          // 'Not yet exported') -- only description + Generate.
+          const currentDraft: CurrentDraftSummary | null =
+            currentDraftByType[doc.documentType] ?? null
           const currentDraftId: number | null =
-            currentDraftIdByType[doc.documentType] ?? null
+            currentDraft?.id ?? null
+          const hashStale: boolean = !!(
+            currentDraft?.data_hash
+            && liveDataHash
+            && currentDraft.data_hash !== liveDataHash)
           const verificationStatus: ExportVerificationStatus | null = (
             exportVerification
               ? (exportVerification[
@@ -673,12 +821,20 @@ export default function DocumentGenerationPanel() {
                 </div>
               </div>
 
-              <div className="text-2xs text-muted flex items-center gap-1">
-                {ts ? (
-                  <><CheckCircle className="w-3 h-3 text-success" />
-                    Last generated: {new Date(ts).toLocaleString()}</>
-                ) : <>Last generated: Never</>}
-              </div>
+              {/* June 25 2026 -- tile metadata is now sourced
+                  exclusively from the current draft row. When no
+                  current draft exists, the tile omits metadata
+                  entirely (no 'Last generated', no 'Not yet
+                  exported') -- just description + Generate. The
+                  previous source was the in-memory generation jobs
+                  store which kept stale timestamps after a page
+                  reload. */}
+              {currentDraft && (
+                <TileMetadataBlock
+                  draft={currentDraft}
+                  liveDataHash={liveDataHash}
+                  hashStale={hashStale} />
+              )}
 
               {inProgress ? (
                 <div className="flex flex-col gap-1.5">
