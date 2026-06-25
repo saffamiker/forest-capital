@@ -347,6 +347,10 @@ function TileHashChip(
 }
 
 
+// Tile display order (June 25 2026): Brief, Appendix, Deck.
+// Script renders separately after the map. Order reflects the
+// source-of-truth chain -- brief is the narrative anchor; appendix
+// carries the numeric evidence; deck reads both; script reads deck.
 const DOCS: DocSpec[] = [
   {
     id: 'brief',
@@ -359,18 +363,6 @@ const DOCS: DocSpec[] = [
     icon: FileText,
   },
   {
-    id: 'deck',
-    documentType: 'presentation_deck',
-    title: 'Final Presentation Deck',
-    description:
-      'Eleven-slide presentation deck covering the investment '
-      + 'question, evidence, regime analysis, live demo setup, AI '
-      + 'methodology, and the final recommendation -- with real data '
-      + 'charts in light mode, ready to refine in the editor.',
-    endpoint: '/api/v1/export/presentation-deck',
-    icon: Presentation,
-  },
-  {
     id: 'appendix',
     documentType: 'analytical_appendix',
     title: 'Analytical Appendix',
@@ -381,6 +373,18 @@ const DOCS: DocSpec[] = [
       + 'in the footer.',
     endpoint: '/api/v1/export/analytical-appendix',
     icon: FileSpreadsheet,
+  },
+  {
+    id: 'deck',
+    documentType: 'presentation_deck',
+    title: 'Final Presentation Deck',
+    description:
+      'Eleven-slide presentation deck covering the investment '
+      + 'question, evidence, regime analysis, live demo setup, AI '
+      + 'methodology, and the final recommendation -- with real data '
+      + 'charts in light mode, ready to refine in the editor.',
+    endpoint: '/api/v1/export/presentation-deck',
+    icon: Presentation,
   },
 ]
 
@@ -1156,24 +1160,81 @@ export default function DocumentGenerationPanel() {
                   </TeamGate>
                 </div>
               ) : job?.status === 'failed' ? (
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-start gap-1.5 px-2 py-1.5 rounded
-                                  text-2xs border border-danger/30
-                                  bg-danger/5 text-danger">
-                    <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-                    <span>{job.error || 'Generation failed.'}</span>
-                  </div>
-                  <TeamGate block permission="generate_documents"
-                    tooltip="Document generation is available to the project team">
+                // June 25 2026 -- failed-state demotion. When a
+                // current draft already exists for this doc type
+                // (currentDraftId !== null) the team has a usable
+                // version sitting in editor_drafts; the failed
+                // job doesn't block them from accessing it. Show
+                // Open in Editor as the primary action, demote
+                // the failed message to an amber WARNING chip,
+                // and keep Try Again as the tertiary option.
+                // Without a current draft we keep the legacy
+                // red-error + Try Again primary chrome -- the
+                // user has nothing else to open.
+                currentDraftId !== null ? (
+                  <div className="flex flex-col gap-1.5">
                     <button type="button"
-                      onClick={() => void handleGenerate(doc)}
-                      className="w-full flex items-center justify-center gap-1.5
-                                 px-3 py-2 rounded text-xs font-semibold
-                                 bg-electric text-white hover:bg-blue-500">
-                      Try Again
+                      onClick={() => navigate(
+                        `/editor/${currentDraftId}`)}
+                      data-testid={
+                        `open-existing-draft-${doc.id}`}
+                      className="w-full flex items-center
+                                  justify-center gap-1.5
+                                  px-3 py-2 rounded text-xs
+                                  font-semibold bg-electric
+                                  text-white hover:bg-blue-500">
+                      <PenLine className="w-3 h-3" />
+                      Open in Editor
                     </button>
-                  </TeamGate>
-                </div>
+                    <div
+                      data-testid={`failed-warning-${doc.id}`}
+                      className="flex items-start gap-1.5 px-2
+                                 py-1.5 rounded text-2xs border
+                                 border-warning/30 bg-warning/5
+                                 text-warning">
+                      <AlertCircle className="w-3 h-3 shrink-0
+                                              mt-0.5" />
+                      <span>
+                        Latest generation attempt failed:{' '}
+                        {job.error || 'unknown error'}. The
+                        existing draft above is still
+                        available.
+                      </span>
+                    </div>
+                    <TeamGate block permission="generate_documents"
+                      tooltip="Document generation is available to the project team">
+                      <button type="button"
+                        onClick={() => void handleGenerate(doc)}
+                        className="w-full flex items-center
+                                   justify-center gap-1.5
+                                   px-3 py-1.5 rounded text-xs
+                                   border border-border
+                                   text-muted hover:text-white
+                                   hover:bg-navy-700">
+                        Try Again
+                      </button>
+                    </TeamGate>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-start gap-1.5 px-2 py-1.5 rounded
+                                    text-2xs border border-danger/30
+                                    bg-danger/5 text-danger">
+                      <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                      <span>{job.error || 'Generation failed.'}</span>
+                    </div>
+                    <TeamGate block permission="generate_documents"
+                      tooltip="Document generation is available to the project team">
+                      <button type="button"
+                        onClick={() => void handleGenerate(doc)}
+                        className="w-full flex items-center justify-center gap-1.5
+                                   px-3 py-2 rounded text-xs font-semibold
+                                   bg-electric text-white hover:bg-blue-500">
+                        Try Again
+                      </button>
+                    </TeamGate>
+                  </div>
+                )
               ) : (
                 <div className="flex flex-col gap-1.5">
                   {job?.status === 'cancelled' && (
