@@ -221,7 +221,16 @@ async def _finalise_audit(
 ) -> None:
     """Writes the completed audit_runs row. data_hash is the lightweight
     fingerprint of the data this run verified — smart audit caching
-    compares it against the live fingerprint. Fail-open."""
+    compares it against the live fingerprint. Fail-open.
+
+    June 25 2026 -- when this run completes (status='complete') and
+    carries a data_hash, auto-resolve every unresolved finding from
+    PRIOR audit runs sharing the same data_hash. The fresh run's
+    findings supersede the older ones for that data fingerprint;
+    leaving the older rows resolved=false caused them to accumulate
+    indefinitely and block report generation forever even after a
+    fresh audit confirmed the issue was no longer present.
+    """
     try:
         from sqlalchemy import text
 
@@ -243,8 +252,120 @@ async def _finalise_audit(
                 "dh": data_hash,
                 "md": json.dumps(metadata), "id": run_id})
             await session.commit()
+        # Supersede old findings -- best-effort, ENTIRELY separate
+        # from the finalise UPDATE so a failure here never undoes
+        # the run completion. Only fires when this run finished
+        # cleanly and we have a data_hash to scope by.
+        if status == "complete" and data_hash:
+            await _supersede_prior_findings(run_id, data_hash)
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_finalise_failed", run_id=run_id, error=str(exc))
+
+
+async def _supersede_prior_findings(
+    new_run_id: int, data_hash: str,
+) -> None:
+    """June 25 2026 -- auto-resolve findings from prior audit
+    runs that share the same data_hash as the newly-completed
+    run. Sets resolved=true, resolution_note='Superseded by audit
+    run #<new_run_id>', and (when the migration-044 columns exist)
+    auto_acknowledged=true / resolved_by='auto_supersede' /
+    resolved_at=now().
+
+    Why scoped by data_hash: a finding from an OLD data
+    fingerprint may have already been fixed by today's analytics;
+    the fresh run for that hash is the authoritative state. We
+    don't supersede across data_hashes -- a finding raised
+    against hash-A is meaningfully distinct from a finding
+    against hash-B and both should remain visible until either
+    is explicitly resolved by the team.
+
+    Fail-open: any DB error logs and returns. The new finding
+    rows still landed; the only side-effect is that the old rows
+    keep their resolved=false state and the team has to clear
+    them manually."""
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return
+        # Detect whether migration 044 columns exist. The first
+        # attempt uses the full UPDATE; on failure fall back to
+        # the legacy UPDATE that only sets resolved + note.
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await session.execute(text(
+                    "UPDATE audit_findings SET "
+                    "resolved = TRUE, "
+                    "resolution_note = :note, "
+                    "auto_acknowledged = TRUE, "
+                    "resolved_by = 'auto_supersede', "
+                    "resolved_at = NOW() "
+                    "WHERE resolved = FALSE "
+                    "AND audit_run_id IN ("
+                    "  SELECT id FROM audit_runs "
+                    "  WHERE data_hash = :dh "
+                    "  AND id <> :rid "
+                    "  AND status = 'complete'"
+                    ")"),
+                    {
+                        "note": (
+                            f"Superseded by audit run "
+                            f"#{new_run_id}"),
+                        "dh": data_hash, "rid": new_run_id,
+                    })
+                await session.commit()
+                superseded = (
+                    result.rowcount
+                    if hasattr(result, "rowcount") else 0)
+                if superseded:
+                    log.info(
+                        "audit_findings_superseded",
+                        new_run_id=new_run_id,
+                        data_hash=data_hash[:12],
+                        superseded_count=superseded)
+                return
+            except Exception:  # noqa: BLE001
+                # Pre-migration-044 column set -- retry with the
+                # legacy UPDATE that only touches resolved + note.
+                # Rollback the aborted transaction first.
+                try:
+                    await session.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                result = await session.execute(text(
+                    "UPDATE audit_findings SET "
+                    "resolved = TRUE, "
+                    "resolution_note = :note "
+                    "WHERE resolved = FALSE "
+                    "AND audit_run_id IN ("
+                    "  SELECT id FROM audit_runs "
+                    "  WHERE data_hash = :dh "
+                    "  AND id <> :rid "
+                    "  AND status = 'complete'"
+                    ")"),
+                    {
+                        "note": (
+                            f"Superseded by audit run "
+                            f"#{new_run_id}"),
+                        "dh": data_hash, "rid": new_run_id,
+                    })
+                await session.commit()
+                superseded = (
+                    result.rowcount
+                    if hasattr(result, "rowcount") else 0)
+                if superseded:
+                    log.info(
+                        "audit_findings_superseded_legacy",
+                        new_run_id=new_run_id,
+                        data_hash=data_hash[:12],
+                        superseded_count=superseded)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_supersede_failed",
+            new_run_id=new_run_id,
+            data_hash=(data_hash or "")[:12],
+            error=str(exc))
 
 
 async def get_last_completed_audit_hash() -> str | None:

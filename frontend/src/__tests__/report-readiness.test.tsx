@@ -297,20 +297,36 @@ describe('DocumentGenerationPanel — readiness gate', () => {
       .closest('.card') as HTMLElement
   }
 
-  it('clicking Generate while blocked opens the modal without firing POST',
+  it('clicking Generate while audit-blocked WARNS but proceeds (no modal)',
     async () => {
+      // June 25 2026 -- audit findings warn but never block per the
+      // platform's fail-open architecture. The amber warning banner
+      // surfaces the unacknowledged count; the regen still fires.
+      // Only caches_not_warm hard-blocks at the client gate.
       useReportReadinessStore.setState({
         readiness: BLOCKED, loading: false, fetchedAt: new Date(),
       })
       mockedAxios.get = vi.fn().mockResolvedValue({ data: BLOCKED })
+      mockedAxios.post = vi.fn().mockResolvedValue({
+        data: { job_id: 'job-1', status: 'pending' },
+      })
       renderWithAuth(<DocumentGenerationPanel />)
+      // The warning banner surfaces with the audit count + the
+      // Go to QA Audit link.
+      expect(await screen.findByTestId(
+        'audit-findings-warning-banner'))
+        .toBeInTheDocument()
       const generateBtn = await waitFor(() =>
         within(briefCardEl())
           .getByRole('button', { name: /^Generate$/ }))
       fireEvent.click(generateBtn)
-      expect(await screen.findByTestId('report-blocking-modal'))
-        .toBeInTheDocument()
-      expect(mockedAxios.post).not.toHaveBeenCalled()
+      // POST fires; modal does NOT.
+      await waitFor(() => {
+        expect(mockedAxios.post).toHaveBeenCalledWith(
+          '/api/v1/export/executive-brief')
+      })
+      expect(screen.queryByTestId('report-blocking-modal'))
+        .toBeNull()
     })
 
   it('clicking Generate while ready fires the POST and no modal',
@@ -332,8 +348,16 @@ describe('DocumentGenerationPanel — readiness gate', () => {
       expect(screen.queryByTestId('report-blocking-modal')).toBeNull()
     })
 
-  it('a server 422 with report_not_ready opens the modal from the response',
+  it('a legacy 422 with report_not_ready does NOT open the modal',
     async () => {
+      // June 25 2026 -- audit-only blockers no longer hard-block
+      // generation. The backend (_require_report_ready) was
+      // changed to warn-not-block; a stale deploy returning the
+      // legacy 422 with error='report_not_ready' should now be
+      // ignored by the client gate (the warning banner above the
+      // cards already surfaces the audit state from the readiness
+      // store). The modal is preserved only for the
+      // caches_not_warm code path.
       useReportReadinessStore.setState({
         readiness: READY, loading: false, fetchedAt: new Date(),
       })
@@ -363,10 +387,12 @@ describe('DocumentGenerationPanel — readiness gate', () => {
           .getByRole('button', { name: /^Generate$/ }))
       fireEvent.click(generateBtn)
 
-      expect(await screen.findByTestId('report-blocking-modal'))
-        .toBeInTheDocument()
-      expect(screen.getByTestId('report-blocker-0').textContent)
-        .toContain('SERVERBLOCKERTOKEN')
-      expect(screen.getByText(/SERVERMESSAGETOKEN/)).toBeInTheDocument()
+      // Wait for the POST to fire + the 422 to propagate.
+      await waitFor(() => {
+        expect(mockedAxios.post).toHaveBeenCalled()
+      })
+      // The blocking modal must NOT open for the audit-only 422.
+      expect(screen.queryByTestId('report-blocking-modal'))
+        .toBeNull()
     })
 })

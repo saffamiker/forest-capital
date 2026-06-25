@@ -395,6 +395,41 @@ async def get_current_draft_with_layer3(
         return None
 
 
+# June 25 2026 -- regeneration cascade rules. When a generated
+# draft lands, it can render dependent documents stale because the
+# narrative + numeric sources of truth flow brief -> appendix ->
+# deck -> script. Each entry lists the OTHER document_types that
+# should also have their is_current=true rows cleared when this
+# type regenerates (the source type itself is always cleared by
+# the existing same-type UPDATE). Empty tuple = no cascade.
+#
+#   brief or appendix  -> mark all four document types stale
+#   deck               -> mark deck + script stale
+#   script             -> script-only; no downstream impact
+#
+# The cascade is GENERATION-only. Manual / uploaded drafts skip
+# the cascade so a one-off content edit doesn't invalidate
+# downstream documents.
+_REGEN_CASCADE: dict[str, tuple[str, ...]] = {
+    "executive_brief": (
+        "analytical_appendix",
+        "presentation_deck",
+        "presentation_script",
+    ),
+    "analytical_appendix": (
+        "executive_brief",
+        "presentation_deck",
+        "presentation_script",
+    ),
+    "presentation_deck": (
+        "presentation_script",
+    ),
+    "presentation_script": (),
+    # Retired type kept for historical drafts; no cascade.
+    "midpoint_paper": (),
+}
+
+
 async def create_draft(
     document_type: str, owner_email: str, title: str,
     content_json: Any, content_text: str | None,
@@ -410,6 +445,15 @@ async def create_draft(
     from the post-generation audit (tools.document_audit). Stored as
     JSONB. Frontend reads it on draft load and renders a banner.
     None on a clean run.
+
+    June 25 2026 -- when created_from == 'generated', also apply
+    the regeneration cascade per _REGEN_CASCADE: brief / appendix
+    regen marks the other three downstream documents' current
+    drafts as stale; deck regen also clears the script's current;
+    script regen cascades to nothing. The cascade fires inside
+    the same transaction as the new draft insert so the team
+    never sees a half-applied state. Manual / uploaded drafts
+    skip the cascade.
     """
     try:
         from sqlalchemy import text
@@ -448,6 +492,28 @@ async def create_draft(
                  "wc": word_count(content_text), "cf": created_from,
                  "aw": aw})
             found = row.fetchone()
+            # June 25 2026 -- regeneration cascade. Applies only
+            # to generated drafts; manual / uploaded paths leave
+            # downstream documents alone. Empty cascade tuple
+            # (script) is a no-op.
+            if created_from == "generated":
+                cascade = _REGEN_CASCADE.get(document_type, ())
+                if cascade:
+                    placeholders = ", ".join(
+                        f":t{i}" for i in range(len(cascade)))
+                    params: dict[str, str] = {
+                        f"t{i}": dt for i, dt in enumerate(cascade)}
+                    await s.execute(text(
+                        "UPDATE editor_drafts "
+                        "SET is_current = false "
+                        "WHERE is_current = true "
+                        "AND is_deleted = false "
+                        f"AND document_type IN ({placeholders})"),
+                        params)
+                    log.info(
+                        "editor_regen_cascade_applied",
+                        source_document_type=document_type,
+                        cascade_types=list(cascade))
             await s.commit()
             return _draft_row(found) if found else None
     except Exception as exc:  # noqa: BLE001
