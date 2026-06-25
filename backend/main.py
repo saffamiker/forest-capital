@@ -3493,21 +3493,36 @@ async def post_light_refresh(
     strategy_hash: str | None = None
 
     # Step 1 -- backtester + strategy_results_cache write.
+    #
+    # June 25 2026 -- unified on Hash A. Previously this step used
+    # tools.cache._compute_data_hash(n_rows, last_date, n_strategies)
+    # (Hash B), which produced a value the UI Live Hash banner
+    # (current_data_hash, Hash A) could never match. Every refresh
+    # left the Light Refresh status table permanently 'Stale' and
+    # the draft chip permanently amber because the two columns
+    # read different formulas. The audit confirmed Hash A is the
+    # canonical platform-state fingerprint (see audit_assembler
+    # .current_data_hash docstring -- derived-cache churn must NOT
+    # invalidate it). Switching the refresh to stamp Hash A makes
+    # the Draft Hash + Live Hash columns finally agree.
     try:
         from tools.backtester import run_all_strategies
-        from tools.cache import (
-            _compute_data_hash, set_strategy_cache,
-        )
+        from tools.cache import set_strategy_cache
         from tools.data_fetcher import get_full_history_async
+        from tools.audit_assembler import current_data_hash
         history = await get_full_history_async()
         monthly = history.get("equity_monthly")
         n_rows = len(monthly) if monthly is not None else 0
-        last_date = (
-            str(monthly.index[-1].date())
-            if monthly is not None and len(monthly) > 0
-            else "unknown")
-        strategy_hash = _compute_data_hash(
-            n_rows, last_date, n_strategies=10)
+        strategy_hash = await current_data_hash()
+        if not strategy_hash:
+            # current_data_hash returns "" on a degraded data path
+            # (the source tables haven't loaded). Fall through with
+            # an empty hash so the step records the failure mode
+            # rather than crashing -- set_strategy_cache treats an
+            # empty key as a no-op and the response's strategy_hash
+            # field surfaces null.
+            log.warning(
+                "light_refresh_current_data_hash_empty")
         results_dict = await asyncio.to_thread(
             run_all_strategies, history)
         await set_strategy_cache(
