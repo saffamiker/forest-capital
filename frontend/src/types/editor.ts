@@ -106,6 +106,12 @@ export interface EditorDraft {
   /** Per-check post-generation audit flag list. NULL on a clean
    *  run. The frontend renders AuditWarningsBanner when present. */
   audit_warnings?: AuditWarnings | null
+  /** June 25 2026 -- data_hash the draft was generated against.
+   *  Used by DataHashChip + the export-warning modal pre-flight.
+   *  Optional on the type because pre-migration-057 deploys never
+   *  populated it; null is treated as "unknown" and the chip
+   *  hides entirely. */
+  data_hash?: string | null
 }
 
 export interface EditorDraftVersion {

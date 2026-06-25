@@ -19,8 +19,10 @@ import RichTextEditor from '../components/editor/RichTextEditor'
 import CanvasSlideEditor from '../components/editor/CanvasSlideEditor'
 import ChartPicker from '../components/editor/ChartPicker'
 import EditorNavigator from '../components/editor/EditorNavigator'
+import DataHashChip from '../components/editor/DataHashChip'
 import DraftVersionSelector from '../components/editor/DraftVersionSelector'
 import EditorTasksCallout from '../components/editor/EditorTasksCallout'
+import ExportWarningModal from '../components/ExportWarningModal'
 import AuditWarningsBanner from '../components/editor/AuditWarningsBanner'
 import PresentationPreview from '../components/editor/PresentationPreview'
 import RehearsalOverlay from '../components/editor/RehearsalOverlay'
@@ -336,7 +338,18 @@ export default function DocumentEditor() {
 
   // In-editor export — flushes pending edits, then POSTs the draft id to
   // the matching export endpoint and downloads the rendered file.
-  const exportDocument = useCallback(async () => {
+  // June 25 2026 -- export warning state. The Export button now
+  // runs pre-flight checks (hash mismatch + missing review) and
+  // surfaces a soft block modal when either condition fires.
+  // "Export Anyway" routes through doExport without re-running
+  // the checks; Cancel closes the modal without exporting.
+  const [exportWarning, setExportWarning] = useState<{
+    open:          boolean
+    hashMismatch:  boolean
+    missingReview: boolean
+  }>({ open: false, hashMismatch: false, missingReview: false })
+
+  const doExport = useCallback(async () => {
     if (!draft) return
     setExporting(true)
     try {
@@ -361,6 +374,44 @@ export default function DocumentEditor() {
       setExporting(false)
     }
   }, [draft, id, save])
+
+  const exportDocument = useCallback(async () => {
+    if (!draft) return
+    // Pre-flight checks. Both fail-open: a network failure on
+    // either fetch falls through to the export without warning
+    // rather than blocking on a transient infra issue.
+    let hashMismatch = false
+    let missingReview = false
+    try {
+      const verifyRes = await axios.get<{
+        current_data_hash?: string
+      }>('/api/v1/audit/runs/latest')
+      const liveHash = verifyRes.data?.current_data_hash
+      if (liveHash
+          && draft.data_hash
+          && draft.data_hash !== liveHash) {
+        hashMismatch = true
+      }
+    } catch {
+      /* fall through */
+    }
+    try {
+      const r = await axios.get<{ has_review?: boolean }>(
+        `/api/v1/documents/drafts/${id}/academic-review-status`)
+      if (r.data?.has_review === false) {
+        missingReview = true
+      }
+    } catch {
+      /* fall through */
+    }
+    if (hashMismatch || missingReview) {
+      setExportWarning({
+        open: true, hashMismatch, missingReview,
+      })
+      return
+    }
+    await doExport()
+  }, [draft, id, doExport])
 
   // Script export — the master script, or one speaker's slides only.
   const exportScript = useCallback(async (speaker?: string) => {
@@ -674,17 +725,27 @@ export default function DocumentEditor() {
               })}
             </>
           ) : (
-            <button type="button" onClick={() => void exportDocument()}
-              disabled={exporting}
-              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                         border border-electric/40 text-electric
-                         hover:bg-electric/10 disabled:opacity-50">
-              {exporting
-                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Exporting…</>
-                : <><Download className="w-3.5 h-3.5" />
-                    {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
-            </button>
+            <>
+              {/* June 25 2026 -- data hash freshness chip next to
+                  the Export button so Bob and Molly see whether
+                  the draft is aligned with the analytics cache
+                  before they export. Renders nothing while either
+                  hash is unavailable so no misleading flash on
+                  first mount. */}
+              <DataHashChip
+                draftDataHash={draft.data_hash} />
+              <button type="button" onClick={() => void exportDocument()}
+                disabled={exporting}
+                className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                           border border-electric/40 text-electric
+                           hover:bg-electric/10 disabled:opacity-50">
+                {exporting
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Exporting…</>
+                  : <><Download className="w-3.5 h-3.5" />
+                      {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
+              </button>
+            </>
           )}
           {isDeck && (
             <button type="button" onClick={() => setPreviewOpen(true)}
@@ -933,6 +994,37 @@ export default function DocumentEditor() {
           loading / 404 / error states. */}
       {rehearsalOpen && isScript && (
         <RehearsalOverlay onClose={() => setRehearsalOpen(false)} />
+      )}
+
+      {/* June 25 2026 -- export pre-flight warning modal. Fires
+          before exportDocument when the draft is stale (hash
+          mismatch) and/or the academic review has not been run.
+          Soft block: Cancel returns to the editor; Export Anyway
+          proceeds with doExport. */}
+      {draft && (
+        <ExportWarningModal
+          open={exportWarning.open}
+          hashMismatch={exportWarning.hashMismatch}
+          missingReview={exportWarning.missingReview}
+          documentLabel={
+            draft.document_type === 'executive_brief'
+              ? 'Brief'
+              : draft.document_type === 'analytical_appendix'
+                ? 'Appendix'
+                : draft.document_type === 'presentation_deck'
+                  ? 'Deck'
+                  : draft.document_type === 'presentation_script'
+                    ? 'Script'
+                    : 'Document'}
+          onCancel={() => setExportWarning(
+            { open: false, hashMismatch: false,
+              missingReview: false })}
+          onConfirm={() => {
+            setExportWarning(
+              { open: false, hashMismatch: false,
+                missingReview: false })
+            void doExport()
+          }} />
       )}
     </div>
   )
