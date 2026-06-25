@@ -6848,8 +6848,38 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                     analytics_snapshot=ctx.get("analytics"),
                     strategy_results=strategy_results_for_findings,
                 )
+                # June 25 2026 -- pass the primary document to the
+                # independent reviewer so it reads the same source
+                # the peers did rather than the extracted-findings
+                # block alone. The doc is sourced from
+                # gather_review_context's docs_by_type (already
+                # overlaid with the team-shared editor draft via
+                # get_current_draft_by_type). Falls back to an empty
+                # string when no target document was supplied (the
+                # cross-document review path); the independent
+                # reviewer's _build_user_message then skips the
+                # primary-document block.
+                primary_doc_text: str = ""
+                try:
+                    target_review = (
+                        ctx.get("target_review_type")
+                        or None)
+                    docs_by_type = (
+                        ctx.get("documents_by_type") or {})
+                    if target_review and isinstance(
+                            docs_by_type, dict):
+                        rows = (
+                            docs_by_type.get(target_review) or [])
+                        if rows and isinstance(rows[0], dict):
+                            primary_doc_text = str(
+                                rows[0].get("content_text") or "")
+                except Exception as _exc:  # noqa: BLE001
+                    log.info(
+                        "independent_review_primary_doc_lookup_failed",
+                        error=str(_exc))
                 independent = await asyncio.to_thread(
-                    run_independent_review, findings)
+                    run_independent_review,
+                    findings, primary_doc_text or None)
                 independent["findings_seen"] = findings
                 yield _sse("independent_review", **independent)
                 log.info(
