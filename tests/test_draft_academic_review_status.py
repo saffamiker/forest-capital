@@ -262,11 +262,18 @@ class TestEndpointShape:
 
     @pytest.mark.skipif(not _db_ready(),
                         reason="endpoint contract test needs a live DB")
-    def test_rejects_other_users_drafts_with_404(
+    def test_team_members_see_other_users_drafts(
         self, clean_editor_drafts,
     ):
-        """A draft Bob does not own is a 404 — never confirms that
-        Molly's draft exists by returning its content."""
+        """June 25 2026 -- documents are team-shared (PR #399 removed
+        owner-scoping from the canonical drafts endpoints; PR #406
+        removed it here too). Bob now sees the status of Molly's
+        draft because the team needs to be able to review each
+        other's drafts in the editor regardless of who generated
+        them. Viewers (Dr. Panttser) still get 403 via require_team_
+        member -- that gate is the authoritative access boundary.
+        Previously the endpoint owner-scoped and returned 404 to
+        non-owners."""
         from tools.editor_drafts import create_draft
 
         async def _setup() -> int:
@@ -283,7 +290,10 @@ class TestEndpointShape:
         r = client.get(
             f"/api/v1/documents/drafts/{draft_id}/academic-review-status",
             headers=BOB)
-        assert r.status_code == 404
+        assert r.status_code == 200
+        body = r.json()
+        assert body["draft_id"] == draft_id
+        assert body["document_type"] == "midpoint_paper"
 
     @pytest.mark.skipif(not _db_ready(),
                         reason="endpoint contract test needs a live DB")
