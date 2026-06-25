@@ -649,45 +649,41 @@ class TestGenerationGate:
 
         monkeypatch.setattr(report_readiness, "compute_readiness", _blocked)
 
-    def test_executive_brief_blocked_returns_422_full_payload(
+    def test_executive_brief_audit_block_now_warns_not_blocks(
         self, monkeypatch, client: TestClient,
     ):
-        # PR-B (June 2026) retired /api/v1/export/midpoint-paper; the
-        # full structured-error payload is now pinned via the executive-
-        # brief endpoint, which uses the same _require_report_ready()
-        # gate so the contract surface is identical.
+        # June 25 2026 -- audit findings WARN, never BLOCK per the
+        # platform's fail-open architecture. The gate logs the
+        # finding count but proceeds with the regen kickoff (202).
+        # The frontend reads /api/v1/report/readiness separately
+        # to surface the amber warning banner; the gate itself no
+        # longer hard-blocks. Pinned previously as 422 with
+        # error='report_not_ready' (test name kept verbatim in the
+        # commit-message history).
         self._seed_blockers(monkeypatch)
         r = client.post("/api/v1/export/executive-brief",
                         headers=_auth_headers(), json={})
-        assert r.status_code == 422
+        assert r.status_code == 202
         body = r.json()
-        # FastAPI nests the structured error under 'detail'.
-        detail = body.get("detail")
-        assert detail is not None
-        assert detail["error"] == "report_not_ready"
-        assert detail["blocking_count"] == 2
-        blockers = detail["blockers"]
-        joined = "\n".join(blockers)
-        assert "GATETESTSTATCHECK" in joined
-        assert "GATETESTMETHCHECK" in joined
+        # 202 carries the job id payload, not a structured error.
+        assert "job_id" in body
+        assert body.get("status") == "pending"
 
-    def test_executive_brief_blocked_returns_422(
+    def test_executive_brief_audit_block_does_not_422(
         self, monkeypatch, client: TestClient,
     ):
         self._seed_blockers(monkeypatch)
         r = client.post("/api/v1/export/executive-brief",
                         headers=_auth_headers(), json={})
-        assert r.status_code == 422
-        assert r.json()["detail"]["error"] == "report_not_ready"
+        assert r.status_code == 202
 
-    def test_presentation_deck_blocked_returns_422(
+    def test_presentation_deck_audit_block_does_not_422(
         self, monkeypatch, client: TestClient,
     ):
         self._seed_blockers(monkeypatch)
         r = client.post("/api/v1/export/presentation-deck",
                         headers=_auth_headers(), json={})
-        assert r.status_code == 422
-        assert r.json()["detail"]["error"] == "report_not_ready"
+        assert r.status_code == 202
 
     def test_editor_export_path_skips_the_gate(
         self, monkeypatch, client: TestClient,
