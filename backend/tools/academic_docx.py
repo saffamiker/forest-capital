@@ -565,12 +565,6 @@ def build_executive_brief(
     # Factor-loading table accompanies the validation prose.
     _add_heading(doc, "2. Methodology Overview")
     _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
-    # June 25 2026 -- Figure 2 (Rolling Correlation) lands inline
-    # after the methodology prose. Section 2 discusses the
-    # regime-conditional model and the 2022 correlation regime
-    # break -- the rolling correlation chart visualises that break.
-    embed_brief_figure_by_key(
-        doc, "rolling_correlation", data, substitution_table)
     h, r = table_factor_loadings(data.get("factor_loadings", []))
     _add_table(doc, "Table 2. Carhart Four-Factor Loadings "
                     "(* significant at p < .05)", h, r)
@@ -580,14 +574,6 @@ def build_executive_brief(
     # the findings (summary statistics + regime-conditional performance).
     _add_heading(doc, "3. Key Findings and Insights")
     _add_body(doc, narratives.get("key_findings", "[DATA PENDING]"))
-    # June 25 2026 -- Figures 1 + 3 land inline in Section 3.
-    # Figure 1 (Cumulative Return) anchors the three-strategy
-    # comparison; Figure 3 (Efficient Frontier) anchors the
-    # volatility-return discussion.
-    embed_brief_figure_by_key(
-        doc, "cumulative_returns", data, substitution_table)
-    embed_brief_figure_by_key(
-        doc, "efficient_frontier", data, substitution_table)
     # Audit-readiness one-liner -- surfaces the platform's audit
     # verdict here (the validation context for the findings claims).
     from tools.audit_summary import audit_summary_sentence
@@ -623,31 +609,33 @@ def build_executive_brief(
     _add_heading(doc, "5. Final Recommendations")
     _add_body(doc, narratives.get(
         "final_recommendations", "[DATA PENDING]"))
-    # June 25 2026 -- Figure 4 (OOS Sharpe Comparison) lands inline
-    # at the end of Section 5; it anchors the OOS Sharpe 0.86 vs
-    # 0.43 conclusion in the final recommendations.
-    embed_brief_figure_by_key(
-        doc, "strategy_comparison", data, substitution_table)
 
-    # Section 6 -- VISUALS. June 25 2026: figures are now placed
-    # inline next to the prose that references them (Section 2:
-    # rolling correlation; Section 3: cumulative return + efficient
-    # frontier; Section 5: OOS Sharpe). Section 6 retains a brief
+    # Section 6 -- VISUALS. June 25 2026: section retains the prose
     # summary describing what each chart shows so the rubric's
-    # Visuals section still has anchoring prose. The skip_keys
-    # argument prevents duplicate embeds if any inline call failed
-    # silently -- defensive against the (unlikely) case where the
-    # inline embed produced no visible figure.
+    # Visuals section still has anchoring text, but the figure
+    # IMAGES are placed inline near the paragraphs that reference
+    # them (see _place_brief_figures_inline call below). Figures
+    # that don't match any inline trigger fall back to Section 6
+    # via the _embed_brief_figures(skip_keys=<inline-placed>) call.
     _add_heading(doc, "6. Visuals to Demonstrate the Insights")
     _add_body(doc, narratives.get("visuals", "[DATA PENDING]"))
+
+    # June 25 2026 -- post-prose paragraph-level figure placement.
+    # All section prose is now in the doc; iterate paragraphs and
+    # move each figure to immediately after its anchor paragraph.
+    # Logs a 'figure_placement' event per figure (inline / fallback_
+    # append) so Render telemetry shows which anchors fired.
+    placement = _place_brief_figures_inline(
+        doc, data, substitution_table)
+    inline_placed = {
+        k for k, v in placement.items() if v == "inline"}
+    # Section 6 fallback append: any figure whose anchor paragraph
+    # could not be located in the prose still renders -- it gets
+    # appended at the end of the doc (after Section 6) instead of
+    # silently going missing.
     _embed_brief_figures(
         doc, data, substitution_table,
-        skip_keys={
-            "cumulative_returns",
-            "rolling_correlation",
-            "efficient_frontier",
-            "strategy_comparison",
-        })
+        skip_keys=inline_placed)
 
     # Audit Disclosure Appendix carries the platform's audit trail.
     _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
@@ -744,20 +732,31 @@ def _embed_brief_figures(
 
 
 # June 25 2026 -- inline-placement triggers. The brief prose
-# references specific concepts that anchor each chart. When the
-# Academic Writer's prose contains a trigger substring (case-
-# insensitive) the corresponding figure renders inline immediately
+# references specific concepts that anchor each chart. When a
+# paragraph's plain text contains a trigger substring (case-
+# insensitive), the corresponding figure renders inline immediately
 # after that paragraph instead of being appended to Section 6.
-# Triggers are intentionally broad -- the agent's exact wording
-# varies between generations. First-trigger wins: a figure that
-# already embedded inline won't re-fire on a later match.
+#
+# Each entry's trigger tuple is ordered from most-specific (the
+# canonical phrasing the Academic Writer is prompted to emit) to
+# least-specific (looser fallbacks that catch human-edited prose).
+# First match wins; a figure that already embedded inline won't
+# re-fire on a later paragraph.
 INLINE_FIGURE_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cumulative_returns", (
+        # Specific anchor (the brief's canonical phrasing)
+        "cumulative_returns chart tells the story",
+        "cumulative return chart tells the story",
+        # Looser fallbacks
         "cumulative return",
         "cumulative portfolio return",
         "cumulative_returns chart",
     )),
     ("rolling_correlation", (
+        # Specific anchor
+        "equity-to-ig-bond correlation moved from -0.05",
+        "equity-to-ig-bond correlation",
+        # Looser fallbacks
         "equity-bond correlation",
         "equity-ig correlation",
         "correlation regime",
@@ -765,16 +764,130 @@ INLINE_FIGURE_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "regime break",
     )),
     ("efficient_frontier", (
+        # Specific anchors
         "efficient frontier",
+        "volatility-return space",
+        # Looser fallbacks
         "volatility-return",
         "risk-return frontier",
     )),
     ("strategy_comparison", (
+        # Specific anchor (the OOS sharpe bench-vs-blend phrasing)
+        "0.86 (blend) versus 0.43 (benchmark)",
+        "0.86 (blend) vs 0.43 (benchmark)",
+        # Looser fallbacks
         "oos sharpe",
         "out-of-sample sharpe",
         "0.86",   # the canonical OOS_SHARPE_BLEND
     )),
 )
+
+
+def _place_brief_figures_inline(
+    doc: Document,
+    data: dict[str, Any],
+    substitution_table: dict[str, str] | None,
+) -> dict[str, str]:
+    """June 25 2026 -- post-prose paragraph-level figure placement.
+
+    The user-facing intent: each of the four APA figures should
+    appear immediately after the paragraph that first references
+    its concept, NOT at the end of the document in Section 6. The
+    previous implementation placed figures right after each
+    Section heading (Section 2 / 3 / 5), but the user wants
+    paragraph-level granularity so the visual lands next to the
+    sentence that motivated it.
+
+    Algorithm:
+      For each (renderer_key, triggers) in INLINE_FIGURE_TRIGGERS:
+        1. Iterate doc.paragraphs; find the first paragraph whose
+           text (lower-cased) contains any trigger phrase.
+        2. If found: snapshot len(doc.paragraphs), call
+           embed_brief_figure_by_key (which appends paragraphs at
+           the END of the doc), then move the appended paragraphs
+           to immediately after the anchor via XML addnext in
+           reverse order so their internal sequence is preserved.
+        3. If no anchor found: skip here; the caller's Section 6
+           _embed_brief_figures(skip_keys=<placed-inline-keys>)
+           appends the figure as a fallback.
+
+    Logs a structured 'figure_placement' event per figure with
+    placement in {'inline', 'fallback_append'} so the operator can
+    inspect Render logs to see whether the prose actually carried
+    the anchor phrases this generation.
+
+    Returns a dict mapping renderer_key -> 'inline' |
+    'fallback_append'. The caller passes the inline set to
+    _embed_brief_figures.skip_keys so the appended-at-end fallback
+    skips figures that already landed inline."""
+    import structlog as _structlog
+    _log = _structlog.get_logger(__name__)
+    placement: dict[str, str] = {}
+
+    for renderer_key, triggers in INLINE_FIGURE_TRIGGERS:
+        # 1. Locate the first paragraph whose text matches any
+        # trigger phrase. doc.paragraphs is a list of every top-
+        # level Paragraph; we scan in document order so 'first
+        # reference wins' even when a phrase repeats later.
+        anchor_para = None
+        matched_trigger: str | None = None
+        for p in doc.paragraphs:
+            text = (p.text or "").lower()
+            if not text.strip():
+                continue
+            for trig in triggers:
+                if trig in text:
+                    anchor_para = p
+                    matched_trigger = trig
+                    break
+            if anchor_para is not None:
+                break
+
+        if anchor_para is None:
+            placement[renderer_key] = "fallback_append"
+            _log.info(
+                "figure_placement",
+                figure=renderer_key,
+                placement="fallback_append")
+            continue
+
+        # 2. Snapshot the paragraph count, then call the embed
+        # helper which appends figure paragraphs at the END of the
+        # doc. We diff before/after to identify the new elements,
+        # then move them to immediately after the anchor.
+        before_count = len(doc.paragraphs)
+        ok = embed_brief_figure_by_key(
+            doc, renderer_key, data, substitution_table)
+        if not ok:
+            placement[renderer_key] = "fallback_append"
+            _log.info(
+                "figure_placement",
+                figure=renderer_key,
+                placement="fallback_append",
+                reason="embed_brief_figure_by_key returned False")
+            continue
+        new_paragraphs = doc.paragraphs[before_count:]
+
+        # 3. Move the new paragraphs to immediately after
+        # anchor_para. addnext inserts each element as the
+        # IMMEDIATE next sibling, so iterating in REVERSE order
+        # produces the correct final sequence:
+        #   anchor -> P1 -> P2 -> P3   (the desired order)
+        # is achieved by addnext(P3), addnext(P2), addnext(P1)
+        # against the anchor, since each addnext lands right after
+        # the anchor and pushes the prior insertion further right.
+        for new_p in reversed(new_paragraphs):
+            anchor_para._element.addnext(new_p._element)
+
+        placement[renderer_key] = "inline"
+        _log.info(
+            "figure_placement",
+            figure=renderer_key,
+            placement="inline",
+            matched_trigger=matched_trigger,
+            anchor_text=(anchor_para.text or "")[:120])
+
+    return placement
 
 
 def _figure_index_for_key(renderer_key: str) -> int:
