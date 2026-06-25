@@ -605,23 +605,31 @@ async def gather_review_context(
         log.warning("academic_review_documents_read_failed", error=str(exc))
     docs_by_type = group_documents_by_type(docs)
 
-    # Overlay the reviewer's editor drafts — a current draft replaces the
-    # uploaded file of the corresponding type.
-    if reviewer_email:
-        try:
-            from tools.editor_drafts import get_current_draft
-            for ed_type, rv_type in _EDITOR_TO_REVIEW_TYPE.items():
-                draft = await get_current_draft(reviewer_email, ed_type)
-                if draft and (draft.get("content_text") or "").strip():
-                    docs_by_type[rv_type] = [{
-                        "document_type": rv_type,
-                        "name": (f"{draft['title']} "
-                                 f"(editor draft, v{draft['version']})"),
-                        "content_text": draft["content_text"],
-                    }]
-        except Exception as exc:  # noqa: BLE001
-            log.warning("academic_review_editor_overlay_failed",
-                        error=str(exc))
+    # Overlay the canonical editor drafts — the team-shared current
+    # draft replaces the uploaded file of the corresponding type.
+    # June 25 2026 -- switched from get_current_draft(owner_email, ...)
+    # to get_current_draft_by_type(...). The owner-scoped read was
+    # the root cause of the per-document review running against
+    # requirements docs only when the reviewer didn't generate the
+    # brief themselves: Bob generates the brief, Mike opens Academic
+    # Review, Mike has no current draft of his own, the overlay
+    # skips, the context block surfaces only the academic_documents
+    # rows (requirements PDFs). Team-shared lookup finds the
+    # canonical draft regardless of owner.
+    try:
+        from tools.editor_drafts import get_current_draft_by_type
+        for ed_type, rv_type in _EDITOR_TO_REVIEW_TYPE.items():
+            draft = await get_current_draft_by_type(ed_type)
+            if draft and (draft.get("content_text") or "").strip():
+                docs_by_type[rv_type] = [{
+                    "document_type": rv_type,
+                    "name": (f"{draft['title']} "
+                             f"(editor draft, v{draft['version']})"),
+                    "content_text": draft["content_text"],
+                }]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_review_editor_overlay_failed",
+                    error=str(exc))
 
     # Team-activity summary — analytical sessions only; testing-session
     # activity is never injected into agent context.
@@ -646,23 +654,22 @@ async def gather_review_context(
             document_type, document_type)
         # Concern 6b -- read the target draft's value_manifest so
         # the context block can surface the authoritative cache
-        # values to the arbiter. The Layer-3 helper returns the
-        # manifest alongside content_text; we already overlaid the
-        # draft above so this read is for the manifest only.
-        if reviewer_email:
-            try:
-                from tools.editor_drafts import (
-                    get_current_draft_with_layer3,
-                )
-                draft_l3 = await get_current_draft_with_layer3(
-                    reviewer_email, document_type)
-                if draft_l3:
-                    target_value_manifest = (
-                        draft_l3.get("value_manifest") or None)
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "academic_review_value_manifest_read_failed",
-                    document_type=document_type, error=str(exc))
+        # values to the arbiter. June 25 2026: use the team-shared
+        # variant for the same reason the overlay loop above does.
+        try:
+            from tools.editor_drafts import (
+                get_current_draft_by_type_with_layer3,
+            )
+            draft_l3 = (
+                await get_current_draft_by_type_with_layer3(
+                    document_type))
+            if draft_l3:
+                target_value_manifest = (
+                    draft_l3.get("value_manifest") or None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "academic_review_value_manifest_read_failed",
+                document_type=document_type, error=str(exc))
     block = build_review_context_block(
         analytics, docs_by_type, team_activity, team_members,
         target_review_type=target_review_type,

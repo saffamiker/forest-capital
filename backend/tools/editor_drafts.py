@@ -232,6 +232,10 @@ async def get_current_draft(
     The user's current draft for a document type — the one Academic
     Review reads in preference to an uploaded file. None when the user
     has no draft of that type.
+
+    Owner-scoped retained for legacy callers and tests. The academic
+    review flow now reads team-shared drafts via
+    get_current_draft_by_type (June 25 2026).
     """
     try:
         from sqlalchemy import text
@@ -249,6 +253,85 @@ async def get_current_draft(
             return _draft_row(found) if found else None
     except Exception as exc:  # noqa: BLE001
         log.warning("editor_get_current_draft_failed", error=str(exc))
+        return None
+
+
+async def get_current_draft_by_type(
+    document_type: str,
+) -> dict[str, Any] | None:
+    """June 25 2026 -- team-shared variant of get_current_draft.
+    Returns the single is_current=true draft for a document_type
+    regardless of owner_email so the academic review picks up the
+    canonical brief / deck / appendix / script even when the reviewer
+    didn't generate it themselves.
+
+    Documents are team-shared (PR #399 removed owner-scoping from the
+    drafts API; PR #402 added the one-current-per-type DB constraint
+    via migration 062), so the assumption that one row exists at most
+    is enforced at the DB layer."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            row = await s.execute(text(
+                f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                "WHERE document_type = :t "
+                "AND is_current = true AND is_deleted = false "
+                "ORDER BY updated_at DESC LIMIT 1"),
+                {"t": document_type})
+            found = row.fetchone()
+            return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_get_current_draft_by_type_failed",
+            error=str(exc))
+        return None
+
+
+async def get_current_draft_by_type_with_layer3(
+    document_type: str,
+) -> dict[str, Any] | None:
+    """June 25 2026 -- team-shared variant of
+    get_current_draft_with_layer3 (value_manifest + data_hash). Same
+    fail-open pattern as the sibling: falls back to the legacy SELECT
+    if migration 057 hasn't run, then to None on any further failure.
+    Used by gather_review_context for the per-doc value_manifest
+    surface so the critic context's NUMERIC REFERENCE section reflects
+    the canonical draft regardless of who generated it."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            try:
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS_LAYER3} FROM editor_drafts "
+                    "WHERE document_type = :t "
+                    "AND is_current = true AND is_deleted = false "
+                    "ORDER BY updated_at DESC LIMIT 1"),
+                    {"t": document_type})
+                found = row.fetchone()
+                return _draft_row(found) if found else None
+            except Exception:  # noqa: BLE001
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    "WHERE document_type = :t "
+                    "AND is_current = true AND is_deleted = false "
+                    "ORDER BY updated_at DESC LIMIT 1"),
+                    {"t": document_type})
+                found = row.fetchone()
+                return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_get_current_draft_by_type_with_layer3_failed",
+            error=str(exc))
         return None
 
 
