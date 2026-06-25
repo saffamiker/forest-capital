@@ -145,6 +145,80 @@ def _add_heading(doc: Document, text: str, *, size: int = 13) -> None:
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*(?P<inner>[^*\n]+)\*\*")
 
 
+# Brief markdown heading detection. The Academic Writer's
+# narratives occasionally emit `# Title`, `## Section N`, and
+# `### References` lines that fell through _add_body as literal
+# text (the `#` characters wrote into <w:t> instead of being
+# stripped and the paragraph styled as Heading N). This pattern
+# fires line-by-line in _add_brief_body; the scope is intentionally
+# narrow -- only brief narratives route through there.
+_MD_HEADING_LINE_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
+
+
+def _add_md_heading_paragraph(
+    doc: Document, text: str, level: int,
+) -> None:
+    """Append a Word Heading <level> style paragraph for the
+    brief markdown-heading conversion path. Level is clamped to
+    [1, 3] (Heading 4+ is not in scope for the brief). Falls back
+    to a plain bold paragraph in body font when the template
+    doesn't carry the named style -- shouldn't happen with
+    python-docx's default template, but the guard keeps the
+    builder from crashing on a custom .docx template that strips
+    the built-in heading styles."""
+    level = max(1, min(level, 3))
+    try:
+        para = doc.add_paragraph(style=f"Heading {level}")
+    except (KeyError, Exception):  # noqa: BLE001
+        # Custom template missing the Heading style -- fall back
+        # to a bold body paragraph so the heading still visually
+        # reads as one even without the outline-level structure.
+        para = doc.add_paragraph()
+    run = para.add_run(text)
+    run.bold = True
+    run.font.name = _BODY_FONT
+    # Heading 1 = 16pt; Heading 2 = 14pt; Heading 3 = 13pt. Sizes
+    # follow the brief's existing _add_heading defaults so the
+    # converted markdown headings sit visually correct next to
+    # any inline section headings the builder emits via
+    # _add_heading (Section 2/3/etc.).
+    run.font.size = Pt({1: 16, 2: 14, 3: 13}.get(level, 13))
+
+
+def _add_brief_body(doc: Document, text: str) -> None:
+    """Brief-specific body writer that converts markdown heading
+    prefixes (# / ## / ###) at the start of a block (or as a
+    standalone first line) into Word Heading 1 / 2 / 3 style
+    paragraphs so the brief DOCX outline + navigation pane
+    surface the document structure correctly. Non-heading
+    content delegates to _add_body, which still handles
+    [[VERIFY: …]] markers and **markdown bold** inline emphasis.
+
+    Scope: brief narratives only (build_executive_brief). The
+    deck + appendix builders keep their existing _add_body calls
+    -- the markdown-heading symptom was observed on the brief
+    only and the user spec narrowed the fix to that surface."""
+    for block in (text or "").strip().split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        first_line, _, rest = block.partition("\n")
+        m = _MD_HEADING_LINE_RE.match(first_line.strip())
+        if m is None:
+            # No markdown heading on the first line; defer to
+            # the legacy body writer for the whole block.
+            _add_body(doc, block)
+            continue
+        level = len(m.group(1))
+        heading_text = m.group(2).strip()
+        _add_md_heading_paragraph(doc, heading_text, level)
+        if rest.strip():
+            # Block had a heading on line 1 followed by prose --
+            # write the remaining lines as a body block so any
+            # [[VERIFY]] / bold markers in the body still render.
+            _add_body(doc, rest)
+
+
 def _add_body(doc: Document, text: str) -> None:
     """
     Renders blank-line-separated prose — one Word paragraph per block.
@@ -556,7 +630,8 @@ def build_executive_brief(
     # Drawdown comparison table embedded here so the 27-point number
     # is visible alongside the prose claim.
     _add_heading(doc, "1. Executive Summary")
-    _add_body(doc, narratives.get("executive_summary", "[DATA PENDING]"))
+    _add_brief_body(
+        doc, narratives.get("executive_summary", "[DATA PENDING]"))
     h, r = table_drawdown(data.get("drawdown_comparison", []))
     _add_table(doc, "Table 1. Drawdown and Recovery by Strategy", h, r)
 
@@ -564,7 +639,8 @@ def build_executive_brief(
     # the rubric ordering (methodology sets the stage before findings).
     # Factor-loading table accompanies the validation prose.
     _add_heading(doc, "2. Methodology Overview")
-    _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
+    _add_brief_body(
+        doc, narratives.get("methodology", "[DATA PENDING]"))
     h, r = table_factor_loadings(data.get("factor_loadings", []))
     _add_table(doc, "Table 2. Carhart Four-Factor Loadings "
                     "(* significant at p < .05)", h, r)
@@ -573,13 +649,14 @@ def build_executive_brief(
     # comparison + honest 2-of-9 + FDR disclosure. Two tables anchor
     # the findings (summary statistics + regime-conditional performance).
     _add_heading(doc, "3. Key Findings and Insights")
-    _add_body(doc, narratives.get("key_findings", "[DATA PENDING]"))
+    _add_brief_body(
+        doc, narratives.get("key_findings", "[DATA PENDING]"))
     # Audit-readiness one-liner -- surfaces the platform's audit
     # verdict here (the validation context for the findings claims).
     from tools.audit_summary import audit_summary_sentence
     audit_line = audit_summary_sentence(data.get("audit_disclosures") or {})
     if audit_line:
-        _add_body(doc, audit_line)
+        _add_brief_body(doc, audit_line)
     h, r = table_summary_statistics(data.get("summary_statistics", []))
     _add_table(doc, "Table 3. Summary Statistics by Asset Class", h, r)
     h, r = table_regime_conditional(data.get("regime_conditional", []))
@@ -593,11 +670,12 @@ def build_executive_brief(
     # recommendations"). Audit body paragraph anchors the validation
     # surface as the closing limitation context.
     _add_heading(doc, "4. Limitations and Risks")
-    _add_body(doc, narratives.get("limitations", "[DATA PENDING]"))
+    _add_brief_body(
+        doc, narratives.get("limitations", "[DATA PENDING]"))
     from tools.audit_summary import audit_body_paragraph
     audit_para = audit_body_paragraph(data.get("audit_disclosures") or {})
     if audit_para:
-        _add_body(doc, audit_para)
+        _add_brief_body(doc, audit_para)
 
     # Section 5 -- FINAL RECOMMENDATIONS. Reframed as INVESTMENT
     # CONCLUSIONS drawn from the OOS evidence, not a point-in-time
@@ -607,8 +685,9 @@ def build_executive_brief(
     # available, cached regime when the live build is degraded, with
     # the staleness explicitly disclosed in the prose.
     _add_heading(doc, "5. Final Recommendations")
-    _add_body(doc, narratives.get(
-        "final_recommendations", "[DATA PENDING]"))
+    _add_brief_body(
+        doc, narratives.get(
+            "final_recommendations", "[DATA PENDING]"))
 
     # Section 6 -- VISUALS. June 25 2026: section retains the prose
     # summary describing what each chart shows so the rubric's
@@ -618,7 +697,8 @@ def build_executive_brief(
     # that don't match any inline trigger fall back to Section 6
     # via the _embed_brief_figures(skip_keys=<inline-placed>) call.
     _add_heading(doc, "6. Visuals to Demonstrate the Insights")
-    _add_body(doc, narratives.get("visuals", "[DATA PENDING]"))
+    _add_brief_body(
+        doc, narratives.get("visuals", "[DATA PENDING]"))
 
     # June 25 2026 -- post-prose paragraph-level figure placement.
     # All section prose is now in the doc; iterate paragraphs and
