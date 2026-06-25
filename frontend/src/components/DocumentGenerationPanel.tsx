@@ -174,8 +174,17 @@ function TileMetadataBlock(
   } catch {
     showUpdated = false
   }
-  const hashShort = draft.data_hash
-    ? draft.data_hash.slice(0, 8) : null
+  // June 25 2026 -- consolidated hash chip. Renders three exclusive
+  // states. The previous block had a "Data hash: xxx" line PLUS an
+  // amber stale callout; this collapses both into a single pill so
+  // the tile chrome stays compact. Three states:
+  //   draft.data_hash present + matches live  -> green chip
+  //   draft.data_hash present + diverges      -> amber chip
+  //   draft.data_hash absent                  -> gray chip
+  // The chip text is the DRAFT's hash (first 8 chars), not the
+  // live hash -- the user wants to see what the draft was
+  // generated against, with the chip colour signalling whether
+  // that matches today's analytics.
   return (
     <div className="text-2xs text-muted space-y-0.5"
       data-testid="tile-metadata-block">
@@ -189,35 +198,67 @@ function TileMetadataBlock(
           <span>Updated: {updated}</span>
         </div>
       )}
-      {hashShort && (
-        <div className="flex items-center gap-1.5">
-          <span className={`inline-block w-2 h-2 rounded-full ${
-            hashStale ? 'bg-warning' : 'bg-success'}`} />
-          <span>
-            Data hash:{' '}
-            <span className="font-mono"
-              title={draft.data_hash || ''}>
-              {hashShort}
-            </span>
-            {hashStale && liveDataHash && (
-              <span className="text-warning ml-1.5">
-                (live: <span className="font-mono">
-                  {liveDataHash.slice(0, 8)}
-                </span>)
-              </span>
-            )}
-          </span>
-        </div>
-      )}
-      {hashStale && (
-        <div className="flex items-start gap-1.5 text-warning
-                        bg-warning/10 border border-warning/30
-                        rounded px-1.5 py-1 mt-1"
-          data-testid="tile-stale-chip">
-          <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-          <span>Data stale — Light Refresh recommended</span>
-        </div>
-      )}
+      <TileHashChip
+        draftHash={draft.data_hash}
+        liveDataHash={liveDataHash}
+        hashStale={hashStale} />
+    </div>
+  )
+}
+
+
+/**
+ * TileHashChip -- June 25 2026.
+ *
+ * Three exclusive chip states for the per-tile data-hash signal.
+ * Replaces the old "Data hash: xxx" line plus stale callout duo
+ * with a single pill the user can scan at a glance.
+ */
+function TileHashChip(
+  { draftHash, liveDataHash, hashStale }: {
+    draftHash: string | null
+    liveDataHash: string | null
+    hashStale: boolean
+  },
+): React.ReactElement {
+  if (!draftHash) {
+    return (
+      <div
+        data-testid="tile-hash-chip-missing"
+        className="inline-flex items-center gap-1.5 text-2xs
+                   px-1.5 py-0.5 rounded bg-slate-600/30
+                   border border-slate-500/40 text-slate-300">
+        <AlertCircle className="w-3 h-3 shrink-0" />
+        <span>No hash — regenerate recommended</span>
+      </div>
+    )
+  }
+  const short = draftHash.slice(0, 8)
+  if (hashStale && liveDataHash) {
+    return (
+      <div
+        data-testid="tile-hash-chip-stale"
+        title={
+          `Draft hash ${draftHash} vs live ${liveDataHash}`}
+        className="inline-flex items-center gap-1.5 text-2xs
+                   px-1.5 py-0.5 rounded bg-warning/15
+                   border border-warning/40 text-warning">
+        <AlertCircle className="w-3 h-3 shrink-0" />
+        <span className="font-mono">{short}</span>
+        <span>Data stale</span>
+      </div>
+    )
+  }
+  return (
+    <div
+      data-testid="tile-hash-chip-current"
+      title={`Draft hash ${draftHash} matches the live analytics cache`}
+      className="inline-flex items-center gap-1.5 text-2xs
+                 px-1.5 py-0.5 rounded bg-success/15
+                 border border-success/40 text-success">
+      <CheckCircle className="w-3 h-3 shrink-0" />
+      <span className="font-mono">{short}</span>
+      <span>Data current</span>
     </div>
   )
 }
