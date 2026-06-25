@@ -12274,8 +12274,23 @@ async def _editor_export(editor_draft_id: int) -> Response:
         if draft.get("document_type") == "analytical_appendix":
             from tools.academic_export import gather_analytical_appendix_data
             appendix_data = await gather_analytical_appendix_data()
+        # June 25 2026 -- the brief's four APA chart figures
+        # (cumulative return, rolling correlation, efficient
+        # frontier, OOS Sharpe comparison) are NOT persisted to
+        # editor_drafts.content_json -- they're matplotlib PNGs
+        # rendered fresh from the analytics snapshot at brief
+        # generation time. The editor export used to walk only the
+        # TipTap prose nodes and drop the images on the floor.
+        # Pull the analytics snapshot now so build_editor_docx can
+        # re-render the four figures inline, matching the
+        # non-editor regen DOCX.
+        brief_data = None
+        if draft.get("document_type") == "executive_brief":
+            from tools.academic_export import gather_document_data
+            brief_data = await gather_document_data()
         content = await asyncio.to_thread(
-            build_editor_docx, draft, appendix_data)
+            build_editor_docx, draft, appendix_data,
+            brief_data=brief_data)
         media, ext = _DOCX_MEDIA, "docx"
 
     # PR #336 Gap D -- re-run the audit on the EDITED content_text

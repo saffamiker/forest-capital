@@ -943,6 +943,8 @@ def _tiptap_text(node: Any) -> str:
 def build_editor_docx(
     draft: dict[str, Any],
     appendix_data: dict[str, Any] | None = None,
+    *,
+    brief_data: dict[str, Any] | None = None,
 ) -> bytes:
     """
     Renders an editor draft (a midpoint_paper, executive_brief, or
@@ -965,6 +967,24 @@ def build_editor_docx(
     table builders are the same ones used by build_analytical_appendix
     — no recomputation, no LLM calls. The caller is responsible for
     fetching appendix_data on the async edge; this builder stays sync.
+
+    Executive-brief special case (June 25 2026): when
+    document_type == "executive_brief" and brief_data is supplied,
+    the four APA chart figures (Section 6 of the regenerated brief)
+    are appended after the editor prose by _embed_brief_figures. The
+    figures live in the build pipeline, not the TipTap content_json
+    persisted to editor_drafts, so the editor export had been
+    silently dropping them. The data is the same dict produced by
+    tools.academic_export.gather_document_data(); the caller is
+    responsible for fetching it on the async edge. substitution_table
+    is intentionally None here -- _embed_brief_figure handles missing
+    substitution values gracefully (the {{TOKEN}} placeholders in the
+    APA Note. text degrade to literal text, which the audit will flag
+    on the next regen rather than silently misreporting). When the
+    chart renderers raise or return None each figure falls through to
+    an italic '[Figure N: chart unavailable — regenerate to embed
+    this visual]' placeholder paragraph instead of crashing the
+    export.
     """
     doc = _new_document()
     _add_title_lines(doc, [
@@ -1008,6 +1028,16 @@ def build_editor_docx(
     if (draft.get("document_type") == "analytical_appendix"
             and appendix_data is not None):
         _add_appendix_tables(doc, appendix_data)
+
+    # Executive Brief: re-render the four APA chart figures after the
+    # author's prose so the in-editor export carries the visuals the
+    # non-editor regen path embeds. The Section 6 heading and prose
+    # already live in the TipTap nodes from generation, so we append
+    # the figures directly without a duplicate heading. June 25 2026.
+    if (draft.get("document_type") == "executive_brief"
+            and brief_data is not None):
+        _embed_brief_figures(
+            doc, brief_data, substitution_table=None)
 
     _add_submission_checklist(doc)
     buf = BytesIO()
