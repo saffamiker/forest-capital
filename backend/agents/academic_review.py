@@ -2614,24 +2614,21 @@ def run_arbiter_debate_round(
         f"debate-round response.\n\n"
         f"{_ARBITER_DEBATE_INSTRUCTIONS}")
 
-    def _generate(prompt: str) -> str:
-        return call_claude(ARBITER_MODEL, advisor_prompt, prompt,
-                           max_tokens=ARBITER_MAX_TOKENS,
-                           trigger="academic_review_debate_round")
-
+    # Direct call_claude -- the debate round arbiter emits markdown
+    # prose (## headings + per-finding blocks), not JSON. Wrapping
+    # this in GeneratorEvaluatorHarness used to log
+    # harness_evaluator_parse_failed on every call because the
+    # harness's _evaluate tried to JSON-parse the prose. Skipping
+    # the harness avoids the noise + the wasted evaluator call; the
+    # debate round is a single-shot synthesis where a retry against
+    # the same prompt would emit the same prose (the failure was in
+    # the evaluator, not in the generator) so retries provide no
+    # value here.
     try:
-        from agents.harness import GeneratorEvaluatorHarness
-        harness = GeneratorEvaluatorHarness()
-        result = harness.run(
-            generator_fn=_generate,
-            evaluator_prompt=(
-                _ARBITER_DEBATE_INSTRUCTIONS  # eval against the same rubric
-            ),
-            generator_prompt=user_message,
-            context=context_block[:6000],
-            agent_id="academic_advisor_debate",
-        )
-        return result.response
+        return call_claude(
+            ARBITER_MODEL, advisor_prompt, user_message,
+            max_tokens=ARBITER_MAX_TOKENS,
+            trigger="academic_review_debate_round")
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "academic_review_debate_round_failed",
@@ -3035,33 +3032,25 @@ async def run_arbiter_fix_proposal(
         "rules in your instructions.")
 
     try:
-        from agents.harness import GeneratorEvaluatorHarness
-        # No harness re-evaluation on fix proposals -- the output
-        # is a small JSON object; we want the raw model response
-        # parsed strictly. Call_claude directly via the harness
-        # generator-fn shape skips the secondary evaluation.
-        harness = GeneratorEvaluatorHarness(max_retries=0)
-
-        def _generate(prompt: str) -> str:
-            return call_claude(
-                ARBITER_MODEL,
-                _ARBITER_FIX_PROPOSAL_INSTRUCTIONS,
-                prompt,
-                max_tokens=1200,
-                trigger=(
-                    "academic_review_fix_proposal:"
-                    + ("auto" if auto else "manual")))
-
-        result = harness.run(
-            generator_fn=_generate,
-            evaluator_prompt=(
-                _ARBITER_FIX_PROPOSAL_INSTRUCTIONS),
-            generator_prompt=user_message,
-            context="",
-            agent_id="academic_advisor_fix_proposal",
-        )
-        return _parse_fix_proposal(
-            result.response, finding_id, sev)
+        # Direct call_claude -- the previous harness wrap (even
+        # with max_retries=0) still triggered _evaluate which tried
+        # to JSON-parse the fix-proposal output through the wrong
+        # JSON shape (the evaluator wants {score, feedback}; the
+        # arbiter returns a fix-proposal JSON object). Bypassing the
+        # harness avoids the harness_evaluator_parse_failed warning
+        # noise without changing the parse contract on the public
+        # entry -- _parse_fix_proposal already handles the model's
+        # JSON output and falls through to None on a malformed
+        # response.
+        raw = call_claude(
+            ARBITER_MODEL,
+            _ARBITER_FIX_PROPOSAL_INSTRUCTIONS,
+            user_message,
+            max_tokens=1200,
+            trigger=(
+                "academic_review_fix_proposal:"
+                + ("auto" if auto else "manual")))
+        return _parse_fix_proposal(raw, finding_id, sev)
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "fix_proposal_generation_failed",

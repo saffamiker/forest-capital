@@ -1,40 +1,47 @@
 /**
- * BriefRegenConfirmModal -- June 23 2026.
+ * RegenConfirmModal -- June 24 2026.
  *
- * Confirmation gate that fires BEFORE the Executive Brief regen POST
- * when /api/v1/story-plans/exists reports that downstream plans
- * (deck / appendix / script) currently exist. The spec replaces the
- * old generic window.confirm for brief regens so the user sees the
- * concrete consequence: regenerating the brief automatically clears
- * the deck / appendix / script story plans server-side
- * (_generate_brief_document does this at the top), so those
- * documents will need to be regenerated to stay consistent with the
- * new brief narrative.
+ * Generic team-replacement regeneration warning shown when any
+ * team member clicks Regenerate on a document tile that already
+ * has an is_current=true draft. Used for the deck, analytical
+ * appendix, and presentation script -- the executive brief has
+ * its own brief-specific modal (BriefRegenConfirmModal) that
+ * merges this warning with the downstream story-plan clear
+ * warning into a single combined message.
  *
- * If the pre-flight check returns exists=false, the modal is
- * skipped entirely and Generate fires immediately.
+ * Body verbatim per spec:
  *
- * Modal shape mirrors BriefWorkflowModal / CrossDocumentReview
- * confirm modal: fixed overlay, click-outside dismisses, Esc
- * dismisses, single Cancel + primary action pair.
+ *   "This will replace the current draft for the whole team. The
+ *    existing draft will be archived and no longer shown as
+ *    current. All team members will see the new version once
+ *    generation completes."
+ *
+ * Modal shape mirrors BriefRegenConfirmModal: fixed overlay,
+ * click-outside dismisses, Esc dismisses, single Cancel + primary
+ * action pair.
  */
 import { useEffect, useRef } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
 
 
-export interface BriefRegenConfirmModalProps {
-  open:      boolean
+export interface RegenConfirmModalProps {
+  open:        boolean
+  /** Human-readable document name -- 'Final Presentation Deck',
+   *  'Analytical Appendix', 'Presentation Script'. Title becomes
+   *  'Regenerate <name>?'. */
+  documentName: string
   onCancel:  () => void
   onConfirm: () => void
 }
 
 
-export default function BriefRegenConfirmModal(
-  { open, onCancel, onConfirm }: BriefRegenConfirmModalProps,
+export default function RegenConfirmModal(
+  {
+    open, documentName, onCancel, onConfirm,
+  }: RegenConfirmModalProps,
 ) {
   const overlayRef = useRef<HTMLDivElement | null>(null)
 
-  // Esc dismisses; matches the pattern other modals in the app use.
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
@@ -47,15 +54,13 @@ export default function BriefRegenConfirmModal(
   if (!open) return null
 
   const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>): void => {
-    // Only dismiss when the click hit the overlay itself, not the
-    // modal body that bubbles up to it.
     if (e.target === overlayRef.current) onCancel()
   }
 
   return (
     <div
       ref={overlayRef}
-      data-testid="brief-regen-confirm-modal"
+      data-testid="regen-confirm-modal"
       onClick={handleOverlayClick}
       className="fixed inset-0 z-50 flex items-center justify-center
                  bg-black/60 backdrop-blur-sm p-4">
@@ -64,7 +69,7 @@ export default function BriefRegenConfirmModal(
           type="button"
           onClick={onCancel}
           aria-label="Close"
-          data-testid="brief-regen-confirm-modal-close"
+          data-testid="regen-confirm-modal-close"
           className="absolute top-3 right-3 text-muted hover:text-white">
           <X className="w-4 h-4" />
         </button>
@@ -74,19 +79,13 @@ export default function BriefRegenConfirmModal(
             aria-hidden="true" />
           <div className="flex-1 space-y-2">
             <h3 className="text-white font-semibold text-sm">
-              Regenerate Executive Brief?
+              Regenerate {documentName}?
             </h3>
             <p className="text-xs text-slate-300 leading-relaxed">
-              This will replace the current brief for the whole
-              team and clear the story plans for the deck,
-              appendix, and presentation script. Those documents
-              will need to be regenerated afterward to stay
-              consistent with the new brief narrative.
-            </p>
-            <p className="text-2xs text-muted italic leading-relaxed">
-              All team members will see the new version once
-              generation completes. The existing draft is archived
-              and no longer shown as current.
+              This will replace the current draft for the whole
+              team. The existing draft will be archived and no
+              longer shown as current. All team members will see
+              the new version once generation completes.
             </p>
           </div>
         </div>
@@ -94,7 +93,7 @@ export default function BriefRegenConfirmModal(
           <button
             type="button"
             onClick={onCancel}
-            data-testid="brief-regen-confirm-modal-cancel"
+            data-testid="regen-confirm-modal-cancel"
             className="px-3 py-1.5 rounded text-xs border border-border
                        text-muted hover:text-white hover:bg-navy-700">
             Cancel
@@ -102,10 +101,10 @@ export default function BriefRegenConfirmModal(
           <button
             type="button"
             onClick={onConfirm}
-            data-testid="brief-regen-confirm-modal-confirm"
+            data-testid="regen-confirm-modal-confirm"
             className="px-3 py-1.5 rounded text-xs font-semibold
                        bg-electric text-white hover:bg-blue-500">
-            Regenerate Brief
+            Regenerate
           </button>
         </div>
       </div>
