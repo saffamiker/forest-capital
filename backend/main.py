@@ -12811,25 +12811,28 @@ async def _require_report_ready(
     exclude_methodology_check_ids: set[str] | None = None,
 ) -> None:
     """
-    Workstream C report gate (May 28 2026). Raises 422 with a structured
-    detail when either audit surface has unreviewed blocking items.
+    Workstream C report gate. Raises 422 ONLY when caches are not
+    warm (a legitimate hard block: there's no data to generate
+    against, so generation would produce [DATA PENDING] placeholders).
 
-    A 422 is the right status here — the request is well-formed, but it
-    asks the platform to publish a deliverable that the audit subsystem
-    has flagged as not-yet-reviewed. The frontend reads detail.blockers
-    and shows them in a blocking modal so the user can navigate back to
-    the audit panel and act on each.
+    June 25 2026 -- audit findings (statistical IN/AN checks +
+    methodology checks) no longer hard-block generation. Per the
+    platform's fail-open architecture, audit findings are advisory:
+    the team makes the final call. Previously this function raised
+    422 with error='report_not_ready' when blocking_count > 0;
+    every regen was gated behind an explicit acknowledge / mark-
+    intentional / revoke pass on the QA Audit tab. That gate is now
+    a frontend WARNING (an amber banner above the regen cards) not
+    a hard block.
 
-    exclude_methodology_check_ids (May 25 2026) — passed through to
-    compute_readiness so per-document advisory rules can downgrade a
-    specific methodology check. Midpoint generation passes {"IN02"} so
-    Academic Review completeness is advisory (the score is shown in the
-    editor instead of blocking generation); other deliverables keep the
-    full set of blockers.
+    exclude_methodology_check_ids -- passed through to
+    compute_readiness so per-document advisory rules can downgrade
+    a specific methodology check. Today only midpoint generation
+    uses this with {"IN02"}.
 
-    Fail-open: the readiness module returns empty lists on any read
-    error, so a database outage or an empty audit history reports
-    is_ready=true and the gate does not block.
+    Fail-open: the readiness module returns empty lists on any
+    read error, so a database outage or an empty audit history
+    reports is_ready=true and the gate does not block.
     """
     from tools.report_readiness import compute_readiness, summarise_blockers
 
@@ -12837,12 +12840,11 @@ async def _require_report_ready(
         exclude_methodology_check_ids=exclude_methodology_check_ids)
     if readiness.get("is_ready"):
         return
-    # Bridge #91 — when caches are cold, the gate's "report not ready"
-    # error type narrows to "caches_not_warm" so the frontend can
-    # render a Warm Caches action button instead of the audit-blocker
-    # list. When BOTH caches are cold AND audit blockers exist, we
-    # surface caches_not_warm because warming is the prerequisite the
-    # user has to clear first.
+    # Caches not warm -- the ONE remaining hard block. Without a
+    # warm analytics cache there's literally no data for the
+    # generators to read, so a regen produces [DATA PENDING] all
+    # the way through. The Warm Caches action button in the modal
+    # is the user's path forward.
     caches_warm = readiness.get("caches_warm")
     if caches_warm is False:
         cold_caches = readiness.get("cold_caches") or []
@@ -12863,23 +12865,119 @@ async def _require_report_ready(
                 "methodology": readiness.get("methodology"),
             },
         )
-    raise HTTPException(
-        status_code=422,
-        detail={
-            "error": "report_not_ready",
-            "message": (
-                f"{readiness.get('blocking_count', 0)} audit item"
-                f"{'s' if readiness.get('blocking_count') != 1 else ''} "
-                "must be reviewed or revoked before a report can be "
-                "generated."),
-            "blocking_count": readiness.get("blocking_count", 0),
-            "blockers": summarise_blockers(readiness),
-            "caches_warm": readiness.get("caches_warm"),
-            "cold_caches": readiness.get("cold_caches") or [],
-            "statistical": readiness.get("statistical"),
-            "methodology": readiness.get("methodology"),
-        },
+    # Audit findings unacknowledged -- WARN, do not block. The
+    # frontend surfaces an amber banner above the regen cards via
+    # its own read of /api/v1/report/readiness; the response
+    # already carries blocking_count + blockers for that banner to
+    # render. Generation proceeds.
+    log.info(
+        "report_readiness_audit_warning_not_block",
+        blocking_count=readiness.get("blocking_count", 0),
+        blockers=summarise_blockers(readiness)[:5],
     )
+
+
+async def _auto_resolve_stale_findings_on_regen(
+    reviewer_email: str,
+) -> int:
+    """June 25 2026 -- before a regeneration job spawns, auto-
+    resolve every unresolved audit finding that came from a NON-
+    LATEST audit run. Rationale: regeneration produces a fresh
+    artifact that supersedes whatever the older runs flagged; any
+    finding from an older run that the new regen will rebuild
+    should clear automatically rather than accumulate as a
+    blocker.
+
+    Findings are marked:
+      resolved          TRUE
+      auto_acknowledged TRUE
+      resolution_note   'Auto-resolved: superseded by document
+                         regeneration triggered by <email> at
+                         <ISO timestamp>'
+      resolved_by       <reviewer_email>
+      resolved_at       NOW()
+
+    Scope:
+      audit_run_id IN (every completed run EXCEPT the latest by id).
+
+    Fail-open: any DB error returns 0 and logs. The regen still
+    proceeds; the only side-effect is that the older findings
+    keep their resolved=false state.
+
+    Returns the row count actually updated."""
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        if AsyncSessionLocal is None:
+            return 0
+        async with AsyncSessionLocal() as session:
+            from datetime import datetime as _dt, timezone as _tz
+            note = (
+                f"Auto-resolved: superseded by document regeneration "
+                f"triggered by {reviewer_email} at "
+                f"{_dt.now(_tz.utc).isoformat()}")
+            # Try the full migration-044 column set first; fall
+            # back to the legacy UPDATE on column-missing errors.
+            try:
+                result = await session.execute(text(
+                    "UPDATE audit_findings SET "
+                    "resolved = TRUE, "
+                    "auto_acknowledged = TRUE, "
+                    "resolution_note = :note, "
+                    "resolved_by = :who, "
+                    "resolved_at = NOW() "
+                    "WHERE resolved = FALSE "
+                    "AND audit_run_id IN ("
+                    "  SELECT id FROM audit_runs "
+                    "  WHERE status = 'complete' "
+                    "  AND id < ("
+                    "    SELECT COALESCE(MAX(id), 0) "
+                    "    FROM audit_runs "
+                    "    WHERE status = 'complete'"
+                    "  )"
+                    ")"),
+                    {"note": note, "who": reviewer_email})
+                await session.commit()
+                resolved = (
+                    result.rowcount
+                    if hasattr(result, "rowcount") else 0)
+            except Exception:  # noqa: BLE001
+                try:
+                    await session.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                result = await session.execute(text(
+                    "UPDATE audit_findings SET "
+                    "resolved = TRUE, "
+                    "resolution_note = :note "
+                    "WHERE resolved = FALSE "
+                    "AND audit_run_id IN ("
+                    "  SELECT id FROM audit_runs "
+                    "  WHERE status = 'complete' "
+                    "  AND id < ("
+                    "    SELECT COALESCE(MAX(id), 0) "
+                    "    FROM audit_runs "
+                    "    WHERE status = 'complete'"
+                    "  )"
+                    ")"),
+                    {"note": note})
+                await session.commit()
+                resolved = (
+                    result.rowcount
+                    if hasattr(result, "rowcount") else 0)
+            if resolved:
+                log.info(
+                    "audit_findings_auto_resolved_on_regen",
+                    reviewer_email=reviewer_email,
+                    resolved_count=resolved)
+            return int(resolved or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_auto_resolve_on_regen_failed",
+            reviewer_email=reviewer_email, error=str(exc))
+        return 0
 
 
 def _start_generation_job(
@@ -12891,6 +12989,14 @@ def _start_generation_job(
     Academic Writer harness calls inside _generate_async (which run on
     the same loop, inheriting this context) populate it. The task ends
     by calling _log_interaction_bg which reads collect_usage().
+
+    June 25 2026 -- before spawning the job, auto-resolve any
+    unresolved audit findings from PRIOR audit runs (non-latest
+    completed runs). The fresh regen will rebuild whatever those
+    older findings flagged; leaving them resolved=false caused
+    the readiness banner to accumulate stale blockers across the
+    May/June audit history. The auto-resolve runs in a fire-and-
+    forget task so it can't slow the regen kickoff.
     """
     import asyncio
 
@@ -12898,6 +13004,19 @@ def _start_generation_job(
     from agents.usage import start_usage_capture
 
     start_usage_capture()
+    # Best-effort auto-resolve. The task is fire-and-forget; we
+    # don't await its completion so a transient DB hiccup never
+    # delays the 202 response.
+    try:
+        resolve_task = asyncio.create_task(
+            _auto_resolve_stale_findings_on_regen(
+                session.get("email") or ""))
+        _generation_bg_tasks.add(resolve_task)
+        resolve_task.add_done_callback(_generation_bg_tasks.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_auto_resolve_kickoff_failed",
+            error=str(exc))
     job = create_job(document_type, session["email"])
     task = asyncio.create_task(
         _generate_async(job["job_id"], document_type, session, request))

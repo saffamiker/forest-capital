@@ -114,6 +114,81 @@ function ExportVerificationPill(
 
 
 /**
+ * AuditFindingsWarningBanner -- June 25 2026.
+ *
+ * Amber banner above the regen cards that surfaces unacknowledged
+ * audit findings as a WARNING, not a hard block. Per the
+ * platform's fail-open architecture, audit findings are advisory:
+ * the team makes the final call. This banner replaces the
+ * legacy 'Report not ready' blocking modal flow for audit-only
+ * blocks.
+ *
+ * Hidden when:
+ *   - readiness has not yet loaded
+ *   - blocking_count is 0 (nothing to warn about)
+ *   - caches_warm is false (the blocking modal handles that
+ *     surface; the user has to clear caches before they can
+ *     even regen sensibly)
+ *   - the user has dismissed the banner for this session
+ *     (sessionStorage key fc_audit_warning_dismissed)
+ */
+function AuditFindingsWarningBanner(): React.ReactElement | null {
+  const readiness = useReportReadinessStore((s) => s.readiness)
+  const dismissKey = 'fc_audit_warning_dismissed'
+  const [dismissed, setDismissed] = useState<boolean>(
+    () => sessionStorage.getItem(dismissKey) === '1')
+  if (!readiness) return null
+  const blockingCount = readiness.blocking_count ?? 0
+  if (blockingCount === 0) return null
+  const cachesWarm = (
+    readiness as { caches_warm?: boolean }).caches_warm
+  if (cachesWarm === false) return null   // cold-cache modal handles it
+  if (dismissed) return null
+  return (
+    <div
+      data-testid="audit-findings-warning-banner"
+      className="mb-3 rounded border border-warning/40
+                 bg-warning/10 p-3 flex items-start gap-2">
+      <AlertCircle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+      <div className="flex-1 min-w-0">
+        <p className="text-xs text-warning font-semibold">
+          {blockingCount} audit finding
+          {blockingCount === 1 ? '' : 's'} unacknowledged.
+        </p>
+        <p className="text-2xs text-amber-100/85 mt-1 leading-relaxed">
+          Review them on the QA Audit tab. Generation can proceed —
+          audit findings are advisory; the team makes the final
+          call on what is submission-ready.
+        </p>
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          <a
+            href="/qa#audit"
+            data-testid="audit-warning-go-to-qa"
+            className="text-2xs px-2 py-1 rounded border
+                       border-warning/40 text-warning
+                       hover:bg-warning/15 font-semibold">
+            Go to QA Audit
+          </a>
+          <button
+            type="button"
+            onClick={() => {
+              sessionStorage.setItem(dismissKey, '1')
+              setDismissed(true)
+            }}
+            data-testid="audit-warning-dismiss"
+            className="text-2xs px-2 py-1 rounded text-muted
+                       hover:text-white border border-transparent
+                       hover:border-border">
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+/**
  * TileMetadataBlock -- June 25 2026.
  *
  * Generated / Updated / Data-hash strip on each Generate Documents
@@ -662,13 +737,35 @@ export default function DocumentGenerationPanel() {
         return
       }
     }
-    // Client-side gate — open the blocking modal without firing the
-    // POST when readiness is known-blocked. is_ready === null means
-    // "unknown" (endpoint failed or not loaded yet); fall through to
-    // the POST and let the server gate decide.
-    if (readinessGate.is_ready === false) {
+    // June 25 2026 -- client-side blocking gate narrowed to
+    // caches_not_warm only. Per the platform's fail-open
+    // architecture, audit findings (statistical + methodology
+    // unreviewed items) WARN but never BLOCK generation; the
+    // team makes the final call. An amber banner above the
+    // regen cards surfaces the unacknowledged count and a
+    // 'Go to QA Audit' link; the Regenerate button itself
+    // never gets the blocking-modal treatment for an audit-
+    // only block.
+    //
+    // is_ready === null means 'unknown' (endpoint failed or
+    // not loaded yet); fall through to the POST and let the
+    // server gate decide (the server still hard-blocks for
+    // cold caches via /export/<doc> 422).
+    const readiness = readinessGate
+    const cachesCold = (
+      (readiness as { caches_warm?: boolean }).caches_warm === false)
+    if (cachesCold) {
+      const cold = (
+        readiness as { cold_caches?: string[] }
+      ).cold_caches ?? []
       setBlockingModal({
-        open: true, blockers: readinessGate.blockerLabels,
+        open: true,
+        blockers: readiness.blockerLabels,
+        message: (
+          'Caches are not warm — generation would produce '
+          + '[DATA PENDING] placeholders. Click Warm Caches '
+          + 'before generating.'),
+        coldCaches: cold,
       })
       return
     }
@@ -698,10 +795,14 @@ export default function DocumentGenerationPanel() {
             cold_caches?: string[]
           }
         }
-        // Bridge #91 — the gate now returns a distinct error type
-        // for cold caches so the modal can render Warm Caches.
-        if (data?.detail?.error === 'report_not_ready'
-            || data?.detail?.error === 'caches_not_warm') {
+        // June 25 2026 -- only caches_not_warm still surfaces the
+        // blocking modal. report_not_ready (audit findings
+        // unacknowledged) is no longer a hard block on the
+        // backend (_require_report_ready logs + returns instead
+        // of raising), so any legacy server returning it falls
+        // through to a regular error message rather than re-
+        // raising the blocking modal the user just dismissed.
+        if (data?.detail?.error === 'caches_not_warm') {
           setBlockingModal({
             open: true,
             blockers: data.detail.blockers ?? [],
@@ -748,6 +849,14 @@ export default function DocumentGenerationPanel() {
           First-draft deliverables · real platform data
         </span>
       </div>
+      {/* Audit-findings warning banner -- June 25 2026. Audit
+          findings are advisory per the platform's fail-open
+          architecture; surfacing them as a dismissible amber
+          banner instead of a hard block lets the team make the
+          final call. Hidden when caches are cold (the
+          blocking modal handles that surface) or when the
+          banner has been dismissed for this session. */}
+      <AuditFindingsWarningBanner />
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {DOCS.map((doc) => {
           const Icon = doc.icon
@@ -1114,6 +1223,8 @@ export default function DocumentGenerationPanel() {
         open={regenConfirm.open}
         documentName={
           regenConfirm.pendingDoc?.title || 'Document'}
+        sourceDocumentType={
+          regenConfirm.pendingDoc?.documentType ?? undefined}
         onCancel={() => setRegenConfirm(
           { open: false, pendingDoc: null })}
         onConfirm={() => {
