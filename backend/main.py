@@ -4822,14 +4822,29 @@ async def charts_render(
 # PATCH is silent (no version), POST .../versions saves a named checkpoint.
 
 @app.get("/api/v1/documents/drafts")
-async def editor_list_drafts(session: dict = Depends(require_team_member)):
-    """Every non-deleted draft across all owners. June 24 2026:
-    team members share access to every document, so the list is
-    no longer owner-scoped. The endpoint stays behind
+async def editor_list_drafts(
+    include_all: bool = False,
+    session: dict = Depends(require_team_member),
+):
+    """Default response (June 25 2026): only is_current=true drafts
+    -- at most one row per document_type. The previous all-drafts
+    response broke DocumentGenerationPanel's 'is there a current
+    draft for this type?' lookup once history accumulated, blocking
+    Open in Editor for the whole team.
+
+    Query: include_all=true keeps the legacy full-history behaviour,
+    used by the editor toolbar's DraftVersionSelector which lists
+    every version of the current document_type for the user to
+    switch between.
+
+    Owner-scoping was removed June 24 2026 (PR #399); team members
+    share access to every document. The endpoint stays behind
     require_team_member so viewers (Dr. Panttser) still cannot
     reach it -- they get the same 403 they got before."""
     from tools.editor_drafts import list_all_drafts
-    return {"drafts": await list_all_drafts()}
+    return {
+        "drafts": await list_all_drafts(include_all=include_all),
+    }
 
 
 @app.get("/api/v1/documents/drafts/{draft_id}")

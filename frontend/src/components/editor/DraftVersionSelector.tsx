@@ -45,8 +45,13 @@ export default function DraftVersionSelector(
 
   useEffect(() => {
     let cancelled = false
+    // June 25 2026 -- the drafts endpoint defaults to is_current=true
+    // only so the DocumentGenerationPanel's per-doc-type lookup
+    // works. The version selector by definition needs ALL versions
+    // of the current document_type so the dropdown can list them,
+    // hence include_all=true.
     axios.get<{ drafts: DraftListItem[] }>(
-      '/api/v1/documents/drafts')
+      '/api/v1/documents/drafts?include_all=true')
       .then((res) => {
         if (cancelled) return
         const filtered = (res.data.drafts ?? []).filter(
