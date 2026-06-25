@@ -5549,54 +5549,99 @@ async def export_draft_academic_review(
 @limiter.limit("6/minute")
 async def generate_presentation_script(
     request: Request,
-    body: dict | None = None,
     session: dict = Depends(require_permission("team_member")),
 ):
+    """June 25 2026 -- async job kickoff for presentation script
+    generation. Matches the brief / appendix / deck pattern: 202
+    + {job_id, status: 'pending'}, generation runs as a background
+    task via _generate_async, the frontend polls /api/v1/jobs/<id>
+    for completion.
+
+    The previous synchronous shape (POST returns 200 with draft_id
+    inline) prevented the Reports tile from inheriting the standard
+    inProgress / complete / failed / idle ternary because the tile's
+    UI is driven by the generation-jobs Zustand store -- which only
+    populates when an endpoint returns a job_id. Refactoring to the
+    async pattern lets the script tile move into the DOCS array and
+    render with the same chrome as the other three deliverables.
+
+    Deck-draft lookup moved from the request body to
+    get_current_draft_by_type('presentation_deck') -- mirrors the
+    academic review's team-shared lookup (PR #410). The body
+    parameter is now ignored; existing clients passing
+    {draft_id: ...} continue to work but the value is unused.
+
+    Speakers-required validation + missing-deck 404 now surface
+    INSIDE the job (status='failed' with the error message) rather
+    than as synchronous HTTPException. The frontend's failed-state
+    branch renders the error chip + Try Again so the UX is the
+    same; the failure just lands one polling-tick later.
     """
-    Generates a presentation script from a presentation_deck draft.
+    return _start_generation_job(
+        "presentation_script", session, request)
 
-    Reads the deck (draft_id in the body), the caller's current
-    executive_brief and midpoint_paper drafts as academic context (both
-    optional — generation degrades gracefully without them), runs the
-    Academic Writer through the generator-evaluator harness, and stores
-    the result as a new presentation_script editor draft. Returns the new
-    draft id and its word / speaker / slide counts.
 
-    400 when no slide has a speaker assigned; 404 when the deck draft is
-    not found. Team members only.
+async def _generate_script_document(
+    email: str,
+) -> tuple[bytes, str, str, int | None]:
+    """June 25 2026 -- presentation script generator helper.
+    Mirrors _generate_brief_document / _generate_appendix_document /
+    _generate_deck_document's contract: returns (file bytes,
+    filename, media type, editor draft id). Raises on any failure
+    so _generate_async's outer try/except records the job as
+    failed with the ref'd error.
+
+    Inputs:
+      - The current team-shared presentation_deck draft (via
+        get_current_draft_by_type, NOT owner-scoped) -- the script
+        is generated from the canonical deck regardless of which
+        team member triggered.
+      - The caller's executive_brief + midpoint_paper drafts as
+        optional academic context (degrades gracefully when
+        absent).
+
+    Failure paths (raise -> job goes to status='failed'):
+      - No current deck draft -> RuntimeError surfaces 'Generate
+        the Presentation Deck first.'
+      - Deck has no slides with assigned speakers -> RuntimeError
+        surfaces 'Assign speakers to slides before generating the
+        script.'
+
+    The script draft is created with data_hash stamped (migration
+    063) so the tile chip + Light Refresh status table render
+    correctly post-generation.
     """
     import asyncio
+    from datetime import date
 
-    from tools.editor_drafts import create_draft, get_current_draft, get_draft
+    from tools.editor_drafts import (
+        create_draft, get_current_draft,
+        get_current_draft_by_type,
+    )
     from tools.script_generation import deck_speakers, generate_script
+    from tools.academic_docx import build_editor_docx
 
-    raw_id = (body or {}).get("draft_id")
-    try:
-        deck_id = int(raw_id)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="'draft_id' is required.")
-
-    deck = await get_draft(deck_id)
-    if deck is None or deck.get("document_type") != "presentation_deck":
-        raise HTTPException(
-            status_code=404, detail="Presentation deck draft not found.")
+    deck = await get_current_draft_by_type("presentation_deck")
+    if deck is None:
+        raise RuntimeError(
+            "No current presentation deck draft to source the "
+            "script from. Generate the Presentation Deck first.")
 
     content = deck.get("content_json") or {}
-    slides = content.get("slides", []) if isinstance(content, dict) else []
+    slides = (
+        content.get("slides", [])
+        if isinstance(content, dict) else [])
     if not deck_speakers(slides):
-        raise HTTPException(
-            status_code=400,
-            detail="Assign speakers to slides before generating the script.")
+        raise RuntimeError(
+            "Assign speakers to slides before generating the "
+            "script.")
 
-    email = session["email"]
     exec_brief = await get_current_draft(email, "executive_brief")
     midpoint = await get_current_draft(email, "midpoint_paper")
     result = await asyncio.to_thread(
         generate_script, deck, exec_brief, midpoint)
 
-    # Stamp the live strategy hash on the draft so the tile chip
-    # + Light Refresh status table show 'Data current' rather than
-    # 'No hash' (migration 063 added the column; June 25 2026).
+    # Stamp the live strategy hash on the draft (migration 063).
     try:
         from tools.audit_assembler import (
             current_data_hash as _curr_hash,
@@ -5612,15 +5657,19 @@ async def generate_presentation_script(
     if new_draft is None:
         ref = uuid.uuid4().hex[:8]
         log.error("script_draft_create_failed", ref=ref)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not save the generated script (ref: {ref})")
-    return {
-        "draft_id": new_draft["id"],
-        "word_count": result["word_count"],
-        "speaker_count": result["speaker_count"],
-        "slide_count": result["slide_count"],
-    }
+        raise RuntimeError(
+            f"Could not save the generated script (ref: {ref})")
+
+    # Build the docx for the job's /download endpoint -- the
+    # frontend Download button reads from there. Mirrors the
+    # brief / appendix / deck path which all stage the bytes on
+    # the job row.
+    file_bytes = await asyncio.to_thread(
+        build_editor_docx, new_draft)
+    filename = (
+        f"forest-capital-presentation-script-"
+        f"{date.today().isoformat()}.docx")
+    return file_bytes, filename, _DOCX_MEDIA, new_draft["id"]
 
 
 @app.get("/api/v1/documents/rehearsal")
@@ -13249,6 +13298,12 @@ async def _generate_async(
         elif document_type == "analytical_appendix":
             file_bytes, filename, media, draft_id = \
                 await _generate_appendix_document(session["email"])
+        elif document_type == "presentation_script":
+            # June 25 2026 -- script joined the async job pattern
+            # so the tile inherits the standard inProgress /
+            # complete / failed / idle chrome.
+            file_bytes, filename, media, draft_id = \
+                await _generate_script_document(session["email"])
         else:
             file_bytes, filename, media, draft_id = \
                 await _generate_deck_document(session["email"])
