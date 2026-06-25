@@ -408,6 +408,18 @@ def build_substitution_table(
         "{{CLASSIC_6040_POST2022_SHARPE}}":
             format_sharpe(rc_by_strategy.get(
                 "CLASSIC_60_40", {}).get("post_2022_sharpe")),
+        # June 25 2026 -- MIN_VARIANCE pre/post 2022 sharpe tokens.
+        # The appendix LLM emitted {{MIN_VARIANCE_POST2022_SHARPE}}
+        # as a citation but the substitution table never had the
+        # key, so the literal token survived to the exported DOCX.
+        # Added here alongside the other three brief-side
+        # strategies. Same regime_conditional source.
+        "{{MIN_VARIANCE_POST2022_SHARPE}}":
+            format_sharpe(rc_by_strategy.get(
+                "MIN_VARIANCE", {}).get("post_2022_sharpe")),
+        "{{MIN_VARIANCE_PRE2022_SHARPE}}":
+            format_sharpe(rc_by_strategy.get(
+                "MIN_VARIANCE", {}).get("pre_2022_sharpe")),
         "{{REGIME_SWITCHING_PRE2022_SHARPE}}":
             format_sharpe(rc_by_strategy.get(
                 "REGIME_SWITCHING", {}).get("pre_2022_sharpe")),
@@ -1227,6 +1239,32 @@ def verify_export_against_cache(
                     "formatting error introduced by a manual edit."),
             })
 
+    # Check 4: unfilled tokens (June 25 2026). Any literal
+    # {{TOKEN}} remaining in the exported content means the
+    # substitution layer didn't have a key for that name --
+    # either the writer prompt cited a non-existent token, or
+    # the table builder doesn't yet emit it. Document_audit's
+    # check_unresolved_placeholders surfaces the same condition
+    # as a warning post-generation, but it doesn't block the
+    # download. Elevating to an error here closes the loop:
+    # the user-visible symptom (a literal '{{MIN_VARIANCE_
+    # POST2022_SHARPE}}' string in the exported DOCX) is
+    # exactly what this check catches at export time.
+    leftover_tokens = unresolved_placeholders(content)
+    for token in leftover_tokens:
+        errors.append({
+            "type": "unfilled_token",
+            "severity": "high",
+            "token": token,
+            "message": (
+                f"Token {token} was not substituted before export. "
+                "Either the substitution table is missing this "
+                "key, or the writer cited a token that does not "
+                "exist. Re-generate the document; if the symptom "
+                "persists, the token name must be added to "
+                "tools/numeric_substitution.build_substitution_table."),
+        })
+
     return {
         "passed": len(errors) == 0,
         "warnings": warnings,
@@ -1237,4 +1275,5 @@ def verify_export_against_cache(
         "document_type": document_type,
         "n_values_verified": n_verified,
         "n_values_missing": n_missing,
+        "n_unfilled_tokens": len(leftover_tokens),
     }

@@ -185,19 +185,46 @@ def _add_md_heading_paragraph(
     run.font.size = Pt({1: 16, 2: 14, 3: 13}.get(level, 13))
 
 
-def _add_brief_body(doc: Document, text: str) -> None:
-    """Brief-specific body writer that converts markdown heading
-    prefixes (# / ## / ###) at the start of a block (or as a
-    standalone first line) into Word Heading 1 / 2 / 3 style
-    paragraphs so the brief DOCX outline + navigation pane
-    surface the document structure correctly. Non-heading
-    content delegates to _add_body, which still handles
-    [[VERIFY: …]] markers and **markdown bold** inline emphasis.
+# Duplicate-cover-title detection. The LLM occasionally re-emits
+# the document title or subtitle at the top of the
+# executive_summary narrative even though the cover page already
+# carries them. _add_brief_body strips any leading H1/H2 whose
+# text contains any of these phrases verbatim. Defence-in-depth
+# alongside the prompt instruction that explicitly forbids the
+# duplication.
+_BRIEF_COVER_PHRASES: tuple[str, ...] = (
+    "executive brief",
+    "regime-conditional",
+    "regime conditional asset allocation",
+    "forest capital",
+    "fna 670",
+    "mccoll school",
+)
 
-    Scope: brief narratives only (build_executive_brief). The
-    deck + appendix builders keep their existing _add_body calls
-    -- the markdown-heading symptom was observed on the brief
-    only and the user spec narrowed the fix to that surface."""
+
+def _add_brief_body(doc: Document, text: str) -> None:
+    """Body writer that converts markdown heading prefixes
+    (# / ## / ###) at the start of a block (or as a standalone
+    first line) into Word Heading 1 / 2 / 3 style paragraphs so
+    the document outline + navigation pane surface the structure
+    correctly. Non-heading content delegates to _add_body, which
+    still handles [[VERIFY: …]] markers and **markdown bold**
+    inline emphasis.
+
+    Originally brief-only (PR #424); routed from the appendix
+    too on 2026-06-25 so the appendix DOCX outline reflects its
+    section headings the same way the brief's does. Name kept
+    for stability across the existing callers.
+
+    Cover-title de-duplication: any leading markdown H1/H2 whose
+    lower-cased text contains a phrase in _BRIEF_COVER_PHRASES is
+    SKIPPED (not emitted). The LLM occasionally re-emits the
+    document title or subtitle at the top of the
+    executive_summary narrative; the cover page already carries
+    them and the duplication produces a visible eyesore on page
+    1. The skip is silent -- the rest of the block writes
+    normally."""
+    real_heading_seen = False
     for block in (text or "").strip().split("\n\n"):
         block = block.strip()
         if not block:
@@ -205,17 +232,27 @@ def _add_brief_body(doc: Document, text: str) -> None:
         first_line, _, rest = block.partition("\n")
         m = _MD_HEADING_LINE_RE.match(first_line.strip())
         if m is None:
-            # No markdown heading on the first line; defer to
-            # the legacy body writer for the whole block.
             _add_body(doc, block)
+            real_heading_seen = True
             continue
         level = len(m.group(1))
         heading_text = m.group(2).strip()
+        # Cover-title duplicate detection -- the gate stays open
+        # until the first REAL (non-cover) heading lands, so a
+        # leading sequence of cover-dupe H1/H2 lines (the LLM
+        # occasionally emits both the title AND the subtitle as
+        # consecutive headings) all get stripped, not just the
+        # first.
+        if not real_heading_seen and level <= 2:
+            lowered = heading_text.lower()
+            if any(p in lowered for p in _BRIEF_COVER_PHRASES):
+                if rest.strip():
+                    _add_body(doc, rest)
+                    real_heading_seen = True
+                continue
+        real_heading_seen = True
         _add_md_heading_paragraph(doc, heading_text, level)
         if rest.strip():
-            # Block had a heading on line 1 followed by prose --
-            # write the remaining lines as a body block so any
-            # [[VERIFY]] / bold markers in the body still render.
             _add_body(doc, rest)
 
 
@@ -1751,13 +1788,13 @@ def build_analytical_appendix(
 
     # ── Section A — Data and Methodology ──────────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[0])
-    _add_body(doc, narratives.get("appendix_a", "[DATA PENDING]"))
+    _add_brief_body(doc, narratives.get("appendix_a", "[DATA PENDING]"))
     h, r = table_summary_statistics(data.get("summary_statistics", []))
     _add_table(doc, "Table A1. Summary Statistics by Asset Class", h, r)
 
     # ── Section B — Full Strategy Performance ─────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[1])
-    _add_body(doc, narratives.get("appendix_b", "[DATA PENDING]"))
+    _add_brief_body(doc, narratives.get("appendix_b", "[DATA PENDING]"))
     h, r = table_strategy_performance_full(
         data.get("strategy_results") or {})
     _add_table(doc, "Table B1. Full-Period Performance by Strategy "
@@ -1765,46 +1802,66 @@ def build_analytical_appendix(
 
     # ── Section C — Statistical Tests ─────────────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[2])
-    _add_body(doc, narratives.get("appendix_c", "[DATA PENDING]"))
+    _add_brief_body(doc, narratives.get("appendix_c", "[DATA PENDING]"))
     h, r = table_statistical_tests(data.get("strategy_results") or {})
     _add_table(doc, "Table C1. Statistical Tests by Strategy "
                     "(paired-t, FDR-corrected, DSR, PSR, SPA)", h, r)
 
     # ── Section D — Bootstrap Confidence Intervals ────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[3])
-    _add_body(doc, narratives.get("appendix_d", "[DATA PENDING]"))
+    _add_brief_body(doc, narratives.get("appendix_d", "[DATA PENDING]"))
     h, r = table_bootstrap_ci(data.get("bootstrap_ci_sharpe") or [])
     _add_table(doc, "Table D1. Sharpe Ratio with 95% Bootstrap CI "
                     "(block bootstrap, length 12, 10,000 resamples)", h, r)
 
     # ── Section E — Factor Loadings ───────────────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[4])
-    _add_body(doc, narratives.get("appendix_e", "[DATA PENDING]"))
+    _add_brief_body(doc, narratives.get("appendix_e", "[DATA PENDING]"))
     h, r = table_factor_loadings(data.get("factor_loadings", []))
     _add_table(doc, "Table E1. Carhart Four-Factor Loadings by Strategy "
                     "(* significant at p < .05)", h, r)
 
     # ── Section F — Crisis Window Performance ─────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[5])
-    _add_body(doc, narratives.get("appendix_f", "[DATA PENDING]"))
+    _add_brief_body(doc, narratives.get("appendix_f", "[DATA PENDING]"))
     h, r = table_crisis_performance(data.get("crisis_performance"))
     _add_table(doc, "Table F1. Cumulative Return by Strategy and "
                     "Crisis Window († indicates partial-overlap)", h, r)
 
     # ── Section G — Transaction Cost Sensitivity ──────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[6])
-    _add_body(doc, narratives.get("appendix_g", "[DATA PENDING]"))
+    _add_brief_body(doc, narratives.get("appendix_g", "[DATA PENDING]"))
     h, r = table_cost_sensitivity(data.get("cost_sensitivity"))
     _add_table(doc, "Table G1. Net-of-Cost Sharpe at 10/15/20 bps "
                     "per Material Rebalance (OOS Window)", h, r)
 
     # ── Section H — Validation Audit Summary ──────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[7])
-    _add_body(doc, narratives.get("appendix_h", "[DATA PENDING]"))
+    _add_brief_body(doc, narratives.get("appendix_h", "[DATA PENDING]"))
     h, r = table_invariant_summary(data.get("invariant_summary"))
     _add_table(doc, "Table H1. Latest Warm Invariant Verdict "
                     "(deterministic detection only — see "
                     "docs/INVARIANTS.md)", h, r)
+
+    # ── Inline-figure placement (June 25 2026) ────────────────────────────
+    # Mirrors _place_brief_figures_inline -- the appendix carries
+    # the same four canonical APA chart images near the prose
+    # that references them so the document is self-standing.
+    # Both builders share INLINE_FIGURE_TRIGGERS; the appendix
+    # narratives reference the same concepts so the anchors fire
+    # on the same trigger phrases. Any chart whose anchor isn't
+    # matched in the prose appends at the end via the fallback.
+    # Substitution table is None for the appendix path -- the
+    # {{TOKEN}} placeholders in the figure Note. text degrade to
+    # literal text the audit will flag on the next regen rather
+    # than silently misreporting.
+    appendix_placement = _place_brief_figures_inline(
+        doc, data, None)
+    appendix_inline_placed = {
+        k for k, v in appendix_placement.items() if v == "inline"}
+    _embed_brief_figures(
+        doc, data, None,
+        skip_keys=appendix_inline_placed)
 
     # ── Reproducibility footer line ───────────────────────────────────────
     _add_reproducibility_line(doc, data.get("data_hash"))
