@@ -165,21 +165,42 @@ async def list_drafts(owner_email: str) -> list[dict[str, Any]]:
         return []
 
 
-async def list_all_drafts() -> list[dict[str, Any]]:
-    """Every non-deleted draft across all owners, newest update
-    first. Used by the team-member-gated drafts list endpoint --
-    documents are team-shared, so Mike can open a brief Bob
-    generated and vice versa."""
+async def list_all_drafts(
+    *, include_all: bool = False,
+) -> list[dict[str, Any]]:
+    """Drafts across all owners, newest update first. Used by the
+    team-member-gated drafts list endpoint -- documents are team-
+    shared, so Mike can open a brief Bob generated and vice versa.
+
+    June 25 2026 -- the default response now scopes to is_current=true
+    rows only. The original (PR #399) implementation returned every
+    non-deleted row, which the DocumentGenerationPanel's
+    'is there a current draft for this document_type' lookup
+    misinterpreted: with dozens of historical rows in the response,
+    the panel either failed to find the current draft or rendered
+    incorrectly, breaking 'Open in Editor' for the whole team.
+
+    include_all=True keeps the old behaviour (full history -- used by
+    the DraftVersionSelector in the editor toolbar, which lists every
+    version of the current document_type). Default False = one row per
+    document_type maximum: the current draft."""
     try:
         from sqlalchemy import text
         sf = _session()
         if sf is None:
             return []
         async with sf() as s:
-            rows = await s.execute(text(
-                f"SELECT {_DRAFT_COLS} FROM editor_drafts "
-                "WHERE is_deleted = false "
-                "ORDER BY updated_at DESC"))
+            if include_all:
+                rows = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    "WHERE is_deleted = false "
+                    "ORDER BY updated_at DESC"))
+            else:
+                rows = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    "WHERE is_deleted = false "
+                    "AND is_current = true "
+                    "ORDER BY updated_at DESC"))
             return [_draft_row(r) for r in rows.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("editor_list_all_drafts_failed", error=str(exc))
