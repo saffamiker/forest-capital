@@ -388,6 +388,30 @@ in the final document.
 _AI_DRAFT_BANNER = "AI DRAFT — REQUIRES HUMAN REVIEW\n\n"
 
 
+# Em dash sanitizer -- the _SYSTEM_PROMPT explicitly prohibits em
+# dashes (the single strongest AI tell in academic prose). Even
+# with the prompt instruction, model output occasionally slips an
+# em dash through. This regex-based defence-in-depth pass strips
+# the Unicode em dash + en dash + ASCII triple-hyphen substitute
+# from every narrative AFTER generation, before the substitution
+# layer runs. Replaces with '; ' (semicolon + space) per the
+# prompt's recommended substitute. Idempotent.
+import re as _re
+
+_EM_DASH_RE = _re.compile(r"\s*[—–]\s*|\s*---\s*")
+
+
+def _strip_em_dashes(text: str) -> str:
+    """Replace every em dash (U+2014), en dash (U+2013), and the
+    ASCII '---' substitute with '; '. Whitespace around the dash
+    is collapsed into the replacement so 'foo — bar' becomes
+    'foo; bar' not 'foo ; bar'. Used by the brief + appendix
+    section writers post-generation."""
+    if not text:
+        return text
+    return _EM_DASH_RE.sub("; ", text)
+
+
 # ── Strategy display-name post-processing ──────────────────────────────────
 #
 # May 24 2026 RW2 hotfix. Strategy identifiers were rendering in Bob's
