@@ -44,7 +44,16 @@ from tools.chart_vision import (
 
 PEER_MODEL = SONNET_MODEL      # claude-sonnet-4-6
 ARBITER_MODEL = OPUS_MODEL     # claude-opus-4-7  (Opus for the arbiter step only)
-PEER_MAX_TOKENS = 800          # ~400-word cap with headroom
+# PEER_MAX_TOKENS raised from 800 to 1500 (June 25 2026). The 800-token
+# cap was lopping every peer agent's output at the cap on every call --
+# peer agents (academic_review_peer:claude) showed output_tokens
+# EXACTLY 800 on every run, indicating they were running into the cap
+# mid-analysis rather than completing the structured-review JSON. The
+# structured review JSON needs ~1100-1400 tokens to cover all six
+# rubric sections (executive summary, methodology, key findings,
+# limitations, recommendations, visuals) so 1500 gives comfortable
+# headroom without runaway-cost risk.
+PEER_MAX_TOKENS = 1500
 # 4000 token cap so the arbiter has room for ALL five rubric sections
 # plus the two top-level summary lines plus the prefatory framing.
 # The previous 2000-token cap was tight: the verbose Academic Rigour /
@@ -146,7 +155,39 @@ DOC_TYPE_LABELS: dict[str, str] = {
     "other": "OTHER REFERENCE DOCUMENT",
 }
 
-_DOC_CHAR_CAP = 8000   # per-document, keeps prompts bounded
+# Per-document character caps -- June 25 2026.
+#
+# Pre-2026-06-25 a single _DOC_CHAR_CAP=8000 capped every document
+# (primary + supporting) at ~1300 words. The executive brief is ~3500
+# words / ~21K chars / ~5K tokens; truncating to 8K chars dropped
+# Sections 4 (Limitations) and 5 (Final Recommendations) on every
+# run, which the peer review then flagged as 'not visible in the
+# truncated draft'. The fix splits the cap into PRIMARY vs SUPPORTING:
+#
+#   _PRIMARY_DOC_CHAR_CAP    full content of the PRIMARY document for
+#                            review -- 50,000 chars (~8,000 words /
+#                            ~12,000 tokens). Comfortably covers the
+#                            largest deliverable (analytical appendix
+#                            at ~6K words) without flooding the prompt
+#                            window. The arbiter's context budget is
+#                            ~200K tokens; the primary doc + analytics
+#                            + supporting docs + rubric still sits
+#                            well under that.
+#   _SUPPORTING_DOC_CHAR_CAP cross-reference summaries of the other
+#                            deliverables under SUPPORTING CONTEXT.
+#                            500 chars matches the original behaviour
+#                            -- the arbiter doesn't need full content
+#                            for the not-under-review documents.
+#   _DOC_CHAR_CAP            retained as the LEGACY (cross-document
+#                            PROJECT DOCUMENTS section) cap, raised to
+#                            50K to match the primary surface. The
+#                            cross-doc review fanout reads ALL four
+#                            deliverables at full content; the 8K
+#                            truncation here was producing the same
+#                            problem.
+_PRIMARY_DOC_CHAR_CAP = 50_000
+_SUPPORTING_DOC_CHAR_CAP = 500
+_DOC_CHAR_CAP = 50_000   # legacy cross-document path, see note above
 
 
 def peer_agent_ids() -> list[str]:
@@ -435,9 +476,27 @@ def build_review_context_block(
         else:
             for d in primary_docs:
                 text = (d.get("content_text") or "").strip()
-                if len(text) > _DOC_CHAR_CAP:
-                    text = (text[:_DOC_CHAR_CAP]
+                original_chars = len(text)
+                was_truncated = False
+                if original_chars > _PRIMARY_DOC_CHAR_CAP:
+                    text = (text[:_PRIMARY_DOC_CHAR_CAP]
                             + "\n…[document truncated for review]")
+                    was_truncated = True
+                # June 25 2026 -- diagnostic logging so future
+                # truncation regressions are visible immediately
+                # in production logs (Render search:
+                # review_context_primary_doc_tokens). Token estimate
+                # uses the heuristic chars/4; the precise figure
+                # comes from the API response but isn't available
+                # here pre-call.
+                est_tokens = original_chars // 4
+                log.info(
+                    "review_context_primary_doc_tokens",
+                    document_type=target_review_type,
+                    content_chars=original_chars,
+                    content_tokens=est_tokens,
+                    was_truncated=was_truncated,
+                    cap_chars=_PRIMARY_DOC_CHAR_CAP)
                 lines.append(
                     f"\n[{primary_label}: "
                     f"{d.get('name', 'document')}]\n{text}")
@@ -456,8 +515,8 @@ def build_review_context_block(
             for d in docs:
                 any_supporting = True
                 text = (d.get("content_text") or "").strip()
-                snippet = text[:500]
-                if len(text) > 500:
+                snippet = text[:_SUPPORTING_DOC_CHAR_CAP]
+                if len(text) > _SUPPORTING_DOC_CHAR_CAP:
                     snippet += "…"
                 lines.append(f"\n[{label}]\n{snippet}")
         if not any_supporting:
@@ -686,6 +745,12 @@ async def gather_review_context(
     return {
         "analytics": analytics,
         "documents_by_type": docs_by_type,
+        # June 25 2026 -- expose target_review_type on the ctx so
+        # downstream consumers (the independent reviewer pass-
+        # through in particular) can look up the primary
+        # document's content_text without re-deriving the editor->
+        # review-type mapping.
+        "target_review_type": target_review_type,
         "document_types_present": present,
         "document_types_missing": missing,
         "team_activity": team_activity,
