@@ -53,14 +53,18 @@ export interface RegenConfirmModalProps {
 
 // Mirrors backend tools/editor_drafts._REGEN_CASCADE. Kept in sync
 // manually; the cascade is short and rarely changes.
+//
+// June 25 2026 (FIX): appendix regen no longer cascades to
+// executive_brief -- brief is UPSTREAM of appendix, not downstream.
+// The previous entry stranded the brief tile with no is_current=true
+// draft after every appendix regen.
 const _CASCADE_TYPES: Record<string, string[]> = {
   executive_brief: [
     'analytical_appendix', 'presentation_deck',
     'presentation_script',
   ],
   analytical_appendix: [
-    'executive_brief', 'presentation_deck',
-    'presentation_script',
+    'presentation_deck', 'presentation_script',
   ],
   presentation_deck: ['presentation_script'],
   presentation_script: [],
