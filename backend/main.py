@@ -13820,6 +13820,343 @@ async def post_apply_fix(
     }
 
 
+# ── June 25 2026: Copilot-style inline fix-text flow ─────────────
+#
+# The legacy /apply-fix path regenerates the ENTIRE document via the
+# generator pipeline (an opaque ~60-90s job). That's appropriate when
+# the fix is a structural change to the story plan, but for a
+# localised paragraph edit it's overkill and the user can't preview
+# the change before committing. These two endpoints add a tighter
+# loop: propose-fix-text returns a section-scoped diff (original_text
+# + suggested_text); accept-fix-text marks the council_debates row
+# applied and the frontend PATCHes the draft with the resolved text
+# via the existing /drafts/{id} endpoint. Idempotent: the suggested
+# text is cached on council_debates.fix_proposals[i].suggested_text
+# so a second propose call returns the same result.
+
+_PROPOSE_FIX_TEXT_SYSTEM = (
+    "You are an editor revising a single section of an academic "
+    "executive brief or appendix. You will be given the current "
+    "section text and a specific change instruction. Apply the "
+    "change as a minimal, surgical edit -- preserve voice, "
+    "structure, citations, and any unaffected sentences. Do NOT "
+    "rewrite the whole section. Do NOT add commentary, headers, "
+    "or framing. Return ONLY the revised section text, verbatim, "
+    "ready to drop back into the document. If the change "
+    "instruction cannot be applied without losing meaningful "
+    "content, return the original text unchanged.")
+
+
+def _extract_section_text(
+    content_text: str, section_name: str | None,
+) -> str | None:
+    """Best-effort section extractor. Searches content_text for a
+    line whose stripped form matches section_name (case-insensitive,
+    leading number / markdown header stripped) and returns the text
+    from that line up to (but not including) the next heading-like
+    line OR end of document.
+
+    Returns None when the section cannot be located; the caller
+    falls back to the full document text (less ideal but safe)."""
+    if not section_name or not content_text:
+        return None
+    import re as _re
+    needle = section_name.strip().lower()
+    # Strip leading 'Section N: ', '# ', '## ', '1. ', etc. from
+    # both the needle and each candidate line so 'Section 4:
+    # Limitations' matches a draft heading like '## Limitations'.
+    needle = _re.sub(r"^(section\s+\d+[:.]?\s*|#+\s*|\d+\.\s+)",
+                     "", needle).strip()
+    lines = content_text.splitlines()
+    start_idx: int | None = None
+    for i, line in enumerate(lines):
+        clean = _re.sub(
+            r"^(section\s+\d+[:.]?\s*|#+\s*|\d+\.\s+)",
+            "", line.strip().lower()).strip()
+        if clean == needle and len(line.strip()) < 200:
+            start_idx = i
+            break
+    if start_idx is None:
+        return None
+    # Walk forward to the next heading-like line (markdown # / ##
+    # / 'Section N' / a bold-only line). The slice is from
+    # start_idx to end_idx exclusive.
+    end_idx = len(lines)
+    for j in range(start_idx + 1, len(lines)):
+        ln = lines[j].strip()
+        if not ln:
+            continue
+        if (ln.startswith("#") or ln.lower().startswith("section ")
+                or _re.match(r"^\d+\.\s+\S", ln)
+                or (ln.startswith("**") and ln.endswith("**")
+                    and len(ln) < 120)):
+            end_idx = j
+            break
+    return "\n".join(lines[start_idx:end_idx]).strip()
+
+
+@app.post(
+    "/api/v1/council/debates/{debate_id}/propose-fix-text")
+@limiter.limit("20/minute")
+async def post_propose_fix_text(
+    debate_id: int, request: Request, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Generates a section-scoped text diff for one fix proposal.
+
+    Body: {finding_id: int}
+
+    Returns: {finding_id, original_text, suggested_text,
+              section_name, proposal_id}
+
+    Idempotent: the suggested_text is cached on
+    council_debates.fix_proposals[i].suggested_text so a second
+    call returns the same payload. Cache hit logged for telemetry.
+
+    422 when the debate has no fix_proposals or the finding_id
+    doesn't match. 404 when the debate row doesn't exist. 409 when
+    no current draft exists for the debate's document_type."""
+    from sqlalchemy import text as _text
+    from database import (
+        AsyncSessionLocal,  # type: ignore[attr-defined]
+    )
+    from tools.editor_drafts import get_current_draft_by_type
+    from agents.base import call_claude, SONNET_MODEL
+
+    finding_id = body.get("finding_id")
+    if finding_id is None:
+        raise HTTPException(
+            status_code=422, detail="finding_id is required")
+    finding_id = int(finding_id)
+
+    if AsyncSessionLocal is None:
+        raise HTTPException(
+            status_code=503, detail="Database unavailable.")
+
+    async with AsyncSessionLocal() as s:
+        r = await s.execute(_text(
+            "SELECT document_type, fix_proposals, source_draft_id "
+            "FROM council_debates WHERE id = :id"),
+            {"id": debate_id})
+        row = r.fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail="Debate row not found.")
+        document_type = row[0] or ""
+        fix_proposals = row[1] or {}
+        # source_draft_id captured for the response payload but
+        # not used in lookup -- we read the current draft.
+        _ = row[2]
+
+    # fix_proposals is either a dict keyed by str(finding_id) or
+    # a list of FixProposal dicts. Handle both shapes.
+    proposal: dict | None = None
+    proposal_key: str | int | None = None
+    if isinstance(fix_proposals, dict):
+        key = str(finding_id)
+        if key in fix_proposals:
+            proposal = fix_proposals[key]
+            proposal_key = key
+    elif isinstance(fix_proposals, list):
+        for p in fix_proposals:
+            if isinstance(p, dict) and (
+                    int(p.get("finding_id", -1)) == finding_id):
+                proposal = p
+                proposal_key = fix_proposals.index(p)
+                break
+    if proposal is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No fix proposal for that finding_id. Generate one "
+                "first via /api/v1/documents/propose-fix."))
+    patch_instruction = str(
+        proposal.get("patch_instruction") or "").strip()
+    section_name = proposal.get("section_name")
+
+    # Idempotency cache -- if suggested_text was previously
+    # generated for this proposal, return it verbatim.
+    cached_suggested = (
+        proposal.get("suggested_text")
+        if isinstance(proposal, dict) else None)
+    cached_original = (
+        proposal.get("original_text")
+        if isinstance(proposal, dict) else None)
+
+    # Fetch the current draft (team-shared per PR #410).
+    draft = await get_current_draft_by_type(document_type)
+    if draft is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No current draft for this document type to apply "
+                "the fix against."))
+    content_text = (draft.get("content_text") or "").strip()
+    if not content_text:
+        raise HTTPException(
+            status_code=409,
+            detail="Current draft has no content_text to patch.")
+
+    # Locate the affected section. None falls back to the full
+    # document -- safer than aborting, less surgical than ideal.
+    original_text = _extract_section_text(
+        content_text, section_name) or content_text
+    if cached_suggested and cached_original:
+        log.info(
+            "propose_fix_text_cache_hit",
+            debate_id=debate_id, finding_id=finding_id)
+        return {
+            "finding_id": finding_id,
+            "section_name": section_name,
+            "original_text": cached_original,
+            "suggested_text": cached_suggested,
+            "proposal_id": debate_id,
+            "cached": True,
+        }
+
+    if not patch_instruction:
+        raise HTTPException(
+            status_code=422,
+            detail="patch_instruction is empty on this proposal.")
+
+    # Single Sonnet call -- low max_tokens since we want a tight
+    # surgical edit, not an open rewrite. 3000 covers a generous
+    # section (~5K chars / ~750 tokens of output).
+    if ENVIRONMENT == "test":
+        suggested_text = (
+            f"{original_text}\n\n[Inline edit applied: "
+            f"{patch_instruction}]")
+    else:
+        user_msg = (
+            f"CURRENT SECTION TEXT:\n\n{original_text}\n\n"
+            f"CHANGE TO APPLY:\n\n{patch_instruction}\n\n"
+            "Return the revised section text only, no commentary.")
+        try:
+            from agents.harness import HarnessResult  # noqa: F401
+            raw = await asyncio.to_thread(
+                call_claude,
+                SONNET_MODEL, _PROPOSE_FIX_TEXT_SYSTEM,
+                user_msg, max_tokens=3000,
+                trigger="propose_fix_text")
+            suggested_text = (raw or "").strip()
+            if not suggested_text:
+                suggested_text = original_text
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "propose_fix_text_call_failed",
+                debate_id=debate_id, finding_id=finding_id,
+                error=str(exc))
+            raise HTTPException(
+                status_code=502,
+                detail=f"Sonnet call failed: {exc}")
+
+    # Cache on council_debates.fix_proposals[i] (best-effort --
+    # idempotency degrades to a fresh LLM call if the write fails).
+    try:
+        if proposal_key is not None and AsyncSessionLocal is not None:
+            updated = (
+                fix_proposals.copy()
+                if isinstance(fix_proposals, dict)
+                else list(fix_proposals))
+            if isinstance(updated, dict):
+                updated[str(proposal_key)] = {
+                    **proposal,
+                    "suggested_text": suggested_text,
+                    "original_text": original_text,
+                }
+            else:
+                updated[int(proposal_key)] = {
+                    **proposal,
+                    "suggested_text": suggested_text,
+                    "original_text": original_text,
+                }
+            async with AsyncSessionLocal() as s2:
+                await s2.execute(_text(
+                    "UPDATE council_debates "
+                    "SET fix_proposals = CAST(:p AS JSONB) "
+                    "WHERE id = :id"),
+                    {"p": json.dumps(updated), "id": debate_id})
+                await s2.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "propose_fix_text_cache_write_failed",
+            debate_id=debate_id, finding_id=finding_id,
+            error=str(exc))
+
+    return {
+        "finding_id": finding_id,
+        "section_name": section_name,
+        "original_text": original_text,
+        "suggested_text": suggested_text,
+        "proposal_id": debate_id,
+        "cached": False,
+    }
+
+
+@app.post(
+    "/api/v1/council/debates/{debate_id}/accept-fix-text")
+@limiter.limit("20/minute")
+async def post_accept_fix_text(
+    debate_id: int, request: Request, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Marks a fix proposal applied after the frontend has PATCHed
+    the draft with the resolved text via /drafts/{id}.
+
+    Body: {finding_id: int, new_draft_id: int | null}
+
+    Updates council_debates.fix_applied=true, fix_applied_at=NOW(),
+    new_draft_id (when supplied). Distinct from /api/v1/documents/
+    apply-fix -- the legacy path kicks off a full regen; this path
+    is for the surgical inline-diff flow where the frontend has
+    already saved the change.
+
+    Returns: {ok: bool, applied_at: ISO timestamp}"""
+    from sqlalchemy import text as _text
+    from database import (
+        AsyncSessionLocal,  # type: ignore[attr-defined]
+    )
+
+    finding_id = body.get("finding_id")
+    if finding_id is None:
+        raise HTTPException(
+            status_code=422, detail="finding_id is required")
+    new_draft_id = body.get("new_draft_id")
+    if new_draft_id is not None:
+        try:
+            new_draft_id = int(new_draft_id)
+        except Exception:  # noqa: BLE001
+            new_draft_id = None
+
+    if AsyncSessionLocal is None:
+        raise HTTPException(
+            status_code=503, detail="Database unavailable.")
+
+    try:
+        async with AsyncSessionLocal() as s:
+            await s.execute(_text(
+                "UPDATE council_debates SET "
+                "fix_applied = TRUE, "
+                "fix_applied_at = NOW(), "
+                "new_draft_id = COALESCE(:nd, new_draft_id) "
+                "WHERE id = :id"),
+                {"nd": new_draft_id, "id": debate_id})
+            await s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "accept_fix_text_failed",
+            debate_id=debate_id, finding_id=int(finding_id),
+            error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not mark fix applied: {exc}")
+    from datetime import datetime as _dt, timezone as _tz
+    return {
+        "ok": True,
+        "applied_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
 # ── Concern 7l-ii: re-run critic on a specific draft ──────────
 
 @app.post("/api/v1/documents/rerun-critic")
