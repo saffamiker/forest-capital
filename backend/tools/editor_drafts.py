@@ -423,21 +423,37 @@ async def get_current_draft_with_layer3(
         return None
 
 
-# June 25 2026 -- regeneration cascade rules. When a generated
-# draft lands, it can render dependent documents stale because the
-# narrative + numeric sources of truth flow brief -> appendix ->
-# deck -> script. Each entry lists the OTHER document_types that
-# should also have their is_current=true rows cleared when this
-# type regenerates (the source type itself is always cleared by
-# the existing same-type UPDATE). Empty tuple = no cascade.
+# Regeneration cascade rules. When a generated draft lands, it
+# can render DOWNSTREAM documents stale because the narrative +
+# numeric sources of truth flow one-way:
 #
-#   brief or appendix  -> mark all four document types stale
-#   deck               -> mark deck + script stale
-#   script             -> script-only; no downstream impact
+#   executive_brief -> analytical_appendix
+#                   -> presentation_deck
+#                   -> presentation_script
+#   analytical_appendix -> presentation_deck
+#                       -> presentation_script
+#   presentation_deck -> presentation_script
+#   presentation_script -> (nothing downstream)
+#
+# Each entry lists the OTHER document_types that should also have
+# their is_current=true rows cleared when this type regenerates
+# (the source type itself is cleared by the existing same-type
+# UPDATE). Empty tuple = no cascade.
+#
+# June 25 2026 (FIX): appendix regen previously cascaded to
+# executive_brief, which was WRONG -- brief is UPSTREAM of
+# appendix, not downstream. Regenerating the appendix should
+# leave the brief alone (and clear deck + script as the
+# downstream documents). Without this fix, an appendix regen
+# left the brief with no is_current=true draft, breaking the
+# Reports page tile + editor access for the brief surface.
 #
 # The cascade is GENERATION-only. Manual / uploaded drafts skip
 # the cascade so a one-off content edit doesn't invalidate
-# downstream documents.
+# downstream documents. The cascade also fires only AFTER the
+# new draft INSERT has returned a row -- see the
+# `if created_from == 'generated' and found is not None` guard in
+# create_draft below.
 _REGEN_CASCADE: dict[str, tuple[str, ...]] = {
     "executive_brief": (
         "analytical_appendix",
@@ -445,7 +461,6 @@ _REGEN_CASCADE: dict[str, tuple[str, ...]] = {
         "presentation_script",
     ),
     "analytical_appendix": (
-        "executive_brief",
         "presentation_deck",
         "presentation_script",
     ),
@@ -578,11 +593,18 @@ async def create_draft(
                         "cf": created_from, "aw": aw,
                     })
             found = row.fetchone()
-            # June 25 2026 -- regeneration cascade. Applies only
-            # to generated drafts; manual / uploaded paths leave
-            # downstream documents alone. Empty cascade tuple
-            # (script) is a no-op.
-            if created_from == "generated":
+            # Regeneration cascade. Applies only to generated
+            # drafts; manual / uploaded paths leave downstream
+            # documents alone. Empty cascade tuple (script) is a
+            # no-op.
+            #
+            # GUARD: the cascade fires only when the new draft
+            # INSERT actually returned a row. If RETURNING came
+            # back empty (a corner case under partial schema
+            # mismatch), we skip the cascade so a failed
+            # generation never strands downstream documents with
+            # is_current=false against no new replacement.
+            if created_from == "generated" and found is not None:
                 cascade = _REGEN_CASCADE.get(document_type, ())
                 if cascade:
                     placeholders = ", ".join(
