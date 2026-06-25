@@ -15743,17 +15743,22 @@ async def export_presentation_script(
     """
     from fastapi.responses import Response as FastAPIResponse
     from tools.academic_docx import build_presentation_script
-    from tools.audit_assembler import current_data_hash
-    from tools.story_plan import get_cached_story_plan
+    from tools.story_plan import get_latest_story_plan
 
-    try:
-        data_hash = await current_data_hash()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("presentation_script_hash_unavailable",
-                    error=str(exc))
-        data_hash = ""
-    plan = await get_cached_story_plan(data_hash, "deck") \
-        if data_hash else None
+    # June 25 2026 -- replaced the bare-hash get_cached_story_plan
+    # lookup. refresh_story_plan persists the deck row under a
+    # composite hash via cache_key_with_brief_and_appendix
+    # ('<data_hash>|<brief_hash>|<appendix_hash>'); the bare
+    # current_data_hash() never matched and this endpoint 404'd
+    # even when the readiness gate (which uses get_latest_story_plan
+    # post-fix at main.py:9048-9050) reported the script as
+    # available. Switching to the same hash-agnostic, fallback-
+    # excluding query the gate uses makes the gate + the export
+    # finally agree on whether the script can be downloaded.
+    # Hash-drift staleness remains handled at export time by
+    # verify_export_against_cache (called downstream).
+    plan = await get_latest_story_plan(
+        "deck", exclude_fallback=True)
     if not plan or plan.get("_model") == "deterministic_fallback":
         raise HTTPException(
             status_code=404,
