@@ -33,6 +33,7 @@ import DataReferenceSheetPanel from '../components/DataReferenceSheetPanel'
 import SubmissionReadinessReview from '../components/SubmissionReadinessReview'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import KeyMetricsPanel from '../components/KeyMetricsPanel'
+import LightRefreshButton from '../components/LightRefreshButton'
 import PreSubmissionCheckPanel from '../components/PreSubmissionCheckPanel'
 import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
 import SubmissionFreezeBanner from '../components/SubmissionFreezeBanner'
@@ -150,6 +151,14 @@ export default function Reports() {
           confirm any figure in his draft against the cache without
           leaving the page. Collapsed by default. */}
       <KeyMetricsPanel />
+
+      {/* Light Refresh (June 25 2026) -- self-service analytics
+          refresh for team members. Runs backtester + academic
+          analytics + cost sensitivity for the current data hash;
+          does NOT touch story plans, drafts, or document content.
+          Surfaces a 'new data detected' warning when the
+          post-refresh hash differs from what Key Metrics showed. */}
+      <LightRefreshButton />
 
       {/* Data Reference Sheet (June 22 2026) -- the full
           cross-reference of every value in the submission against
