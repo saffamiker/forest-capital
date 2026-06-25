@@ -31,13 +31,14 @@
  * regen rights can self-serve a refresh without sysadmin
  * escalation).
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   CheckCircle, AlertTriangle, RefreshCw, Loader2,
 } from 'lucide-react'
 
 import TeamGate from './TeamGate'
+import { useGenerationJobs } from '../lib/generationJobs'
 
 
 interface RefreshStep {
@@ -165,6 +166,36 @@ export default function LightRefreshButton(
   useEffect(() => {
     void loadStatus()
   }, [loadStatus])
+
+  // June 25 2026 -- mirror the DocumentGenerationPanel's
+  // job-completion refresh (PR #422). The Light Refresh status
+  // table reads from /api/v1/documents/drafts, which only updates
+  // its mount-time fetch -- a brief / appendix / deck regen
+  // landed but the table still showed the OLD draft hash until
+  // the user F5'd. Subscribing to the same useGenerationJobs
+  // store the parent panel uses means a job transitioning to
+  // complete / failed re-fires loadStatus here too.
+  //
+  // recorded ref de-dupes per job_id so a re-render that
+  // doesn't carry a new terminal job is a no-op (and a job
+  // we've already refreshed against doesn't re-fire on every
+  // panel re-render).
+  const jobs = useGenerationJobs()
+  const refreshedJobIds = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    let sawNewTerminal = false
+    for (const job of jobs) {
+      const terminal = (
+        job.status === 'complete' || job.status === 'failed')
+      if (!terminal) continue
+      if (refreshedJobIds.current.has(job.job_id)) continue
+      refreshedJobIds.current.add(job.job_id)
+      sawNewTerminal = true
+    }
+    if (sawNewTerminal) {
+      void loadStatus()
+    }
+  }, [jobs, loadStatus])
 
   const handleRefresh = async (): Promise<void> => {
     setBusy(true)
