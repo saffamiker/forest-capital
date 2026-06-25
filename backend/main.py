@@ -5470,6 +5470,66 @@ async def get_draft_academic_review_status(
     }
 
 
+@app.get("/api/v1/documents/drafts/{draft_id}/review-export")
+async def export_draft_academic_review(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """June 25 2026 -- DOCX export of the completed academic review
+    for a draft. Returns the assembled report as
+    application/vnd.openxmlformats-officedocument.wordprocessingml
+    .document download.
+
+    Sourced from three places:
+      editor_drafts row              cover metadata
+      council_debates row            peer responses + critic findings
+                                     + arbiter resolution + fix
+                                     proposals + counter arguments
+      agent_interactions row         arbiter prose (response_summary)
+                                     + overall_rating + score
+                                     + independent_review block
+    Returns 404 when the draft does not exist, 200 + DOCX even when
+    no review has landed yet (the DOCX surfaces a 'no review found'
+    notice in each section so the download endpoint never errors).
+    """
+    from datetime import date
+
+    from tools.editor_drafts import get_draft
+    from tools.activity_log import get_latest_academic_review_for_draft
+    from tools.review_docx import build_review_docx
+    from agents.academic_review import get_latest_debate_for_draft
+
+    draft = await get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(
+            status_code=404, detail="Draft not found.")
+
+    interaction = await get_latest_academic_review_for_draft(draft_id)
+    debate = await get_latest_debate_for_draft(draft_id)
+
+    if interaction is None and debate is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No academic review found for this draft. "
+                "Run the review first."))
+
+    content = await asyncio.to_thread(
+        build_review_docx,
+        draft=draft, debate=debate, interaction=interaction)
+
+    doc_type = draft.get("document_type") or "document"
+    slug = doc_type.replace("_", "-")
+    filename = (
+        f"forest-capital-{slug}-academic-review-"
+        f"draft-{draft_id}-{date.today().isoformat()}.docx")
+    return Response(
+        content=content,
+        media_type=_DOCX_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        })
+
+
 @app.post("/api/v1/documents/script/generate")
 @limiter.limit("6/minute")
 async def generate_presentation_script(

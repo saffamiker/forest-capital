@@ -3066,6 +3066,76 @@ async def run_arbiter_fix_proposal(
         return None
 
 
+async def get_latest_debate_for_draft(
+    draft_id: int,
+) -> dict[str, Any] | None:
+    """June 25 2026 -- fetches the most recent council_debates row
+    whose source_draft_id matches. Used by the
+    /review-export DOCX endpoint to assemble the report. Returns
+    None when no debate row exists or the DB is unavailable
+    (fail-open).
+
+    All payload columns surface as their parsed JSONB dicts/lists
+    (peer_responses, critic_findings, fix_proposals,
+    counter_arguments, was_addressed) so the consumer doesn't
+    re-parse. arbiter_resolution stays as text; created_at as
+    ISO string."""
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "SELECT id, interaction_id, context, document_type, "
+                "critic_model, critic_findings, "
+                "fatal_count, major_count, minor_count, "
+                "peer_responses, arbiter_resolution, "
+                "was_addressed, counter_arguments, fix_proposals, "
+                "fix_applied, fix_applied_at, new_draft_id, "
+                "source_draft_id, parent_debate_id, data_hash, "
+                "created_at "
+                "FROM council_debates "
+                "WHERE source_draft_id = :did "
+                "ORDER BY created_at DESC LIMIT 1"),
+                {"did": draft_id})
+            row = r.fetchone()
+            if row is None:
+                return None
+            return {
+                "id":                row[0],
+                "interaction_id":    row[1],
+                "context":           row[2],
+                "document_type":     row[3],
+                "critic_model":      row[4],
+                "critic_findings":   row[5],
+                "fatal_count":       row[6],
+                "major_count":       row[7],
+                "minor_count":       row[8],
+                "peer_responses":    row[9],
+                "arbiter_resolution": row[10],
+                "was_addressed":     row[11],
+                "counter_arguments": row[12],
+                "fix_proposals":     row[13],
+                "fix_applied":       row[14],
+                "fix_applied_at":    (
+                    row[15].isoformat() if row[15] else None),
+                "new_draft_id":      row[16],
+                "source_draft_id":   row[17],
+                "parent_debate_id":  row[18],
+                "data_hash":         row[19],
+                "created_at":        (
+                    row[20].isoformat() if row[20] else None),
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "get_latest_debate_for_draft_failed",
+            draft_id=draft_id, error=str(exc))
+        return None
+
+
 async def write_fix_proposals_to_debate(
     debate_id: int,
     proposals: list[FixProposal],
