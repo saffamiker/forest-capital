@@ -231,20 +231,40 @@ class TestSpeakerColourUtility:
 # ── Endpoint contracts ────────────────────────────────────────────────────────
 
 class TestScriptEndpoints:
+    """June 25 2026 -- POST /api/v1/documents/script/generate
+    refactored to the async job pattern. Returns 202 + job_id
+    instead of inline 200 + draft_id. The body is no longer read --
+    the endpoint reads the team-shared current deck draft via
+    get_current_draft_by_type. Missing-deck and missing-speakers
+    conditions now surface inside the job (status='failed') rather
+    than as synchronous HTTPException. Tests below pin the new
+    async contract; the in-job error coverage is left to the
+    document_generation tests that already exercise _generate_async."""
+
     def test_generate_unauthenticated_is_401(self):
-        assert client.post(GENERATE, json={"draft_id": 1}).status_code == 401
+        assert client.post(GENERATE).status_code == 401
 
     def test_generate_rejects_a_viewer(self):
-        assert client.post(GENERATE, headers=VIEWER,
-                           json={"draft_id": 1}).status_code == 403
+        assert client.post(GENERATE, headers=VIEWER).status_code == 403
 
-    def test_generate_missing_draft_id_is_422(self):
-        assert client.post(GENERATE, headers=TEAM,
-                           json={}).status_code == 422
+    def test_generate_team_member_returns_202_job_id(
+            self, clean_editor_drafts):
+        # The endpoint dispatches a background job and returns
+        # immediately. job_id flows back so the frontend can poll
+        # /api/v1/jobs/<id> for completion. Body is ignored under
+        # the async contract.
+        resp = client.post(GENERATE, headers=TEAM, json={})
+        assert resp.status_code == 202
+        body = resp.json()
+        assert "job_id" in body
+        assert body.get("status") == "pending"
 
-    def test_generate_unknown_deck_is_404(self):
-        assert client.post(GENERATE, headers=TEAM,
-                           json={"draft_id": 999999999}).status_code == 404
+    def test_generate_ignores_legacy_draft_id_in_body(self):
+        # Legacy clients passing {draft_id: ...} continue to get
+        # a 202 -- the value is silently dropped.
+        resp = client.post(GENERATE, headers=TEAM,
+                           json={"draft_id": 999999999})
+        assert resp.status_code == 202
 
     def test_export_unauthenticated_is_401(self):
         assert client.post(f"{DRAFTS}/1/export").status_code == 401
@@ -256,37 +276,3 @@ class TestScriptEndpoints:
     def test_export_unknown_draft_is_404(self):
         assert client.post(f"{DRAFTS}/999999999/export",
                            headers=TEAM).status_code == 404
-
-    def test_generate_creates_a_presentation_script_draft(
-            self, clean_editor_drafts):
-        if not _db_ready():
-            pytest.skip("no live database")
-        deck = client.post(DRAFTS, headers=TEAM, json={
-            "document_type": "presentation_deck", "title": "Deck",
-            "content_json": {"slides": [
-                {"id": 1, "title": "Opening", "background": "#FFFFFF",
-                 "speaker": "Molly", "speaker_notes": "",
-                 "elements": [{"id": "e1", "type": "text",
-                               "content": "body"}]}]},
-            "content_text": "Opening"})
-        deck_id = deck.json()["id"]
-        resp = client.post(GENERATE, headers=TEAM, json={"draft_id": deck_id})
-        assert resp.status_code == 200
-        assert resp.json()["slide_count"] == 1
-        script = client.get(f"{DRAFTS}/{resp.json()['draft_id']}",
-                            headers=TEAM)
-        assert script.json()["document_type"] == "presentation_script"
-
-    def test_generate_400_when_no_slide_has_a_speaker(
-            self, clean_editor_drafts):
-        if not _db_ready():
-            pytest.skip("no live database")
-        deck = client.post(DRAFTS, headers=TEAM, json={
-            "document_type": "presentation_deck", "title": "Deck",
-            "content_json": {"slides": [
-                {"id": 1, "title": "Opening", "background": "#FFFFFF",
-                 "speaker": None, "speaker_notes": "", "elements": []}]},
-            "content_text": "Opening"})
-        resp = client.post(GENERATE, headers=TEAM,
-                           json={"draft_id": deck.json()["id"]})
-        assert resp.status_code == 400

@@ -347,10 +347,15 @@ function TileHashChip(
 }
 
 
-// Tile display order (June 25 2026): Brief, Appendix, Deck.
-// Script renders separately after the map. Order reflects the
-// source-of-truth chain -- brief is the narrative anchor; appendix
-// carries the numeric evidence; deck reads both; script reads deck.
+// Tile display order (June 25 2026): Brief, Appendix, Deck, Script.
+// Order reflects the source-of-truth chain -- brief is the narrative
+// anchor; appendix carries the numeric evidence; deck reads both;
+// script reads deck. The script joined the async job pattern on
+// 2026-06-25 (POST /api/v1/documents/script/generate now returns
+// 202 + job_id), so it renders inside DOCS.map alongside the other
+// three and inherits the standard inProgress / complete / failed /
+// idle ternary chrome. Previously rendered as a separate
+// PresentationScriptCard with a custom Download-only flow.
 const DOCS: DocSpec[] = [
   {
     id: 'brief',
@@ -386,6 +391,18 @@ const DOCS: DocSpec[] = [
     endpoint: '/api/v1/export/presentation-deck',
     icon: Presentation,
   },
+  {
+    id: 'script',
+    documentType: 'presentation_script',
+    title: 'Presentation Script',
+    description:
+      'Word-for-word presenter script for the 18-20 minute panel '
+      + 'presentation, with Grok-generated Q&A preparation. Generated '
+      + 'from the current deck draft -- generate the deck first if '
+      + 'it does not yet exist.',
+    endpoint: '/api/v1/documents/script/generate',
+    icon: Mic,
+  },
 ]
 
 const LS_KEY = 'fc_doc_generated_at'
@@ -411,191 +428,6 @@ function triggerDownload(blob: Blob, filename: string): void {
 }
 
 
-/**
- * PresentationScriptCard — the only card on this panel that doesn't
- * use the async job pattern. The script is a pure cache read of
- * story_plans (Pass 2 full_script + Pass 3 anticipated_questions)
- * so the backend renders synchronously in ~200ms and returns the
- * .docx directly as a blob -- no job_id, no polling.
- *
- * Button states:
- *   - currentDraft exists -> Open in Editor (primary) + Download +
- *     Regenerate. June 25 2026 -- the script lands as a real
- *     editor_drafts row (document_type='presentation_script') with
- *     TipTap content_json, so it edits identically to the brief /
- *     appendix. The editor already dispatches on isScript at
- *     DocumentEditor:455 -- no editor changes needed.
- *   - deckPlanAvailable=true, no draft yet -> Download Script (the
- *     download itself triggers a generation+persistence path
- *     server-side; the draft lands on first Download).
- *   - deckPlanAvailable=false -> Generate Deck First (disabled).
- */
-function PresentationScriptCard({
-  deckPlanAvailable, currentDraft,
-}: {
-  deckPlanAvailable: boolean | null
-  currentDraft: { id: number } | null
-}) {
-  const navigate = useNavigate()
-  const [downloading, setDownloading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const available = deckPlanAvailable === true
-  const draftId: number | null = currentDraft?.id ?? null
-
-  const handleDownload = async () => {
-    if (!available || downloading) return
-    setDownloading(true)
-    setError(null)
-    try {
-      const res = await axios.post(
-        '/api/v1/export/presentation-script',
-        {},
-        { responseType: 'blob' })
-      const dispo = String(res.headers['content-disposition'] ?? '')
-      const filenameMatch = /filename="?([^";]+)"?/i.exec(dispo)
-      const filename = filenameMatch?.[1]
-        ?? 'forest-capital-presentation-script.docx'
-      const contentType = String(
-        res.headers['content-type'] ?? 'application/octet-stream')
-      triggerDownload(new Blob([res.data], { type: contentType }), filename)
-    } catch (err) {
-      // The endpoint returns 404 when the deck story plan hasn't been
-      // cached yet (defence in depth -- the readiness flag should
-      // already gate the button, but a stale flag can slip through).
-      let msg = 'Download failed.'
-      if (axios.isAxiosError(err)) {
-        const status = err.response?.status
-        if (status === 404) {
-          msg = 'Deck story plan not cached yet. '
-            + 'Generate the Presentation Deck first.'
-        } else {
-          const detail = err.response?.data?.detail
-          msg = typeof detail === 'string' ? detail : err.message
-        }
-      }
-      setError(msg)
-    } finally {
-      setDownloading(false)
-    }
-  }
-
-  return (
-    <div className="card p-4 flex flex-col gap-3">
-      <div className="flex items-start gap-3">
-        <div className="w-9 h-9 rounded flex items-center justify-center
-                        shrink-0 bg-electric/10 text-electric">
-          <Mic className="w-4 h-4" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h3 className="text-white font-semibold text-sm">
-            Presentation Script
-          </h3>
-          <p className="text-muted text-xs mt-1 leading-relaxed">
-            Word-for-word presenter script for the 18-20 minute panel
-            presentation, with Grok-generated Q&A preparation. Reads
-            from the cached deck story plan -- generate the
-            Presentation Deck first.
-          </p>
-        </div>
-      </div>
-
-      <div className="text-2xs text-muted">
-        Deadline: July 3 (presentation date)
-      </div>
-
-      {draftId !== null ? (
-        // June 25 2026 -- a current script draft exists; mirror
-        // the brief / appendix tile chrome: Open in Editor as
-        // primary, Download as secondary, Regenerate as tertiary.
-        // Bob/Molly edit the word-for-word text in the same TipTap
-        // editor the other deliverables use; Download fetches a
-        // fresh DOCX server-side (the export endpoint regenerates
-        // the .docx from the editor draft's current state).
-        <div className="flex flex-col gap-1.5">
-          <button type="button"
-            onClick={() => navigate(`/editor/${draftId}`)}
-            data-testid="open-existing-script"
-            className="w-full flex items-center justify-center gap-1.5
-                       px-3 py-2 rounded text-xs font-semibold
-                       bg-electric text-white hover:bg-blue-500">
-            <PenLine className="w-3 h-3" /> Open in Editor
-          </button>
-          <TeamGate block permission="generate_documents"
-            tooltip="Document generation is available to the project team">
-            <button type="button"
-              data-testid="download-presentation-script"
-              onClick={() => void handleDownload()}
-              disabled={downloading}
-              className="w-full flex items-center justify-center
-                         gap-1.5 px-3 py-1.5 rounded text-xs
-                         border border-electric/40 text-electric
-                         hover:bg-electric/10 disabled:opacity-60">
-              {downloading
-                ? <><Loader2 className="w-3 h-3 animate-spin" />
-                    Building script…</>
-                : <><Download className="w-3 h-3" /> Download</>}
-            </button>
-          </TeamGate>
-          <TeamGate block permission="generate_documents"
-            tooltip="Document generation is available to the project team">
-            <button type="button"
-              data-testid="regenerate-presentation-script"
-              onClick={() => void handleDownload()}
-              disabled={downloading || !available}
-              className="w-full flex items-center justify-center
-                         gap-1.5 px-3 py-1.5 rounded text-xs
-                         border border-border text-muted
-                         hover:text-white hover:bg-navy-700
-                         disabled:opacity-50
-                         disabled:cursor-not-allowed">
-              <RefreshCw className="w-3 h-3" /> Regenerate
-            </button>
-          </TeamGate>
-        </div>
-      ) : available ? (
-        <TeamGate block permission="generate_documents"
-          tooltip="Document generation is available to the project team">
-          <button type="button"
-            data-testid="download-presentation-script"
-            onClick={() => void handleDownload()}
-            disabled={downloading}
-            className="w-full flex items-center justify-center gap-1.5
-                       px-3 py-2 rounded text-xs font-semibold
-                       transition-colors bg-electric text-white
-                       hover:bg-blue-500 disabled:opacity-60">
-            {downloading
-              ? <><Loader2 className="w-3 h-3 animate-spin" />
-                  Building script…</>
-              : <><Download className="w-3 h-3" /> Download Script</>}
-          </button>
-        </TeamGate>
-      ) : (
-        <div className="flex flex-col gap-1.5">
-          <button type="button"
-            data-testid="download-presentation-script"
-            disabled
-            className="w-full flex items-center justify-center gap-1.5
-                       px-3 py-2 rounded text-xs font-semibold
-                       bg-navy-700 text-muted cursor-not-allowed">
-            Generate Deck First
-          </button>
-          <p className="text-2xs text-muted leading-relaxed">
-            Generate the Presentation Deck to produce the script.
-          </p>
-        </div>
-      )}
-
-      {error && (
-        <div className="flex items-start gap-1.5 px-2 py-1.5 rounded
-                        text-2xs border border-danger/30 bg-danger/5
-                        text-danger">
-          <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-          <span>{error}</span>
-        </div>
-      )}
-    </div>
-  )
-}
 
 export default function DocumentGenerationPanel() {
   const navigate = useNavigate()
@@ -1091,7 +923,37 @@ export default function DocumentGenerationPanel() {
                   hashStale={hashStale} />
               )}
 
-              {inProgress ? (
+              {/* Script-specific gate: when the deck story plan
+                  isn't cached the script tile renders a disabled
+                  "Generate Deck First" button -- the user spec
+                  preserved this UX from the pre-async card so a
+                  click can't launch a job that would immediately
+                  fail. The other three tiles have no equivalent
+                  upstream-dependency gate. */}
+              {doc.documentType === 'presentation_script'
+                && readinessGate.deck_story_plan_available !== true
+                && currentDraftId === null
+                && !inProgress
+                && job?.status !== 'complete'
+                && job?.status !== 'failed' ? (
+                <div className="flex flex-col gap-1.5">
+                  <button type="button"
+                    data-testid={`generate-${doc.id}-disabled`}
+                    disabled
+                    className="w-full flex items-center
+                               justify-center gap-1.5
+                               px-3 py-2 rounded text-xs
+                               font-semibold bg-navy-700
+                               text-muted cursor-not-allowed">
+                    Generate Deck First
+                  </button>
+                  <p className="text-2xs text-muted
+                                leading-relaxed">
+                    Generate the Presentation Deck to produce
+                    the script.
+                  </p>
+                </div>
+              ) : inProgress ? (
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-start gap-1.5 text-xs text-electric">
                     <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0
@@ -1336,16 +1198,11 @@ export default function DocumentGenerationPanel() {
             </div>
           )
         })}
-        {/* Presentation Script -- pure cache read of the deck story
-            plan's full_script + anticipated_questions. Sits in the
-            same grid as the three generation cards because it's
-            adjacent in the user's mental model (script for the deck),
-            but uses its own direct-download flow because there is
-            no LLM call to gate behind a job. */}
-        <PresentationScriptCard
-          deckPlanAvailable={readinessGate.deck_story_plan_available}
-          currentDraft={
-            currentDraftByType['presentation_script'] ?? null} />
+        {/* Presentation Script joined the async job pattern on
+            2026-06-25 -- it now renders inside DOCS.map alongside
+            the brief / appendix / deck and inherits the standard
+            inProgress / complete / failed / idle chrome. The
+            former standalone PresentationScriptCard is retired. */}
       </div>
       <p className="text-2xs text-muted mt-2">
         Generated documents are first drafts for review — every file carries
