@@ -1188,6 +1188,52 @@ def _tiptap_text(node: Any) -> str:
     return "".join(_tiptap_text(c) for c in (node.get("content") or []))
 
 
+def _apply_substitutions(
+    text: str, substitution_table: dict[str, str] | None,
+) -> str:
+    """June 25 2026 -- straight string replace of every
+    {{TOKEN}} key in substitution_table against the input text.
+    Pre-2026-06-25 the editor export only applied substitution to
+    figure captions, so body prose like 'Across {{PLAY_BY_PLAY_
+    EVENTS}} named crisis events…' rendered with the literal token
+    in the DOCX. Routing every paragraph + heading + list-item
+    string through this helper resolves the token before any
+    text is written to the document."""
+    if not text or not substitution_table:
+        return text
+    out = text
+    for key, value in substitution_table.items():
+        if key in out:
+            out = out.replace(key, str(value))
+    return out
+
+
+def _apply_substitutions_to_runs(
+    runs: list[tuple[str, dict[str, bool]]],
+    substitution_table: dict[str, str] | None,
+) -> list[tuple[str, dict[str, bool]]]:
+    """Apply _apply_substitutions to each run's text while
+    preserving its marks dict. Used by the editor walker to
+    surface substituted values in body prose without losing
+    bold / italic formatting on the surrounding runs."""
+    if not substitution_table:
+        return runs
+    return [
+        (_apply_substitutions(t, substitution_table), m)
+        for t, m in runs
+    ]
+
+
+# Markdown-heading prefix detection. The Academic Writer + the
+# generators occasionally emit a paragraph whose text starts with
+# # / ## / ### markdown, which the TipTap editor preserves as a
+# plain paragraph (no heading node) because the user pasted or
+# typed the literal Markdown syntax. The editor export converts
+# these into the corresponding Word Heading style instead of
+# rendering the # marks as literal text.
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
 def _tiptap_runs(node: Any) -> list[tuple[str, dict[str, bool]]]:
     """June 25 2026. Walks a TipTap node and emits a flat list of
     (text, marks_dict) tuples preserving per-text-node formatting.
@@ -1347,41 +1393,100 @@ def build_editor_docx(
                         embedded_figure_keys.add(key)
                     break
 
+    # June 25 2026 -- the editor's brief_substitution_table is now
+    # applied to BODY PROSE in addition to figure captions. Tokens
+    # like {{PLAY_BY_PLAY_EVENTS}} that appear in Section 1 ("Across
+    # {{PLAY_BY_PLAY_EVENTS}} named crisis events…") were rendering
+    # as literal placeholders because the walker only routed the
+    # substitution table to _embed_brief_figures. Plumbing it
+    # through to every run resolves the token before write.
+    sub_table = brief_substitution_table
+
+    def _add_heading_with_style(
+        runs: list[tuple[str, dict[str, bool]]], level: int,
+    ) -> None:
+        """Emit a Word Heading style paragraph (Heading 1/2/3...)
+        carrying per-run formatting + substitution. Replaces the
+        previous _add_heading(doc, ...) call -- the latter was a
+        bold-text paragraph at body font, which the user wanted
+        rendered with the proper Word heading style instead so
+        Word's outline + navigation pane reflect document
+        structure."""
+        level = max(1, min(level, 6))
+        try:
+            para = doc.add_paragraph(style=f"Heading {level}")
+        except Exception:  # noqa: BLE001
+            # Defensive fallback for the rare case where the
+            # template doesn't carry 'Heading N' (shouldn't happen
+            # with python-docx's default template).
+            para = doc.add_paragraph()
+        subbed = _apply_substitutions_to_runs(runs, sub_table)
+        for text, marks in subbed:
+            if not text:
+                continue
+            run = para.add_run(text)
+            if marks.get("bold"):
+                run.bold = True
+            if marks.get("italic"):
+                run.italic = True
+
     for node in nodes:
         if not isinstance(node, dict):
             continue
         ntype = node.get("type")
         if ntype == "heading":
-            # Headings are already bold via _add_heading -- inline
-            # marks on the heading's text node don't add new
-            # formatting beyond what the style gives, so the flat
-            # _tiptap_text path stays correct here.
-            text = _tiptap_text(node).strip()
-            if text:
-                level = (node.get("attrs") or {}).get("level", 1)
-                _add_heading(doc, text, size=13 if level <= 1 else 12)
+            # TipTap heading node -> Word Heading style.
+            level = int(
+                (node.get("attrs") or {}).get("level", 1) or 1)
+            runs = _tiptap_runs(node)
+            if any(t.strip() for t, _ in runs):
+                _add_heading_with_style(runs, level)
         elif ntype == "paragraph":
             # June 25 2026 -- use the marks-aware walker so bold /
             # italic text nodes (e.g. **Finding 1** the generator
             # emits as inline marks) render with their formatting
             # instead of dropping the marks via _tiptap_text.
-            # ALSO check the paragraph's plain text against
-            # INLINE_FIGURE_TRIGGERS so the four brief APA figures
-            # land inline next to the prose that references them.
+            # ALSO:
+            #   - skip '---' divider paragraphs entirely (the
+            #     generator's section dividers don't translate to
+            #     Word semantics)
+            #   - detect markdown heading prefixes (# / ## / ###)
+            #     that the editor kept as literal text and
+            #     re-route them to Word Heading styles
             runs = _tiptap_runs(node)
-            joined = "".join(t for t, _ in runs)
-            if runs and joined.strip():
-                _add_body_from_runs(doc, runs)
-                _maybe_embed_inline(joined)
+            joined = "".join(t for t, _ in runs).strip()
+            if not runs or not joined:
+                continue
+            if joined == "---" or joined.strip("-") == "":
+                # Markdown horizontal rule -- skip; Word would
+                # render a literal '---' line which adds noise.
+                continue
+            md_match = _MD_HEADING_RE.match(joined)
+            if md_match:
+                level = len(md_match.group(1))
+                stripped = md_match.group(2)
+                # Re-emit as a single-run heading. Inline marks on
+                # an '## Heading' paragraph are vanishingly rare;
+                # collapse the marks dict on the surface text to
+                # avoid mis-splitting across the '## ' prefix.
+                _add_heading_with_style(
+                    [(stripped, {"bold": True})],
+                    max(1, min(level, 6)))
+                continue
+            subbed = _apply_substitutions_to_runs(runs, sub_table)
+            _add_body_from_runs(doc, subbed)
+            _maybe_embed_inline(joined)
         elif ntype in ("bulletList", "orderedList"):
             for item in (node.get("content") or []):
                 runs = _tiptap_runs(item)
                 if not runs:
                     continue
-                joined = "".join(t for t, _ in runs)
-                if not joined.strip():
+                joined = "".join(t for t, _ in runs).strip()
+                if not joined:
                     continue
-                _add_body_from_runs(doc, runs, prefix="•  ")
+                subbed = _apply_substitutions_to_runs(
+                    runs, sub_table)
+                _add_body_from_runs(doc, subbed, prefix="•  ")
                 _maybe_embed_inline(joined)
 
     # An empty draft still produces a structurally valid document.
