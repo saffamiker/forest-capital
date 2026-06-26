@@ -23,7 +23,7 @@ import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
 import {
   Type, BarChart3, Bold, Italic, Trash2, Loader2, Sparkles, Plus,
-  Wand2, LayoutGrid, X,
+  Wand2, LayoutGrid, X, Settings,
 } from 'lucide-react'
 
 import type {
@@ -42,6 +42,11 @@ interface Props {
   onChange: (deck: CanvasDeck) => void
   /** Opens the chart picker drawer in the editor's right panel. */
   onRequestChartPicker: () => void
+  /** June 26 2026 -- opens the Configure panel for the given
+   *  element id (chart_config / table_config editor). The parent
+   *  resolves the element + dispatches to the chart or table
+   *  variant of ChartConfigPanel. */
+  onRequestConfigure?: (elementId: string) => void
 }
 
 /** One element's AI-suggested geometry (AI Layout). */
@@ -85,6 +90,7 @@ function parseLayoutSuggestion(text: string): LayoutSuggestion[] | null {
 
 export default function CanvasSlideEditor({
   draftId, deck, activeSlideId, onChange, onRequestChartPicker,
+  onRequestConfigure,
 }: Props) {
   const slides = useMemo(() => deck.slides ?? [], [deck.slides])
   const slide: CanvasSlide | undefined =
@@ -388,6 +394,25 @@ export default function CanvasSlideEditor({
         {selectedEl?.type === 'text' && (
           <TextFormatBar el={selectedEl}
             onPatch={(p) => updateElement(selectedEl.id, p)} />
+        )}
+
+        {/* June 26 2026 -- Configure button surfaces in the
+            toolbar when a chart or table element is selected.
+            Opens the chart_config / table_config editor in the
+            right panel (handled by the parent's
+            onRequestConfigure callback). */}
+        {onRequestConfigure
+          && (selectedEl?.type === 'chart'
+              || selectedEl?.type === 'table') && (
+          <button type="button"
+            onClick={() => onRequestConfigure(selectedEl.id)}
+            data-testid="canvas-toolbar-configure"
+            title="Edit this element's appearance + data"
+            className="flex items-center gap-1 text-2xs px-2 py-1
+                       rounded border border-electric/40
+                       text-electric hover:bg-electric/10">
+            <Settings className="w-3.5 h-3.5" /> Configure
+          </button>
         )}
 
         <div className="flex items-center gap-1.5 ml-auto">

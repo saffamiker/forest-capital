@@ -99,9 +99,13 @@ export interface TableConfig {
     | 'performance' | 'correlation' | 'factor_loadings' | 'drawdown'
   title?:   string
   caption?: string
-  /** Strategy IDs to include as rows (e.g. 'BENCHMARK',
-   *  'REGIME_SWITCHING'). Empty / absent => all strategies. */
-  rows?: string[]
+  /** Strategy IDs to include as rows (when the table's cell
+   *  data is looked up at render time from the analytics cache)
+   *  OR a list-of-lists where each row already carries its cell
+   *  data verbatim (the deck-generation prepopulated shape).
+   *  The renderer accepts both; the Configure panel writes
+   *  whichever shape the user is editing. */
+  rows?: string[] | string[][]
   /** Metric column ids to include (e.g. 'sharpe', 'max_dd').
    *  Empty / absent => the table_type's default column set. */
   columns?: string[]
