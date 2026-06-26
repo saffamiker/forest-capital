@@ -1382,36 +1382,65 @@ def _strip_cell_pipes(cell: str) -> str:
     return cell.strip().strip("|").strip()
 
 
+# June 26 2026 -- explicit pipe-row regex used by the
+# bullets-as-table fallback. Match after stripping any leading
+# bullet marker so "- | A | B |" qualifies the same as "| A | B
+# |". The trailing pipe is required so a single 'foo | bar'
+# sentence with two stray pipes doesn't false-positive.
+_PIPE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+
+
 def _lift_pipe_table_from_bullets(
     bullets: list[str],
+    slide_idx: int | None = None,
 ) -> tuple[list[str], list[list[str]], list[str]]:
-    """June 25 2026 -- bullets-as-table fallback. The prompt
-    forbids placing a table in the bullets array, but a model
-    that ignores the instruction occasionally emits the entire
-    table as 3+ consecutive pipe-delimited bullets. Detect that
-    pattern (3+ consecutive bullets that look like a markdown
-    table row: bullet starts with '|' OR contains two or more
-    '|' characters), parse via _parse_markdown_table, and return
+    """June 25 2026 (hardened June 26 2026) -- bullets-as-table
+    fallback. The prompt forbids placing a table in the bullets
+    array, but a model that ignores the instruction emits each
+    table row as a SEPARATE bullet item in the bullets list. This
+    function scans ACROSS the bullets list (not within any single
+    bullet) for 3+ consecutive items that look like pipe-table
+    rows, lifts the run via _parse_markdown_table, and returns
     (headers, rows, remaining_bullets) where remaining_bullets
-    has the table lines removed so they don't ALSO render in the
-    text frame as garbage prose.
+    has the table lines removed so they don't ALSO render as
+    garbage prose in the text frame.
+
+    Per-item match: each bullet is FIRST run through
+    _strip_bullet_marker (so '- | A | B |' becomes '| A | B |')
+    and THEN matched against _PIPE_ROW_RE which requires the line
+    to both start AND end with '|'. A row joined with markers
+    stripped goes into _parse_markdown_table.
+
+    Logs at WARNING level when the lift fires so a future run can
+    confirm whether the prompt-side discipline is being honoured
+    or the renderer fallback is doing the work. Pass slide_idx
+    to scope the warning to a specific slide number; None when
+    the caller has no slide context.
 
     Returns ([], [], bullets) unchanged when no pipe-table run is
-    detected (the common case)."""
-    def _is_table_row(s: str) -> bool:
-        s = (s or "").strip()
-        if not s:
-            return False
-        return s.startswith("|") or s.count("|") >= 2
+    detected (the common case once the prompt is being followed)."""
+    if not bullets:
+        return [], [], bullets
 
-    n = len(bullets)
-    # Scan for the longest consecutive run of table-row bullets.
+    # Per-bullet normalisation: strip any leading bullet marker
+    # ("- ", "* ", "•", etc.) so a row formatted as "- | A | B |"
+    # matches the same pipe-row pattern as a bare "| A | B |".
+    # Idempotent -- already-clean rows pass through unchanged.
+    normalised = [_strip_bullet_marker(str(b)) for b in bullets]
+
+    def _is_pipe_row(s: str) -> bool:
+        if not s.strip():
+            return False
+        return bool(_PIPE_ROW_RE.match(s))
+
+    n = len(normalised)
+    # Scan for the longest consecutive run of pipe-row bullets.
     best_start, best_len = -1, 0
     i = 0
     while i < n:
-        if _is_table_row(bullets[i]):
+        if _is_pipe_row(normalised[i]):
             j = i
-            while j < n and _is_table_row(bullets[j]):
+            while j < n and _is_pipe_row(normalised[j]):
                 j += 1
             run_len = j - i
             if run_len > best_len:
@@ -1421,13 +1450,34 @@ def _lift_pipe_table_from_bullets(
             i += 1
     if best_len < 3:
         return [], [], bullets
-    # Reconstruct the markdown table by joining the run with
-    # newlines (each bullet was its own row) and parsing.
-    block = "\n".join(bullets[best_start:best_start + best_len])
+
+    # Reconstruct a markdown table block from the run of
+    # normalised pipe rows and parse it. Joining with newlines
+    # gives _parse_markdown_table the same shape as a single
+    # multi-line table_data string would have.
+    block = "\n".join(normalised[best_start:best_start + best_len])
     headers, rows = _parse_markdown_table(block)
     if not headers or not rows:
         return [], [], bullets
-    # Remove the table bullets from the surviving bullet list.
+
+    log.warning(
+        "deck_bullets_as_table_fallback_fired",
+        slide_idx=slide_idx,
+        bullets_lifted=best_len,
+        header_count=len(headers),
+        row_count=len(rows),
+        hint=(
+            "The LLM emitted table rows as separate bullets "
+            "instead of structured table_data. Prompt-side "
+            "TABLE OUTPUT DISCIPLINE (academic_deck.py) is not "
+            "being honoured for this slide. Renderer fallback "
+            "lifted the run into a real PPTX table; consider "
+            "investigating whether the prompt needs further "
+            "tightening or the model is regressing."))
+
+    # Remove the table bullets from the surviving list. Operate
+    # on the ORIGINAL bullets (not normalised) so any non-table
+    # bullets that survive aren't stripped of their markers.
     remaining = (
         bullets[:best_start] + bullets[best_start + best_len:])
     return headers, rows, remaining
@@ -1435,6 +1485,7 @@ def _lift_pipe_table_from_bullets(
 
 def _slide_table(
     sl: dict[str, Any],
+    slide_idx: int | None = None,
 ) -> tuple[list[str], list[list[str]], list[str] | None]:
     """Extract (headers, rows-of-strings, bullets_to_use) from a
     slide's table_data + bullets. Returns ([], [], None) when the
@@ -1481,7 +1532,7 @@ def _slide_table(
     bullets = sl.get("bullets") or []
     if isinstance(bullets, list):
         headers, rows, remaining = _lift_pipe_table_from_bullets(
-            [str(b) for b in bullets])
+            [str(b) for b in bullets], slide_idx=slide_idx)
         if headers and rows:
             return (
                 [_strip_cell_pipes(h) for h in headers],
@@ -1549,7 +1600,7 @@ def _render_content_slide(prs, sl, chart_png, idx, total) -> None:
         # value is the bullets list MINUS the lifted rows so the
         # text frame doesn't ALSO render those rows as prose
         # garbage. None means 'no edit needed'.
-        headers, rows, surviving = _slide_table(sl)
+        headers, rows, surviving = _slide_table(sl, slide_idx=idx)
         if surviving is not None:
             bullets = surviving or [_DATA_PENDING_BULLET]
         # June 25 2026 -- strip leading bullet-marker characters
