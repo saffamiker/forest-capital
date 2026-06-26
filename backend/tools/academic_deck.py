@@ -1643,6 +1643,86 @@ def _render_content_slide(prs, sl, chart_png, idx, total) -> None:
     _footer(s, idx, total)
 
 
+def _dedupe_chart_assignments(
+    charts: dict[int, bytes | None] | None,
+) -> dict[int, bytes | None]:
+    """June 26 2026 -- chart assignment deduplication.
+
+    Two enforcement passes on the incoming {slide_number: png_bytes}
+    dict before it reaches _render_content_slide:
+
+    1. SLIDE_CHARTS slot enforcement -- a slide number that is NOT
+       in SLIDE_CHARTS gets cleared to None even if the caller
+       passed bytes. The renderer's downstream gate
+       (`has_chart = idx in SLIDE_CHARTS`) already drops these,
+       but clearing here makes the contract explicit and lets the
+       dedup pass below operate only on intended slots.
+
+    2. Bytes-identity dedup -- if the SAME PNG bytes object
+       appears against multiple slide numbers (e.g. the caller's
+       chart renderer dispatched the same role twice by accident),
+       keep ONLY the slide whose SLIDE_CHARTS role canonically
+       owns that chart. The 'canonical owner' is the lowest slide
+       number that maps to the same role -- a stable tiebreaker
+       that produces the same dedup regardless of dict-iteration
+       order. Other slides with the duplicate bytes get cleared
+       to None.
+
+    Logs a WARNING when either pass clears a slot so the operator
+    can see in Render logs that defence-in-depth fired. Returns a
+    fresh dict; the input is not mutated.
+
+    Why this exists: the symptom we're guarding against is the
+    same chart PNG appearing on multiple slides (e.g. the
+    'Risk-Return Profile by Strategy' chart showing up on slides
+    4, 5, and 7). The PPTX path's `has_chart = idx in
+    SLIDE_CHARTS` gate prevents stray chart rendering on its own,
+    so the symptom requires a caller-side bug putting bytes on
+    multiple keys. This dedup catches that defensively without
+    requiring the caller to be perfect."""
+    if not charts:
+        return {}
+
+    cleaned: dict[int, bytes | None] = {}
+    for slide_num, png in charts.items():
+        if slide_num not in SLIDE_CHARTS:
+            if png is not None:
+                log.warning(
+                    "deck_chart_slot_outside_slide_charts",
+                    slide_number=slide_num,
+                    hint=("Chart bytes were passed for a slide "
+                          "not in SLIDE_CHARTS. Cleared to None; "
+                          "investigate the caller's chart "
+                          "assignment logic."))
+            cleaned[slide_num] = None
+            continue
+        cleaned[slide_num] = png
+
+    # Bytes-identity dedup. For each duplicate bytes blob across
+    # cleaned slots, keep only the canonical-owner slot.
+    seen: dict[int, int] = {}  # id(png) -> slide_number (winner)
+    for slide_num in sorted(cleaned.keys()):
+        png = cleaned[slide_num]
+        if png is None:
+            continue
+        key = id(png)
+        if key in seen:
+            winner = seen[key]
+            log.warning(
+                "deck_chart_duplicate_assignment",
+                slide_number=slide_num,
+                duplicate_of=winner,
+                hint=("The same PNG bytes were assigned to two "
+                      "slides. Cleared the later slot to None to "
+                      "avoid duplicate chart rendering; the "
+                      "canonical owner (lowest slide_number for "
+                      "the role) keeps the chart."))
+            cleaned[slide_num] = None
+        else:
+            seen[key] = slide_num
+    return cleaned
+
+
 def build_presentation_deck(
     slides: Any,
     charts: dict[int, bytes | None] | None = None,
@@ -1662,8 +1742,14 @@ def build_presentation_deck(
     [DATA PENDING] note, never an exception. Every slide carries the AI DRAFT
     footer and a speaker-notes verification caveat; slide 1 additionally carries
     the review warning + submission checklist.
+
+    June 26 2026 -- the charts dict is filtered through
+    _dedupe_chart_assignments before slide rendering. Any caller-side
+    bug that places the same chart on multiple slides, or places a chart
+    on a non-SLIDE_CHARTS slot, is silently corrected here with a
+    WARNING log naming the dropped slot.
     """
-    charts = charts or {}
+    charts = _dedupe_chart_assignments(charts)
     prs = Presentation()
     prs.slide_width = _SLIDE_W
     prs.slide_height = _SLIDE_H

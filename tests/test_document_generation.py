@@ -95,7 +95,7 @@ def _stub_brief_appendix_grounding(monkeypatch):
     NOT fire during the document-generation contract tests. CI
     runs against a fresh DB with no drafts seeded; the stub
     bypasses the gate without requiring DB fixtures."""
-    async def _fake_brief(_email):
+    async def _fake_brief():
         return {
             "content_text": (
                 "## Executive Summary\n\nThe blend outperforms "
@@ -114,7 +114,7 @@ def _stub_brief_appendix_grounding(monkeypatch):
             "draft_id": 1,
         }
 
-    async def _fake_appendix(_email):
+    async def _fake_appendix():
         return {
             "content_text": (
                 "## Data Sources and Methodology\n\nS&P 500 + "
@@ -368,11 +368,23 @@ class TestDocumentGenerationContract:
         from tools.academic_deck import (
             DECK_SLIDE_COUNT, SLIDE_CHARTS, build_presentation_deck)
         from tools.chart_render import _placeholder
-        png = _placeholder(240, 150)
         slides = [{"slide_number": n, "title": f"T{n}", "bullets": ["b1", "b2"],
                    "table_data": None, "speaker_notes": f"notes {n}"}
                   for n in range(1, DECK_SLIDE_COUNT + 1)]
-        charts = {n: png for n in SLIDE_CHARTS}  # 4, 5, 11
+        # June 26 2026 -- build a DISTINCT PNG per slide. The
+        # production renderer (_render_deck_slide_charts) produces
+        # three different matplotlib outputs (rolling_correlation,
+        # strategy_comparison, efficient_frontier), one per
+        # SLIDE_CHARTS role. The bytes-identity dedup added by
+        # the same PR that this test exercises would otherwise
+        # collapse all three placeholder PNGs to a single slide
+        # under the 'same bytes -> one slot' rule. The dedup is
+        # working as intended; the test setup is updated to match
+        # the production shape.
+        charts = {
+            n: _placeholder(240 + i, 150)
+            for i, n in enumerate(sorted(SLIDE_CHARTS))
+        }
         out = build_presentation_deck(slides, charts)
         prs = Presentation(io.BytesIO(out))
         assert len(prs.slides) == DECK_SLIDE_COUNT
