@@ -136,7 +136,7 @@ class TestAppendixPreflightCacheGate:
             }
 
         # Stub brief grounding so the brief gate passes.
-        async def _fake_brief(_email):
+        async def _fake_brief():
             return {"content_text": "brief body", "content_hash": "h",
                     "draft_id": 1}
 
@@ -175,7 +175,7 @@ class TestAppendixPreflightCacheGate:
                 "data_hash": "test",
             }
 
-        async def _fake_brief(_email):
+        async def _fake_brief():
             return {"content_text": "brief", "content_hash": "h",
                     "draft_id": 1}
 
@@ -211,7 +211,7 @@ class TestAppendixPreflightCacheGate:
                 "data_hash": "test",
             }
 
-        async def _fake_brief(_email):
+        async def _fake_brief():
             return {"content_text": "brief", "content_hash": "h",
                     "draft_id": 1}
 
