@@ -301,6 +301,27 @@ SLIDE FORMAT CONSTRAINTS (non-negotiable, apply to every slide):
 - No sub-bullets under any circumstance.
 - Speaker notes carry the full explanation. The slide carries
   the signal.
+- BULLET STRING DISCIPLINE: Bullets are PLAIN STRINGS in the
+  bullets array. Do NOT prefix any bullet with "- ", "* ",
+  "•", or any other marker character. The PPTX renderer adds
+  the bullet glyph automatically; a leading "- " renders as
+  "• - Foo" on the slide and reads as a defect. Wrong: "- The
+  blend outperforms...". Right: "The blend outperforms...".
+- TABLE OUTPUT DISCIPLINE (applies to slides with a Required
+  table: spec -- slides 4, 7, 9, 12): emit table_data as
+  STRUCTURED JSON {"headers": [...], "rows": [[...]]}. The
+  schema described in each slide's "Required table:" block
+  uses pipe-delimited prose to convey the column NAMES;
+  translate that schema into the structured object on output.
+  Do NOT emit pipe characters in any string. Do NOT place
+  the table in the bullets array. Do NOT wrap header or cell
+  values in surrounding pipes. Wrong:
+    "table_data": "| Strategy | Sharpe |\\n| Blend | 0.86 |"
+    "bullets": ["| Strategy | Sharpe |", ...]
+    {"headers": ["| Strategy", "Sharpe |"], ...}
+  Right:
+    "table_data": {"headers": ["Strategy", "Sharpe"],
+                   "rows": [["Blend", "0.86"], ...]}
 
 TOKEN FORMAT NOTE (non-negotiable, apply to every slide):
 - {{{{OOS_SHARPE_IMPROVEMENT_PCT}}}} already resolves to a complete
