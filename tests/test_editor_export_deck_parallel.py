@@ -62,7 +62,10 @@ class TestEditorExportDeckParallel:
         concurrency_meter = {"current": 0, "peak": 0}
         per_call_delay = 0.05  # 50 ms each -- enough to overlap
 
-        async def _fake_render(chart_key, theme, w, h):
+        async def _fake_render(chart_key, theme, w, h, **_kwargs):
+            # June 26 2026 -- accept **kwargs so the chart_config
+            # kwarg added to render_chart_png in the
+            # feat(deck) chart_config commit doesn't break the stub.
             concurrency_meter["current"] += 1
             concurrency_meter["peak"] = max(
                 concurrency_meter["peak"], concurrency_meter["current"])
@@ -113,7 +116,9 @@ class TestEditorExportDeckParallel:
         raised."""
         from main import _editor_export
 
-        async def _fake_render(chart_key, theme, w, h):
+        async def _fake_render(chart_key, theme, w, h, **_kwargs):
+            # June 26 2026 -- accept **kwargs so the chart_config
+            # kwarg added to render_chart_png doesn't break the stub.
             if w == 660:  # the 'el-1' element (size 320+10=330; *2=660)
                 raise RuntimeError("matplotlib oom")
             return b"PNG-BYTES"
