@@ -117,13 +117,24 @@ class TestEditorContentBuilders:
         # Every one of the 16 slides carries a non-empty body text element
         # — the five narrative-keyed slides from the generated narratives,
         # the rest from the static seed. No slide opens blank.
+        #
+        # June 26 2026 -- element ids namespaced by slide_id
+        # ('s{id}_body') instead of the previous hardcoded
+        # 'el_002'. The id-rename fix in editor_content.py was
+        # required because build_editor_pptx looks up chart PNGs
+        # by element id and the old hardcoded ids collapsed every
+        # slide's chart_pngs entry to a single key (every slide
+        # showed the same chart in the exported PPTX). This test
+        # now matches the body element via its 'body' suffix.
         from tools.editor_content import deck_to_editor
         cj, _ = deck_to_editor({
             "thesis": "A thesis.", "conclusions": "- one",
             "recommendations": "- rec", "ai_leverage": "AI narrative."})
         assert len(cj["slides"]) == 16
         for s in cj["slides"]:
-            body = next(e for e in s["elements"] if e["id"] == "el_002")
+            body = next(
+                e for e in s["elements"]
+                if str(e.get("id", "")).endswith("_body"))
             assert body["type"] == "text"
             assert body["content"].strip()
 
@@ -133,7 +144,9 @@ class TestEditorContentBuilders:
         from tools.editor_content import deck_to_editor
         cj, _ = deck_to_editor({})
         for s in cj["slides"]:
-            body = next(e for e in s["elements"] if e["id"] == "el_002")
+            body = next(
+                e for e in s["elements"]
+                if str(e.get("id", "")).endswith("_body"))
             assert body["content"].strip()
 
     def test_executive_brief_to_editor_builds_tiptap_and_text(self):
