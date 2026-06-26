@@ -12863,8 +12863,16 @@ async def _editor_export(editor_draft_id: int) -> Response:
             try:
                 w = min(2000, max(80, int(el.get("width") or 360) * 2))
                 h = min(2000, max(80, int(el.get("height") or 220) * 2))
+                # June 26 2026 -- chart_config flows through so
+                # editor overrides (title / axis / colors / series
+                # visibility) reach the matplotlib output. Legacy
+                # elements without chart_config pass None and the
+                # renderer falls back to its hardcoded defaults.
+                cfg = el.get("chart_config")
+                cfg_dict = cfg if isinstance(cfg, dict) else None
                 png = await render_chart_png(
-                    str(el["chartKey"]), "light", w, h)
+                    str(el["chartKey"]), "light", w, h,
+                    chart_config=cfg_dict)
                 return (str(el.get("id")), png)
             except Exception:  # noqa: BLE001 — skip, builder degrades
                 return None
@@ -16792,8 +16800,22 @@ async def _finalize_deck(
     try:
         from tools.editor_content import deck_slides_to_editor
         from tools.editor_drafts import create_draft
+        from tools.chart_config_defaults import (
+            default_strategy_names_from_cache,
+        )
 
-        content_json, content_text = deck_slides_to_editor(slides)
+        # June 26 2026 -- strategy_names sourced from the live
+        # strategy_results cache so each chart_config's series
+        # list (and each table_config's rows list) gets
+        # prepopulated with every strategy in cache order, all
+        # visible by default. The editor's Configure panel can
+        # then toggle individual series off. Falls back to [] when
+        # the cache is empty (cold env / pre-warm); the renderer's
+        # fallback path handles the absent-series case unchanged.
+        strategy_names = default_strategy_names_from_cache(
+            data.get("strategy_results"))
+        content_json, content_text = deck_slides_to_editor(
+            slides, strategy_names=strategy_names)
 
         # ── Concern 7h: pre-submission adversarial critic ─────
         try:

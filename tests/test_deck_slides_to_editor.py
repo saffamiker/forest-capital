@@ -132,7 +132,14 @@ class TestDeckSlideMarkdownTable:
     ` | ` separators with no `|---|` header row -- the preview showed
     raw pipes."""
 
-    def test_table_data_emits_markdown_separator_row(self):
+    # June 26 2026 -- table_data now flows into a first-class
+    # type='table' canvas element with structured rows/columns in
+    # its table_config (no markdown-pipe text in the body). The
+    # tests below pin the new contract; the legacy markdown-in-body
+    # contract was a transitional shape so the editor's table
+    # preview could render before the Configure panel existed.
+
+    def test_table_data_emits_type_table_element(self):
         from tools.editor_content import deck_slides_to_editor
         ai_slides = [
             {"slide_number": 3, "title": "Numbers",
@@ -148,33 +155,43 @@ class TestDeckSlideMarkdownTable:
         ]
         content_json, _ = deck_slides_to_editor(ai_slides)
         slide_3 = content_json["slides"][2]
-        body = [e for e in slide_3["elements"] if e["type"] == "text"][1]
-        content = body["content"]
-        # Header row
-        assert "| Strategy | OOS Sharpe | Max DD |" in content
-        # |---| separator row (the markdown-table signature)
-        assert "|---|---|---|" in content
-        # Body rows with the cell values
-        assert "| Dynamic Blend | 0.81 | -15% |" in content
+        tables = [e for e in slide_3["elements"]
+                  if e["type"] == "table"]
+        assert len(tables) == 1, (
+            "table_data should emit exactly one type='table' element")
+        tc = tables[0]["table_config"]
+        assert tc["columns"] == ["Strategy", "OOS Sharpe", "Max DD"]
+        assert tc["rows"] == [
+            ["Dynamic Blend", "0.81", "-15%"],
+            ["Classic 60/40", "0.62", "-22%"],
+        ]
+        # Table type defaults to 'performance' when the slide spec
+        # doesn't override.
+        assert tc["table_type"] == "performance"
 
     def test_short_row_padded_to_header_count(self):
         """Rows shorter than the header column count are right-padded
         with empty cells so the table stays rectangular even when an
-        LLM emits an off-by-one row."""
+        LLM emits an off-by-one row.
+
+        June 26 2026 -- assertion updated to inspect the table
+        element's table_config.rows shape (was the body text's
+        markdown string)."""
         from tools.editor_content import deck_slides_to_editor
         ai_slides = [
             {"slide_number": 3, "title": "Numbers",
              "bullets": [],
              "table_data": {
                  "headers": ["A", "B", "C"],
-                 "rows": [["1"]],   # only one cell, header has three
+                 "rows": [["1"]],
              },
              "speaker_notes": ""}
         ]
         content_json, _ = deck_slides_to_editor(ai_slides)
-        body = [e for e in content_json["slides"][2]["elements"]
-                if e["type"] == "text"][1]
-        assert "| 1 |  |  |" in body["content"]
+        tables = [e for e in content_json["slides"][2]["elements"]
+                  if e["type"] == "table"]
+        assert tables, "table element should be emitted"
+        assert tables[0]["table_config"]["rows"] == [["1", "", ""]]
 
     def test_long_row_truncated_to_header_count(self):
         from tools.editor_content import deck_slides_to_editor
@@ -188,12 +205,12 @@ class TestDeckSlideMarkdownTable:
              "speaker_notes": ""}
         ]
         content_json, _ = deck_slides_to_editor(ai_slides)
-        body = [e for e in content_json["slides"][2]["elements"]
-                if e["type"] == "text"][1]
-        # Only the first two cells survive; the markdown row stays
+        tables = [e for e in content_json["slides"][2]["elements"]
+                  if e["type"] == "table"]
+        assert tables, "table element should be emitted"
+        # Only the first two cells survive; the row stays
         # rectangular against the two-column header.
-        assert "| 1 | 2 |" in body["content"]
-        assert "| 1 | 2 | 3" not in body["content"]
+        assert tables[0]["table_config"]["rows"] == [["1", "2"]]
 
     def test_no_table_data_emits_no_separator_row(self):
         from tools.editor_content import deck_slides_to_editor
@@ -209,3 +226,8 @@ class TestDeckSlideMarkdownTable:
         # The markdown signature MUST NOT appear -- PresentationPreview
         # would otherwise try to render a non-existent table.
         assert "|---" not in body["content"]
+        # June 26 2026 -- no type='table' element either when
+        # table_data is absent.
+        tables = [e for e in content_json["slides"][1]["elements"]
+                  if e["type"] == "table"]
+        assert tables == []

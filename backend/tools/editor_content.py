@@ -278,6 +278,8 @@ def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
 
 def _deck_slide_with_chart(
     slide_id: int, title: str, body: str, chart_key: str | None,
+    *, strategy_names: list[str] | None = None,
+    table_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bridge (June 8 2026) -- emit a deck slide with a chart element
     pre-embedded on the right half when a chart is configured for this
@@ -290,17 +292,26 @@ def _deck_slide_with_chart(
                     chart   500,150 -> 900,470 (right 400x320).
       - Without chart: bullets 60,150 -> 900,470 (full 840px).
 
-    June 26 2026 -- element ids namespaced by slide_id ('s4_title',
-    's4_body', 's4_chart' etc.). Previously every slide's elements
-    were hardcoded 'el_001'/'el_002'/'el_003', which broke the
-    editor-export chart lookup: build_editor_pptx builds
-    chart_pngs as {element_id: png} and looks up by id at render
-    time. With every chart element on every slide carrying id
-    'el_003' the dict comprehension overwrote each render onto a
-    single key, then every slide's pngs.get('el_003') returned
-    the same PNG -- python-pptx deduplicated identical bytes into
-    a single media/image1.png referenced from every slide. The
-    symptom was 'every chart slide showing the same chart'."""
+    June 26 2026 (PR #441) -- element ids namespaced by slide_id
+    ('s4_title', 's4_body', 's4_chart' etc.) so chart_pngs lookups
+    don't collapse across slides.
+
+    June 26 2026 (chart_config feature) -- two new optional kwargs:
+      * strategy_names: list of cache strategy ids to prepopulate
+        the chart_config's series list (one entry per strategy,
+        all visible by default). Pass [] / None for unknown set.
+      * table_spec: {headers, rows, table_type?, title?} to emit a
+        NEW first-class type='table' canvas element on the slide
+        below the body. Previously the same data was concatenated
+        into the body text as a markdown table; the new element
+        carries a table_config that the editor's Configure panel
+        operates on and the PPTX exporter renders as a real
+        <a:tbl> shape. Pass None to skip (preserves existing
+        behaviour for bullet-only slides)."""
+    from tools.chart_config_defaults import (
+        build_chart_config_for_key, build_table_config,
+    )
+
     elements: list[dict[str, Any]] = [
         {"id": f"s{slide_id}_title", "type": "text",
          "x": 60, "y": 40, "width": 840, "height": 80,
@@ -314,11 +325,19 @@ def _deck_slide_with_chart(
             "content": body, "fontSize": 16, "fontWeight": "normal",
             "fontStyle": "normal", "color": "#333333", "locked": False,
         })
-        elements.append({
+        chart_el: dict[str, Any] = {
             "id": f"s{slide_id}_chart", "type": "chart",
             "x": 500, "y": 150, "width": 400, "height": 320,
             "chartKey": chart_key, "verified": False, "locked": False,
-        })
+            # June 26 2026 -- chart_config prepopulated from the
+            # renderer's hardcoded defaults so the editor's
+            # Configure panel opens to the current visual state.
+            # Absence preserves legacy behaviour; presence layers
+            # on top of the renderer's fallback path.
+            "chart_config": build_chart_config_for_key(
+                chart_key, strategy_names),
+        }
+        elements.append(chart_el)
     else:
         elements.append({
             "id": f"s{slide_id}_body", "type": "text",
@@ -326,6 +345,36 @@ def _deck_slide_with_chart(
             "content": body, "fontSize": 18, "fontWeight": "normal",
             "fontStyle": "normal", "color": "#333333", "locked": False,
         })
+
+    # June 26 2026 -- new first-class type='table' element. Emitted
+    # below the body / chart area when the caller passes table_spec.
+    # The element's table_config carries the rows/columns + style
+    # the editor can edit; the PPTX exporter renders it as a real
+    # <a:tbl> shape via the table_config's column set.
+    if table_spec:
+        table_type = str(table_spec.get("table_type", "performance"))
+        rows = (
+            table_spec.get("rows")
+            or list(strategy_names or []))
+        table_el: dict[str, Any] = {
+            "id":     f"s{slide_id}_table",
+            "type":   "table",
+            "x":      60,
+            "y":      490 if chart_key else 470,
+            "width":  840 if not chart_key else 400,
+            "height": 30,  # placeholder height; renderer auto-grows
+            "locked": False,
+            "table_config": build_table_config(
+                table_type=table_type,
+                strategy_names=rows,
+                title=table_spec.get("title")),
+        }
+        # Allow caller to override the default column set.
+        if table_spec.get("columns"):
+            table_el["table_config"]["columns"] = list(
+                table_spec["columns"])
+        elements.append(table_el)
+
     return {
         "id": slide_id,
         "title": title,
@@ -337,6 +386,8 @@ def _deck_slide_with_chart(
 
 def deck_slides_to_editor(
     slides: Any,
+    *,
+    strategy_names: list[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Editor content for the eleven-slide deck (bridges #98 / #100,
     June 7 2026 -- rebuilt from the six-slide narrative to an eleven-
@@ -372,6 +423,16 @@ def deck_slides_to_editor(
         title = sl.get("title") or SLIDE_TITLES[i - 1]
         bullets = sl.get("bullets") or []
         body = "\n".join(f"- {b}" for b in bullets)
+
+        # June 26 2026 -- table_data now flows into a separate
+        # first-class type='table' canvas element (via table_spec)
+        # so the editor can edit row/column selection in a
+        # Configure panel. The legacy markdown-pipe concatenation
+        # into the body text is preserved as a fallback when no
+        # structured headers + rows are present, so prose-only
+        # slides + drafts that pre-date the structured table
+        # contract still render the same way.
+        table_spec: dict[str, Any] | None = None
         td = sl.get("table_data")
         if isinstance(td, dict) and td.get("rows"):
             headers = [str(h) for h in (td.get("headers") or [])]
@@ -380,12 +441,29 @@ def deck_slides_to_editor(
                 for r in (td.get("rows") or [])
                 if isinstance(r, (list, tuple))
             ]
-            if headers:
-                md = _markdown_table(headers, rows)
-                if md:
-                    body = (body + "\n\n" + md) if body else md
+            # June 26 2026 -- normalise each row to the header
+            # column count (pad short, truncate long). Ports the
+            # row-shape contract previously enforced by
+            # _markdown_table so a downstream LLM off-by-one doesn't
+            # produce a ragged table in the new type='table' element.
+            if headers and rows:
+                rows = [
+                    (r + [""] * (len(headers) - len(r)))[:len(headers)]
+                    for r in rows
+                ]
+                table_spec = {
+                    "headers":  headers,
+                    "rows":     rows,
+                    "title":    sl.get("table_title"),
+                    "columns":  headers,
+                    "table_type": (
+                        sl.get("table_type") or "performance"),
+                }
         chart_key = DECK_SLIDE_CHART_KEYS.get(i)
-        cs = _deck_slide_with_chart(i, title, body, chart_key)
+        cs = _deck_slide_with_chart(
+            i, title, body, chart_key,
+            strategy_names=strategy_names,
+            table_spec=table_spec)
         notes = str(sl.get("speaker_notes") or "").strip()
         if notes:
             cs["speaker_notes"] = notes

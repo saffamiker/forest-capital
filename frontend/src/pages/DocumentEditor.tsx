@@ -18,6 +18,9 @@ import {
 import RichTextEditor from '../components/editor/RichTextEditor'
 import CanvasSlideEditor from '../components/editor/CanvasSlideEditor'
 import ChartPicker from '../components/editor/ChartPicker'
+import {
+  ChartConfigPanelInner, TableConfigPanelInner,
+} from '../components/editor/ChartConfigPanel'
 import EditorNavigator from '../components/editor/EditorNavigator'
 import DataHashChip from '../components/editor/DataHashChip'
 import DraftVersionSelector from '../components/editor/DraftVersionSelector'
@@ -109,6 +112,58 @@ function scriptSections(doc: TipTapDoc | null): {
   return out
 }
 
+
+// June 26 2026 -- ConfigureForElement resolves the targeted
+// canvas element from the deck + dispatches to the chart or
+// table panel variant. Returns a 'not found' fallback when the
+// element id no longer exists (deleted while the panel was
+// open) so the parent can fall back to the assistant cleanly.
+function ConfigureForElement({
+  deck, elementId, onChangeChart, onChangeTable, onClose,
+}: {
+  deck:           CanvasDeck | null
+  elementId:      string
+  onChangeChart:  (c: object) => void
+  onChangeTable:  (c: object) => void
+  onClose:        () => void
+}): JSX.Element {
+  const el = useMemo(() => {
+    if (!deck) return null
+    for (const s of deck.slides) {
+      for (const e of s.elements) {
+        if (e.id === elementId) return e
+      }
+    }
+    return null
+  }, [deck, elementId])
+
+  if (!el) {
+    return (
+      <div className="p-3 text-xs text-muted">
+        Element not found. Close this panel + try again.
+      </div>
+    )
+  }
+  if (el.type === 'chart') {
+    return (
+      <ChartConfigPanelInner element={el}
+        onChange={onChangeChart} onClose={onClose} />
+    )
+  }
+  if (el.type === 'table') {
+    return (
+      <TableConfigPanelInner element={el}
+        onChange={onChangeTable} onClose={onClose} />
+    )
+  }
+  return (
+    <div className="p-3 text-xs text-muted">
+      This element type has no Configure panel.
+    </div>
+  )
+}
+
+
 export default function DocumentEditor() {
   const { draftId } = useParams<{ draftId: string }>()
   const navigate = useNavigate()
@@ -170,7 +225,13 @@ export default function DocumentEditor() {
   // The editor's right panel: the Writing Assistant, or the chart
   // picker drawer while a chart is being added to a slide.
   const [rightPanelMode, setRightPanelMode] =
-    useState<'assistant' | 'chartpicker'>('assistant')
+    useState<'assistant' | 'chartpicker' | 'config'>('assistant')
+  // June 26 2026 -- when rightPanelMode='config', this is the
+  // element id whose chart_config / table_config the Configure
+  // panel is editing. Setting null while in config mode falls
+  // back to the assistant panel.
+  const [configElementId, setConfigElementId] =
+    useState<string | null>(null)
   const [generatingScript, setGeneratingScript] = useState(false)
   // A quoted passage pushed into the Writing Assistant by the "Ask AI"
   // selection action; the nonce re-triggers the panel's prefill effect.
@@ -302,6 +363,24 @@ export default function DocumentEditor() {
     dirtyRef.current = true
     setSaveState('idle')
   }
+
+  // June 26 2026 -- patches the chart_config / table_config on a
+  // single canvas element by id and triggers an auto-save tick via
+  // onDeckChange. Used by the Configure panel; transparent to the
+  // existing canvas drag / resize / edit flows.
+  const patchElementConfig = useCallback(
+    (elementId: string, key: 'chart_config' | 'table_config',
+     config: object): void => {
+      const deck = contentJson as CanvasDeck | null
+      if (!deck) return
+      onDeckChange({
+        slides: deck.slides.map((s) => ({
+          ...s,
+          elements: s.elements.map((e) =>
+            e.id === elementId ? { ...e, [key]: config } : e),
+        })),
+      })
+    }, [contentJson])
 
   // Adds a chart element (from the chart picker) to the active slide,
   // then returns the right panel to the Writing Assistant.
@@ -931,6 +1010,11 @@ export default function DocumentEditor() {
               onRequestChartPicker={() => {
                 setRightOpen(true)
                 setRightPanelMode('chartpicker')
+              }}
+              onRequestConfigure={(elementId: string) => {
+                setConfigElementId(elementId)
+                setRightOpen(true)
+                setRightPanelMode('config')
               }} />
           ) : (
             <RichTextEditor
@@ -940,13 +1024,27 @@ export default function DocumentEditor() {
           )}
         </main>
 
-        {/* Right Writing Assistant / chart picker — desktop aside. */}
+        {/* Right Writing Assistant / chart picker / Configure panel
+            — desktop aside. */}
         {isDesktop && rightOpen && (
           <aside className="w-[300px] shrink-0
                             border-l border-border bg-navy-900">
             {isDeck && rightPanelMode === 'chartpicker' ? (
               <ChartPicker onSelect={handleAddChart}
                 onClose={() => setRightPanelMode('assistant')} />
+            ) : isDeck && rightPanelMode === 'config'
+                  && configElementId ? (
+              <ConfigureForElement
+                deck={contentJson as CanvasDeck | null}
+                elementId={configElementId}
+                onChangeChart={(c) => patchElementConfig(
+                  configElementId, 'chart_config', c)}
+                onChangeTable={(c) => patchElementConfig(
+                  configElementId, 'table_config', c)}
+                onClose={() => {
+                  setConfigElementId(null)
+                  setRightPanelMode('assistant')
+                }} />
             ) : (
               <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
                 prefill={assistantPrefill}
@@ -1036,6 +1134,19 @@ export default function DocumentEditor() {
               {isDeck && rightPanelMode === 'chartpicker' ? (
                 <ChartPicker onSelect={(k) => { handleAddChart(k); setRightOpen(false) }}
                   onClose={() => setRightPanelMode('assistant')} />
+              ) : isDeck && rightPanelMode === 'config'
+                    && configElementId ? (
+                <ConfigureForElement
+                  deck={contentJson as CanvasDeck | null}
+                  elementId={configElementId}
+                  onChangeChart={(c) => patchElementConfig(
+                    configElementId, 'chart_config', c)}
+                  onChangeTable={(c) => patchElementConfig(
+                    configElementId, 'table_config', c)}
+                  onClose={() => {
+                    setConfigElementId(null)
+                    setRightPanelMode('assistant')
+                  }} />
               ) : (
                 <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
                   prefill={assistantPrefill}

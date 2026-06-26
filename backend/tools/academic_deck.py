@@ -954,17 +954,38 @@ _MPL_SERIES = ["#1D4ED8", "#059669", "#B45309", "#7C3AED", "#DB2777",
 
 def render_deck_charts(
     data: dict[str, Any], sensitivity: dict[str, Any] | None = None,
+    target_key: str | None = None,
+    chart_config: dict | None = None,
 ) -> dict[str, bytes | None]:
     """
     Renders every deck chart to a light-mode PNG. Returns a dict keyed by
     slide role — rolling_correlation, cumulative_returns, risk_return,
     sensitivity, team_activity — with PNG bytes or None when the chart
     cannot be drawn (matplotlib missing, or no source data).
+
+    June 26 2026 -- two new optional kwargs (legacy callers
+    unaffected when both default to None):
+      target_key:   the chart_key the caller actually wants. ONLY this
+                    chart's axes have chart_config applied; the other
+                    charts in the returned dict render at their
+                    hardcoded defaults. Keeps the per-(target_key,
+                    chart_config) cache entry distinct without
+                    affecting the other slots.
+      chart_config: ChartConfig dict for target_key. Applied via
+                    _apply_chart_config (title / axis label / axis
+                    bounds). None preserves byte-identical legacy
+                    output.
     """
+    from tools.chart_render import _apply_chart_config
+
     charts: dict[str, bytes | None] = {
         "rolling_correlation": None, "cumulative_returns": None,
         "risk_return": None, "sensitivity": None, "team_activity": None,
     }
+
+    def _cfg_for(k: str) -> dict | None:
+        """Returns chart_config only when this block matches target_key."""
+        return chart_config if target_key == k else None
     try:
         import matplotlib
         matplotlib.use("Agg")  # headless — no display on the server
@@ -1010,6 +1031,7 @@ def render_deck_charts(
             ax.set_ylabel("Correlation")
             ax.legend(fontsize=8, frameon=False)
             _style(ax)
+            _apply_chart_config(ax, _cfg_for("rolling_correlation"))
             charts["rolling_correlation"] = _finish(fig)
     except Exception as exc:  # noqa: BLE001
         log.warning("deck_chart_rolling_correlation_failed", error=str(exc))
@@ -1031,6 +1053,7 @@ def render_deck_charts(
             ax.set_ylabel("Growth of $1")
             ax.legend(fontsize=6.5, frameon=False, ncol=2)
             _style(ax)
+            _apply_chart_config(ax, _cfg_for("cumulative_returns"))
             charts["cumulative_returns"] = _finish(fig)
     except Exception as exc:  # noqa: BLE001
         log.warning("deck_chart_cumulative_returns_failed", error=str(exc))
@@ -1064,6 +1087,7 @@ def render_deck_charts(
             ax.set_xlabel("Annualised volatility (%)")
             ax.set_ylabel("CAGR (%)")
             _style(ax)
+            _apply_chart_config(ax, _cfg_for("risk_return"))
             charts["risk_return"] = _finish(fig)
     except Exception as exc:  # noqa: BLE001
         log.warning("deck_chart_risk_return_failed", error=str(exc))
@@ -2067,6 +2091,37 @@ def build_editor_pptx(
                     _textbox(s, left, top, width, height,
                              "[DATA PENDING] — chart unavailable. Warm the "
                              "analytics caches, then re-export.",
+                             size=12, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
+            elif el.get("type") == "table":
+                # June 26 2026 -- first-class type='table' canvas
+                # element. Renders as a real PPTX <a:tbl> via
+                # _canvas_table, using the element's table_config
+                # for headers (table_config.columns) + body rows
+                # (table_config.rows). The chart_config-style
+                # 'absent = fall back' contract applies: a missing
+                # table_config produces a [DATA PENDING] placeholder
+                # rather than raising.
+                tc = el.get("table_config") or {}
+                headers = list(tc.get("columns") or [])
+                raw_rows = list(tc.get("rows") or [])
+                # rows may be a list of lists (canonical) OR a list
+                # of strategy names (when the editor's Configure
+                # panel set only the strategy selection and left
+                # the cell data for the renderer to look up). Only
+                # the list-of-lists shape is renderable here; flat
+                # strategy lists degrade to a placeholder until
+                # the runtime cell-lookup layer lands.
+                rows = [
+                    list(r) for r in raw_rows
+                    if isinstance(r, (list, tuple))
+                ]
+                if headers and rows:
+                    _canvas_table(
+                        s, headers, rows, left, top, width, height)
+                else:
+                    _textbox(s, left, top, width, height,
+                             "[DATA PENDING] — table data unavailable. "
+                             "Configure rows + columns in the slide editor.",
                              size=12, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
 
         # Speaker notes — the verify reminder, then the presenter's notes.
