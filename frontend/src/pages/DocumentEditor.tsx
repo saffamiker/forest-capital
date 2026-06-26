@@ -683,6 +683,13 @@ export default function DocumentEditor() {
               : saveState === 'error' ? 'Save failed'
               : saveState === 'saved' ? `Saved ${lastSaved}` : 'Unsaved changes'}
           </span>
+          {/* June 26 2026 -- DataHashChip lifted out of the
+              non-script branch so the freshness signal renders
+              for ALL doc types (brief / appendix / deck / script).
+              Previously the script header omitted it; the chip
+              renders nothing while either hash is unavailable, so
+              there's no flash on first mount. */}
+          <DataHashChip draftDataHash={draft.data_hash} />
           {isScript ? (
             <>
               {/* Rehearse — opens the combined script + slide overlay.
@@ -726,14 +733,10 @@ export default function DocumentEditor() {
             </>
           ) : (
             <>
-              {/* June 25 2026 -- data hash freshness chip next to
-                  the Export button so Bob and Molly see whether
-                  the draft is aligned with the analytics cache
-                  before they export. Renders nothing while either
-                  hash is unavailable so no misleading flash on
-                  first mount. */}
-              <DataHashChip
-                draftDataHash={draft.data_hash} />
+              {/* DataHashChip lifted to the top of this header
+                  block (June 26 2026) so it renders for all doc
+                  types including script. The chip used to live
+                  in this branch only. */}
               <button type="button" onClick={() => void exportDocument()}
                 disabled={exporting}
                 className="flex items-center gap-1 text-2xs px-2 py-1 rounded
