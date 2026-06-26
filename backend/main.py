@@ -5581,6 +5581,225 @@ async def generate_presentation_script(
         "presentation_script", session, request)
 
 
+@app.post("/api/v1/documents/script/regenerate-slide")
+@limiter.limit("12/minute")
+async def regenerate_script_slide(
+    request: Request,
+    body: dict,
+    session: dict = Depends(
+        require_permission("generate_documents")),
+):
+    """June 26 2026 -- per-slide script regeneration.
+
+    Body: {draft_id: int, slide_number: int}
+
+    Returns: {content_json: TipTapDoc, slide_number, draft_id,
+              draft_version}
+
+    Synchronous (NOT the async-job pattern): scoped to a single
+    slide's prose so the wall-clock is ~30-60s, well within a
+    single HTTP request. The full-script generation path stays
+    async because it covers all 12 slides (~3-6 min). Per the
+    user spec, the per-slide regen is 'outside the main async
+    job queue -- synchronous response since it's scoped to one
+    slide.'
+
+    Process:
+      1. Load the current script draft. 404 if not found, 400 if
+         document_type != presentation_script.
+      2. Load the current team-shared deck draft for slide
+         context. 409 if no deck.
+      3. Extract the H2-bounded TipTap block for slide_number
+         from the script's content_json (the H2 'Slide N: title'
+         marker bounds each slide).
+      4. Call Sonnet with the per-slide context (deck slide N's
+         body + speaker + brief excerpt) targeting ~150 words.
+      5. Parse the response into TipTap nodes (reuses
+         script_to_tiptap fragments).
+      6. Splice into content_json: replace nodes from the H2
+         marker up to the next H2 (or end of doc).
+      7. Persist via update_draft (no new version row -- this is
+         an auto-save shape) so version history doesn't churn.
+      8. Return the new content_json so the frontend can patch
+         the TipTap editor in place.
+
+    Failure modes (HTTP error):
+      404 -- draft not found or wrong document_type
+      409 -- no current deck draft, or slide_number not in deck,
+             or slide marker missing from script content_json
+      422 -- malformed body
+      502 -- generator call failed
+    """
+    import asyncio
+    import re as _re
+
+    from tools.editor_drafts import (
+        get_draft, get_current_draft_by_type, update_draft,
+    )
+    from tools.script_generation import (
+        build_script_prompt, script_to_tiptap,
+    )
+    from tools.brief_grounding import get_brief_for_grounding
+
+    raw_draft_id = (body or {}).get("draft_id")
+    raw_slide = (body or {}).get("slide_number")
+    try:
+        draft_id = int(raw_draft_id)
+        slide_number = int(raw_slide)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="draft_id and slide_number are required ints.")
+
+    draft = await get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(
+            status_code=404, detail="Script draft not found.")
+    if draft.get("document_type") != "presentation_script":
+        raise HTTPException(
+            status_code=400,
+            detail="Draft is not a presentation script.")
+
+    deck = await get_current_draft_by_type("presentation_deck")
+    if deck is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No current presentation deck draft to source "
+                "the regenerated slide from."))
+    deck_content = deck.get("content_json") or {}
+    deck_slides = (
+        deck_content.get("slides", [])
+        if isinstance(deck_content, dict) else [])
+    target_slide = next(
+        (s for s in deck_slides
+         if isinstance(s, dict)
+         and int(s.get("id") or 0) == slide_number),
+        None)
+    if target_slide is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Slide {slide_number} not found in the deck."))
+
+    # Extract the current script's H2-bounded slide block. The
+    # H2 marker pattern is '## Slide N: <title>' OR a bare
+    # 'Slide N' heading -- script_to_tiptap recognises both.
+    script_content = draft.get("content_json") or {}
+    nodes = (
+        script_content.get("content", [])
+        if isinstance(script_content, dict) else [])
+
+    def _node_text(n: dict) -> str:
+        if n.get("text"):
+            return str(n["text"])
+        return "".join(_node_text(c) for c in (n.get("content") or []))
+
+    slide_marker_re = _re.compile(
+        rf"^\s*Slide\s+{slide_number}\b", _re.IGNORECASE)
+    start_idx = None
+    end_idx = len(nodes)
+    for i, n in enumerate(nodes):
+        if not isinstance(n, dict):
+            continue
+        if n.get("type") != "heading":
+            continue
+        level = (n.get("attrs") or {}).get("level")
+        if level not in (1, 2):
+            continue
+        text = _node_text(n)
+        if start_idx is None and slide_marker_re.match(text):
+            start_idx = i
+        elif start_idx is not None:
+            # Next H1/H2 -- the slide's block ends here.
+            end_idx = i
+            break
+    if start_idx is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Slide {slide_number} marker not found in the "
+                "script content. The script may have been edited "
+                "to remove the slide heading; refresh and retry."))
+
+    # Build a single-slide prompt. Reuses build_script_prompt
+    # against just this slide so the model sees the same
+    # contextual scaffolding (slide body + speaker) it sees for
+    # the full-script path. Brief excerpt threaded in for
+    # consistency with the full-generation flow.
+    brief = await get_brief_for_grounding()
+    brief_text = brief.get("content_text") if brief else None
+    one_slide_prompt = build_script_prompt(
+        [target_slide], brief_text, None)
+    # Tighten the ask -- single-slide prose, ~150 words.
+    one_slide_prompt += (
+        "\n\nFOCUS: regenerate ONLY this single slide's "
+        "delivery prose. Target ~150 words. Keep the speaker "
+        "assignment unchanged. Output the slide's prose in the "
+        "same '## Slide N: title' + speaker-block + paragraphs "
+        "format the full-script generator emits.")
+
+    if ENVIRONMENT == "test":
+        raw = (
+            f"## Slide {slide_number}: "
+            f"{target_slide.get('title') or 'Slide'}\n\n"
+            f"**Speaker: {target_slide.get('speaker') or 'TBA'}**\n\n"
+            "Regenerated delivery paragraph for this slide.")
+    else:
+        try:
+            from agents.base import SONNET_MODEL, call_claude
+            raw = await asyncio.to_thread(
+                call_claude,
+                SONNET_MODEL,
+                "You are an academic presenter generating a "
+                "word-for-word delivery script for one slide.",
+                one_slide_prompt,
+                max_tokens=600,
+                trigger="script_regen_per_slide")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "script_slide_regen_call_failed",
+                slide_number=slide_number, error=str(exc))
+            raise HTTPException(
+                status_code=502,
+                detail=f"Per-slide regeneration failed: {exc}")
+
+    # Parse the new prose into TipTap nodes and splice.
+    new_subdoc, _new_text = script_to_tiptap(raw)
+    new_nodes = (
+        new_subdoc.get("content", [])
+        if isinstance(new_subdoc, dict) else [])
+    if not new_nodes:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Regenerated slide produced no parseable "
+                "content. Retry the regen."))
+
+    spliced_nodes = (
+        nodes[:start_idx] + new_nodes + nodes[end_idx:])
+    new_content_json = {"type": "doc", "content": spliced_nodes}
+
+    # Derive content_text from the spliced nodes via the same
+    # walker the full-script generator uses.
+    new_content_text = "\n\n".join(
+        _node_text(n).strip() for n in spliced_nodes
+        if _node_text(n).strip())
+
+    ok = await update_draft(
+        draft_id, new_content_json, new_content_text)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not persist the regenerated script.")
+
+    return {
+        "draft_id": draft_id,
+        "slide_number": slide_number,
+        "content_json": new_content_json,
+    }
+
+
 async def _generate_script_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
