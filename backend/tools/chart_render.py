@@ -343,7 +343,8 @@ _CHART_KEYS = frozenset(c["key"] for c in AVAILABLE_CHARTS)
 _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 # {(chart_key, theme, width, height): (png_bytes, cached_at)}
-_render_cache: dict[tuple[str, str, int, int], tuple[bytes, float]] = {}
+_render_cache: dict[
+    tuple[str, str, int, int, str], tuple[bytes, float]] = {}
 
 
 def is_known_chart(chart_key: str) -> bool:
@@ -389,11 +390,17 @@ def _resize(png: bytes, width: int, height: int) -> bytes:
     return out.getvalue()
 
 
-async def _render_raw(chart_key: str) -> bytes | None:
+async def _render_raw(
+    chart_key: str, *, chart_config: dict | None = None,
+) -> bytes | None:
     """The raw chart PNG from whichever renderer family backs this key,
     or None when its source data is unavailable (cold caches / the test
     environment). Dispatches between the deck renderer (the five charts
-    the .pptx export ships) and the extended renderer (canvas-only)."""
+    the .pptx export ships) and the extended renderer (canvas-only).
+
+    June 26 2026 -- chart_config flows to both renderer families so
+    slide-editor overrides reach the actual matplotlib output. None /
+    empty preserves the renderer's hardcoded defaults."""
     import asyncio
 
     from tools.academic_export import gather_document_data
@@ -412,7 +419,9 @@ async def _render_raw(chart_key: str) -> bytes | None:
                     lambda: compute_sensitivity(get_full_history()))
             except Exception as exc:  # noqa: BLE001
                 log.warning("chart_render_sensitivity_unavailable", error=str(exc))
-        charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
+        charts = await asyncio.to_thread(
+            render_deck_charts, data, sensitivity,
+            chart_key, chart_config)
         return charts.get(chart_key)
 
     # Extended renderers — gather the per-chart extras (HMM history, raw
@@ -420,8 +429,114 @@ async def _render_raw(chart_key: str) -> bytes | None:
     from tools.chart_renderers import render_extended_charts
     extras = await _gather_extended_extras(chart_key)
     charts = await asyncio.to_thread(
-        render_extended_charts, chart_key, data, extras)
+        render_extended_charts, chart_key, data, extras,
+        chart_config)
     return charts.get(chart_key)
+
+
+# ─── Shared chart_config helper ───────────────────────────────────────────
+#
+# Applied AT THE END of each renderer (after the data has been plotted
+# but before _deck_finish) so the editor's overrides land on top of the
+# renderer's defaults. Each branch is a no-op when the corresponding
+# chart_config field is absent -- preserves legacy behaviour byte-for-
+# byte for un-configured drafts.
+
+
+def _apply_chart_config(ax, chart_config: dict | None) -> None:
+    """Apply title / axis label / axis bound / legend overrides
+    from a ChartConfig dict to a matplotlib Axes. Safe to call with
+    None or {} -- short-circuits before touching the axes.
+
+    Fields read (all optional):
+      title             -> ax.set_title
+      axis.x_label      -> ax.set_xlabel
+      axis.y_label      -> ax.set_ylabel
+      axis.x_min/x_max  -> ax.set_xlim (only when both bounds set)
+      axis.y_min/y_max  -> ax.set_ylim (only when both bounds set)
+
+    Color / series / date_range / regime-break / benchmark toggles
+    must be applied INSIDE the renderer body (they affect the data
+    plotting pass, not the axes after-the-fact). Each renderer's
+    chart_config branch handles those individually."""
+    if not chart_config:
+        return
+
+    if chart_config.get("title"):
+        try:
+            ax.set_title(str(chart_config["title"]), fontsize=11)
+        except Exception:  # noqa: BLE001
+            pass
+
+    axis_cfg = chart_config.get("axis") or {}
+    if isinstance(axis_cfg, dict):
+        x_label = axis_cfg.get("x_label")
+        y_label = axis_cfg.get("y_label")
+        if x_label is not None:
+            try:
+                ax.set_xlabel(str(x_label))
+            except Exception:  # noqa: BLE001
+                pass
+        if y_label is not None:
+            try:
+                ax.set_ylabel(str(y_label))
+            except Exception:  # noqa: BLE001
+                pass
+        x_min, x_max = axis_cfg.get("x_min"), axis_cfg.get("x_max")
+        if x_min is not None and x_max is not None:
+            try:
+                ax.set_xlim(float(x_min), float(x_max))
+            except Exception:  # noqa: BLE001
+                pass
+        y_min, y_max = axis_cfg.get("y_min"), axis_cfg.get("y_max")
+        if y_min is not None and y_max is not None:
+            try:
+                ax.set_ylim(float(y_min), float(y_max))
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _visible_series_keys(
+    chart_config: dict | None,
+) -> set[str] | None:
+    """Returns the set of series KEYS marked visible in chart_config.
+    Returns None when chart_config is absent or has no series list --
+    the caller treats None as 'render every series' (default
+    behaviour). Empty set means 'hide every series' (unusual but
+    explicitly user-requested)."""
+    if not chart_config:
+        return None
+    series = chart_config.get("series")
+    if not isinstance(series, list):
+        return None
+    return {
+        str(s.get("key", ""))
+        for s in series
+        if isinstance(s, dict) and s.get("visible", True)
+    }
+
+
+def _series_color_overrides(
+    chart_config: dict | None,
+) -> dict[str, str]:
+    """Returns {series_key: color_hex} from chart_config.series.
+    Empty dict when absent. The caller uses this to override the
+    renderer's default per-series color palette for any matching
+    series; missing series fall back to the palette."""
+    if not chart_config:
+        return {}
+    series = chart_config.get("series")
+    if not isinstance(series, list):
+        return {}
+    out: dict[str, str] = {}
+    for s in series:
+        if not isinstance(s, dict):
+            continue
+        k = str(s.get("key", ""))
+        c = s.get("color")
+        if k and isinstance(c, str) and c:
+            out[k] = c
+    return out
 
 
 async def _gather_extended_extras(chart_key: str) -> dict[str, Any]:
@@ -488,24 +603,55 @@ async def _gather_extended_extras(chart_key: str) -> dict[str, Any]:
 
 async def render_chart_png(
     chart_key: str, theme: str, width: int, height: int,
+    *, chart_config: dict | None = None,
 ) -> bytes:
     """
     Returns the chart as a PNG sized to width x height. Cached for five
-    minutes per (chart_key, theme, width, height). `theme=dark` falls
-    back to the light render — the matplotlib renderers are light-only.
+    minutes per (chart_key, theme, width, height, chart_config-hash).
+    `theme=dark` falls back to the light render — the matplotlib
+    renderers are light-only.
 
     A chart whose source data is unavailable degrades to a placeholder
     PNG rather than an error, so the canvas always receives an image.
+
+    June 26 2026 -- chart_config kwarg flows the slide element's
+    persisted overrides (title, axis labels, color_scheme, series
+    visibility, date_range, axis bounds, regime-break + benchmark
+    toggles) into the renderer so the editor's Configure panel
+    actually affects the exported chart. When chart_config is None
+    or empty the renderer falls back to its hardcoded defaults
+    (preserves legacy / un-configured drafts unchanged).
+
+    The cache key includes a JSON-stable hash of chart_config so
+    two slides with different configs but the same chart_key get
+    distinct cache entries; an unset chart_config hashes to the
+    same key as the previous no-config calls so cache hits across
+    pre-config callers remain.
     """
+    import hashlib
+    import json as _json
+
+    cfg_hash: str
+    if chart_config:
+        try:
+            cfg_hash = hashlib.md5(
+                _json.dumps(
+                    chart_config, sort_keys=True, default=str
+                ).encode("utf-8")).hexdigest()[:12]
+        except Exception:  # noqa: BLE001
+            cfg_hash = ""
+    else:
+        cfg_hash = ""
+
     now = time.time()
     _prune_expired(now)
-    cache_key = (chart_key, theme, width, height)
+    cache_key = (chart_key, theme, width, height, cfg_hash)
     hit = _render_cache.get(cache_key)
     if hit is not None and now - hit[1] < _CACHE_TTL_SECONDS:
         return hit[0]
 
     try:
-        raw = await _render_raw(chart_key)
+        raw = await _render_raw(chart_key, chart_config=chart_config)
         png = _resize(raw, width, height) if raw else _placeholder(width, height)
     except Exception as exc:  # noqa: BLE001 — never 500 the canvas
         log.warning("chart_render_failed", chart_key=chart_key, error=str(exc))
