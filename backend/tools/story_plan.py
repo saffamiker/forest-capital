@@ -1653,6 +1653,27 @@ def generate_deck_story_plan(
             slide.setdefault("speaker_notes", "")
 
     # Pass 2 -- Opus full script.
+    #
+    # June 26 2026 -- bumped from 5000 to 12000. Production log
+    # signal: story_plan_deck_pass2_truncated with raw_length
+    # ~14365 chars (~3590 English tokens) and the hint "consider
+    # raising max_tokens (likely truncation)". 5000 tokens of
+    # output is roughly 18-20k chars at the JSON-density token
+    # rate (the JSON's structural characters -- quotes, braces,
+    # commas, colons -- each consume tokens), so an 11-12 slide
+    # script with per-slide talking_points + transitions runs
+    # past the 5000-token ceiling well before the final slide is
+    # written. Truncation mid-JSON fails _parse_plan_json and
+    # leaves pass1.full_script = None, which means the script
+    # card never sees a usable full_script and the academic_deck
+    # builder skips the Q&A appendix.
+    #
+    # 12000 gives ~2.4x the previous ceiling -- comfortable
+    # headroom for a full 12-slide script with bullets +
+    # transitions + any future per-slide annotations. Pass 1 was
+    # raised from 6000 to 8000 for similar reasons (truncation
+    # mid-slide-plan); Pass 2 is denser (per-slide prose, not
+    # just headlines + bullets) so the larger jump is justified.
     try:
         from agents.base import OPUS_MODEL, call_claude
         script_user_prompt = (
@@ -1665,7 +1686,7 @@ def generate_deck_story_plan(
         script_raw = call_claude(
             OPUS_MODEL, _DECK_FULL_SCRIPT_SYSTEM_PROMPT,
             script_user_prompt,
-            max_tokens=5000,
+            max_tokens=12000,
             trigger="story_plan_deck_pass2")
         script_obj = _parse_plan_json(
             script_raw, log_key="story_plan_deck_pass2")
