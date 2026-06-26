@@ -7,7 +7,9 @@
  * version history with Save Version and Restore.
  */
 import { useState } from 'react'
-import { History, Save, RotateCcw, FileText, Loader2 } from 'lucide-react'
+import {
+  History, Save, RotateCcw, FileText, Loader2, RefreshCw,
+} from 'lucide-react'
 
 import type { EditorDraftVersion, SaveState } from '../../types/editor'
 import { getSpeakerColour } from '../../lib/speakerColours'
@@ -18,6 +20,9 @@ export interface NavSection {
   totalMarkers: number
   /** The slide's presenter — deck navigator only; absent otherwise. */
   speaker?: string | null
+  /** Script mode only -- the slide number parsed from the heading
+   *  ('Slide N: ...'); enables per-row regenerate action. */
+  slideNumber?: number | null
 }
 
 interface Props {
@@ -39,6 +44,14 @@ interface Props {
   /** Script-mode only — unique speakers in first-seen order, drives the
    *  per-speaker colour palette (shared with the DOCX export). */
   scriptSpeakers?: readonly string[] | undefined
+  /** Script-mode only -- fires when the user clicks the per-row
+   *  Regenerate icon next to a slide entry. Section's slideNumber
+   *  is the int; spinner state lives on regeneratingSlideNumber. */
+  onRegenSlide?: ((slideNumber: number) => void) | undefined
+  /** Script-mode only -- the slide_number currently being
+   *  regenerated; shows a spinner on that row and disables every
+   *  regen icon to prevent double-fire. null = idle. */
+  regeneratingSlideNumber?: number | null | undefined
   /** Replaces the word-count line — e.g. the script's delivery estimate. */
   metricLine?: string | undefined
   /** Tone for metricLine — 'ok' green, 'warn' amber, otherwise muted. */
@@ -52,7 +65,7 @@ export default function EditorNavigator({
   title, wordCount, wordTarget, lastSavedLabel, saveState, sections,
   versions, onJumpToSection, onSaveVersion, onRestoreVersion,
   onAssignSpeaker, speakerSuggestions, scriptSpeakers, metricLine,
-  metricTone, footnote,
+  metricTone, footnote, onRegenSlide, regeneratingSlideNumber,
 }: Props) {
   const [showSave, setShowSave] = useState(false)
   const [label, setLabel] = useState('')
@@ -106,26 +119,58 @@ export default function EditorNavigator({
           <div className="space-y-1.5">
             {sections.map((s) => (
               <div key={s.heading}>
-                <button type="button"
-                  onClick={() => onJumpToSection(s.heading)}
-                  className="w-full text-left group min-w-0">
-                  {/* truncate clips a long heading rather than wrapping
-                      it to two/three lines in the narrow navigator. */}
-                  <div className="text-slate-300 group-hover:text-white
-                                  truncate whitespace-nowrap overflow-hidden">
-                    {s.heading}
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <div className="flex-1 h-1 rounded bg-navy-700
-                                    overflow-hidden">
-                      <div className="h-full bg-electric"
-                        style={{ width: `${pct(s)}%` }} />
+                <div className="flex items-start gap-1">
+                  <button type="button"
+                    onClick={() => onJumpToSection(s.heading)}
+                    className="flex-1 text-left group min-w-0">
+                    {/* truncate clips a long heading rather than wrapping
+                        it to two/three lines in the narrow navigator. */}
+                    <div className="text-slate-300 group-hover:text-white
+                                    truncate whitespace-nowrap overflow-hidden">
+                      {s.heading}
                     </div>
-                    <span className="text-2xs text-muted shrink-0">
-                      {pct(s)}%
-                    </span>
-                  </div>
-                </button>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <div className="flex-1 h-1 rounded bg-navy-700
+                                      overflow-hidden">
+                        <div className="h-full bg-electric"
+                          style={{ width: `${pct(s)}%` }} />
+                      </div>
+                      <span className="text-2xs text-muted shrink-0">
+                        {pct(s)}%
+                      </span>
+                    </div>
+                  </button>
+                  {/* June 26 2026 -- script-mode per-slide regen
+                      icon. Only renders when onRegenSlide is
+                      supplied + the section carries a parseable
+                      slideNumber. Disabled while any slide regen
+                      is in flight (the spinner replaces the icon
+                      on the regenerating row). */}
+                  {onRegenSlide
+                    && typeof s.slideNumber === 'number'
+                    && s.slideNumber > 0 && (
+                    <button type="button"
+                      onClick={() => onRegenSlide(s.slideNumber!)}
+                      disabled={
+                        regeneratingSlideNumber !== null
+                        && regeneratingSlideNumber !== undefined}
+                      data-testid={
+                        `regen-slide-${s.slideNumber}`}
+                      title={
+                        regeneratingSlideNumber === s.slideNumber
+                          ? 'Regenerating…'
+                          : `Regenerate Slide ${s.slideNumber}`}
+                      className="shrink-0 text-muted
+                                 hover:text-electric mt-0.5
+                                 disabled:opacity-40
+                                 disabled:cursor-not-allowed">
+                      {regeneratingSlideNumber === s.slideNumber
+                        ? <Loader2 className="w-3 h-3
+                                              animate-spin" />
+                        : <RefreshCw className="w-3 h-3" />}
+                    </button>
+                  )}
+                </div>
                 {onAssignSpeaker ? (
                   <SpeakerBadge speaker={s.speaker ?? null}
                     suggestions={speakerSuggestions ?? []}

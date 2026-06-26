@@ -123,6 +123,15 @@ export default function DocumentEditor() {
   const [contentJson, setContentJson] = useState<TipTapDoc | CanvasDeck | null>(null)
   const [contentText, setContentText] = useState('')
   const [saveState, setSaveState] = useState<SaveState>('idle')
+  // June 26 2026 -- per-slide script regeneration state. The
+  // slide_number currently being regenerated (null = idle); a
+  // spinner replaces the regen icon on that row in the
+  // navigator + every other regen icon disables to prevent
+  // double-fire. Local to this component since the regen flow
+  // is scoped to a single editor instance.
+  const [
+    regeneratingSlideNumber, setRegeneratingSlideNumber,
+  ] = useState<number | null>(null)
   const [lastSaved, setLastSaved] = useState<string>('not yet')
   // Viewport gating — desktop renders the side-aside panels; mobile
   // (below the lg breakpoint) renders the same panels as full-screen
@@ -441,6 +450,43 @@ export default function DocumentEditor() {
     }
   }, [id, save])
 
+  // June 26 2026 -- per-slide script regeneration. Synchronous
+  // POST scoped to one slide; backend returns the spliced
+  // content_json with the regenerated slide block in place. We
+  // patch local state directly so the editor shows the new
+  // prose without a full reload. While in flight, the navigator
+  // shows a spinner on the regenerating row and disables every
+  // other regen icon to prevent double-fire.
+  const handleRegenSlide = useCallback(
+    async (slideNumber: number): Promise<void> => {
+      if (!id || regeneratingSlideNumber !== null) return
+      setRegeneratingSlideNumber(slideNumber)
+      setError(null)
+      try {
+        const res = await axios.post<{
+          draft_id:     number
+          slide_number: number
+          content_json: TipTapDoc
+        }>('/api/v1/documents/script/regenerate-slide', {
+          draft_id: id, slide_number: slideNumber,
+        })
+        // Patch in place so the editor + navigator reflect the
+        // regenerated slide without a full reload. The backend
+        // already persisted the spliced content via update_draft;
+        // the autosave path won't re-write on the next tick
+        // because contentJson equals the freshly-fetched value.
+        setContentJson(res.data.content_json)
+      } catch (err) {
+        const msg = axios.isAxiosError(err)
+          ? (err.response?.data?.detail ?? err.message)
+          : 'Per-slide regeneration failed.'
+        setError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+      } finally {
+        setRegeneratingSlideNumber(null)
+      }
+    },
+    [id, regeneratingSlideNumber])
+
   // "Ask AI" on an editor selection — opens the assistant panel and
   // pre-fills the chat input with the quoted passage.
   const handleAskAI = (text: string) => {
@@ -559,12 +605,22 @@ export default function DocumentEditor() {
     if (isScript) {
       // One section per slide (H2); progress is "has delivery prose yet".
       const secs: NavSection[] = scriptSections(contentJson as TipTapDoc | null)
-        .map((s) => ({
-          heading: s.heading,
-          totalMarkers: 1,
-          markersRemaining: s.hasContent ? 0 : 1,
-          speaker: s.speaker,
-        }))
+        .map((s) => {
+          // Parse the slide_number out of the heading
+          // ('Slide N: title' or '## Slide N: ...') so the
+          // per-row regen button can POST it. Falls back to null
+          // when the heading doesn't carry a recognisable
+          // 'Slide N' prefix (e.g. an OPENING / CLOSING section).
+          const match = /^\s*(?:Slide|#+\s*Slide)\s+(\d+)/i
+            .exec(s.heading)
+          return {
+            heading: s.heading,
+            totalMarkers: 1,
+            markersRemaining: s.hasContent ? 0 : 1,
+            speaker: s.speaker,
+            slideNumber: match ? Number(match[1]) : null,
+          }
+        })
       return { sections: secs, unresolved: countMarkers(contentText) }
     }
     const secs: NavSection[] = tiptapSections(contentJson as TipTapDoc | null)
@@ -683,6 +739,13 @@ export default function DocumentEditor() {
               : saveState === 'error' ? 'Save failed'
               : saveState === 'saved' ? `Saved ${lastSaved}` : 'Unsaved changes'}
           </span>
+          {/* June 26 2026 -- DataHashChip lifted out of the
+              non-script branch so the freshness signal renders
+              for ALL doc types (brief / appendix / deck / script).
+              Previously the script header omitted it; the chip
+              renders nothing while either hash is unavailable, so
+              there's no flash on first mount. */}
+          <DataHashChip draftDataHash={draft.data_hash} />
           {isScript ? (
             <>
               {/* Rehearse — opens the combined script + slide overlay.
@@ -726,14 +789,10 @@ export default function DocumentEditor() {
             </>
           ) : (
             <>
-              {/* June 25 2026 -- data hash freshness chip next to
-                  the Export button so Bob and Molly see whether
-                  the draft is aligned with the analytics cache
-                  before they export. Renders nothing while either
-                  hash is unavailable so no misleading flash on
-                  first mount. */}
-              <DataHashChip
-                draftDataHash={draft.data_hash} />
+              {/* DataHashChip lifted to the top of this header
+                  block (June 26 2026) so it renders for all doc
+                  types including script. The chip used to live
+                  in this branch only. */}
               <button type="button" onClick={() => void exportDocument()}
                 disabled={exporting}
                 className="flex items-center gap-1 text-2xs px-2 py-1 rounded
@@ -856,6 +915,9 @@ export default function DocumentEditor() {
                   + 'deck in a second tab and use Presentation Preview '
                   + 'alongside this script.'
                 : undefined}
+              onRegenSlide={isScript ? handleRegenSlide : undefined}
+              regeneratingSlideNumber={
+                isScript ? regeneratingSlideNumber : null}
             />
           </aside>
         )}
@@ -942,6 +1004,9 @@ export default function DocumentEditor() {
                     + 'deck in a second tab and use Presentation Preview '
                     + 'alongside this script.'
                   : undefined}
+                onRegenSlide={isScript ? handleRegenSlide : undefined}
+                regeneratingSlideNumber={
+                  isScript ? regeneratingSlideNumber : null}
               />
             </div>
           </aside>
