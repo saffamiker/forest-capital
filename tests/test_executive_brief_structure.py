@@ -338,23 +338,41 @@ def test_section_g_appendix_prohibits_placeholder_and_open_items():
     assert "ALWAYS present" in source
 
 
-def test_visuals_section_lists_four_named_artifacts():
-    """§6 must roster the four platform visual surfaces by name."""
+def test_visuals_section_is_not_emitted():
+    """June 26 2026 -- Section 6 ('Visuals to Demonstrate the
+    Insights') was removed as a generation artifact with no
+    submission value. The brief now ends after Section 5: Final
+    Recommendations. This test pins the removal so a future
+    revert doesn't reintroduce the captioned-chart prose.
+
+    The four visual artifact names previously rostered in §6
+    are still referenced inline from Sections 3 and 4 (the
+    cumulative-return chart, the implied-asset-allocation chart,
+    the efficient frontier, the rolling correlation chart); the
+    Analytical Appendix carries the per-chart data tables. The
+    redundant captioned roster does not need to be reproduced
+    in the brief itself."""
     source = _runtime_main_source()
-    assert "CUMULATIVE RETURN, POST-2022" in source
-    assert "IMPLIED ASSET ALLOCATION OVER TIME" in source
-    assert "EFFICIENT FRONTIER" in source
-    assert "ROLLING CORRELATION" in source
+    # The spec-list entry that drove Section 6 must be gone.
+    # 'key": "visuals"' is the canonical fingerprint of the spec.
+    assert '"key": "visuals"' not in source
+    # The Section 6 task verbatim header must not appear.
+    assert "Write Section 6: VISUALS TO DEMONSTRATE THE INSIGHTS" \
+        not in source
 
 
 def test_brief_specs_apply_tone_rules_to_every_section():
     """Every section spec must thread _BRIEF_TONE_RULES so the agent
-    knows the platform-vs-judgment contract throughout."""
+    knows the platform-vs-judgment contract throughout.
+
+    June 26 2026 -- expected count dropped from 6 to 5 after the
+    removal of Section 6 (Visuals to Demonstrate the Insights);
+    the brief now carries five rubric-aligned sections."""
     source = _runtime_main_source()
     occurrences = source.count("+ _BRIEF_TONE_RULES")
-    assert occurrences == 6, (
+    assert occurrences == 5, (
         f"_BRIEF_TONE_RULES is concatenated in {occurrences} section(s); "
-        "every section (6) must apply the tone rules.")
+        "every section (5) must apply the tone rules.")
 
 
 def test_brief_does_not_carry_five_human_decisions_section():

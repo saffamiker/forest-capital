@@ -14707,6 +14707,41 @@ _BRIEF_TONE_RULES_BASE = (
     "  - No data hashes in the body text — those belong in the "
     "appendix.\n"
     "  - No em dashes (project-wide prose rule).\n"
+    "\nHEADING DISCIPLINE (non-negotiable):\n"
+    "  - Emit ONLY ONE heading per section: the H2 in the form "
+    "'## Section N: Title' (e.g. '## Section 1: Executive Summary'). "
+    "Do NOT also emit a numbered H1 like '# 1. Executive Summary' "
+    "above it. The DOCX assembler builds the H1 chapter heading "
+    "downstream from the section key; duplicate model-emitted "
+    "headings render as 'Executive Summary' followed by 'Section 1: "
+    "Executive Summary' in the final document and read as a defect.\n"
+    "  - Wrong: '# 1. Executive Summary\\n## Section 1: Executive Summary'.\n"
+    "  - Right: '## Section 1: Executive Summary'.\n"
+    "\nCITATION DISCIPLINE -- Benjamin vs Benjamini (non-negotiable):\n"
+    "Two different papers, two different claims; never swap or "
+    "conflate them in-text or in the reference list.\n"
+    "  - Benjamini & Hochberg (1995) -- the FDR (false discovery "
+    "rate) CORRECTION METHODOLOGY. Cite this whenever you reference "
+    "the q-value control, the BH procedure, or the multiple-"
+    "hypothesis correction technique. Reference list entry: "
+    "'Benjamini, Y., & Hochberg, Y. (1995). Controlling the false "
+    "discovery rate: A practical and powerful approach to multiple "
+    "testing. Journal of the Royal Statistical Society: Series B, "
+    "57(1), 289-300.'\n"
+    "  - Benjamin et al. (2018) -- the p < 0.005 THRESHOLD "
+    "PROPOSAL (Redefine Statistical Significance, Nature Human "
+    "Behaviour). Cite this whenever you reference the 0.005 cutoff "
+    "itself as the bar for declaring a finding significant. "
+    "Reference list entry: 'Benjamin, D. J., et al. (2018). "
+    "Redefine statistical significance. Nature Human Behaviour, "
+    "2(1), 6-10.'\n"
+    "  - Wrong: 'no strategy clears p < 0.005 under Benjamin et "
+    "al. (2018) FDR correction' (conflates the methodology with "
+    "the threshold paper).\n"
+    "  - Right: 'no strategy clears p < 0.005 (Benjamin et al., "
+    "2018) under Benjamini-Hochberg FDR correction (Benjamini & "
+    "Hochberg, 1995)' -- two citations, each on the claim they "
+    "actually support.\n"
     "\nSENTENCE COMPLETION (HARD CONSTRAINT):\n"
     "You must complete every sentence you begin. If you are running "
     "long, end the current paragraph cleanly rather than starting a "
@@ -15072,44 +15107,15 @@ async def _generate_brief_document(
              "context": {"live_recommendation": live,
                          "summary_statistics": data["summary_statistics"],
                          "study_period": data["study_period"]}},
-            {"key": "visuals", "available": True,
-             "agent_id": "brief_visuals",
-             # June 21 2026 -- bumped from the default 1500. Section
-             # 6 covers four chart entries each with a captioned
-             # paragraph + APA note; production runs were truncating
-             # mid-token on chart #4. 2500 gives comfortable headroom.
-             "max_tokens": 2500,
-             "task": (
-                 "Write Section 6: VISUALS TO DEMONSTRATE THE INSIGHTS. "
-                 "Approximately 250 words. A captioned roster of the "
-                 "platform's chart surfaces that demonstrate the "
-                 "findings above. Each entry is one short paragraph: "
-                 "the chart name, the location on the platform, and "
-                 "the specific insight it carries.\n\n"
-                 "Cover at least these four visuals in this order:\n"
-                 "  1. CUMULATIVE RETURN, POST-2022 (Performance Record "
-                 "page). Shows the regime-conditional blend's cumulative "
-                 "outperformance vs the S&P 500 benchmark and Classic "
-                 "60/40 over the OOS window. The 2022 correlation break "
-                 "is the inflection where the blend opens its lead.\n\n"
-                 "  2. IMPLIED ASSET ALLOCATION OVER TIME (Performance "
-                 "Record page). Stacked equity / IG / HY shares at each "
-                 "rebalance, with a monthly regime band beneath. Shows "
-                 "how the blend held the bond sleeve through the 2022 "
-                 "equity drawdown.\n\n"
-                 "  3. EFFICIENT FRONTIER (Performance / Strategy "
-                 "Comparison surface). Strategy risk-return scatter "
-                 "with the live blend point marked. Shows the blend "
-                 "sits above the static frontier at comparable vol.\n\n"
-                 "  4. ROLLING CORRELATION (Macro / Performance Record). "
-                 "Equity-bond rolling correlation with the 2022 break "
-                 "axvline. Shows the inversion that motivates the "
-                 "regime-conditional construction.\n\n"
-                 "Close with one sentence pointing reviewers to the "
-                 "Analytical Appendix for the per-chart data table "
-                 "behind each visual."
-                 + _BRIEF_TONE_RULES),
-             "context": {"study_period": data["study_period"]}},
+            # June 26 2026 -- Section 6 'Visuals to Demonstrate the
+            # Insights' removed. The section was a generation
+            # artifact with no submission value: it captioned chart
+            # surfaces in prose, but the brief already references
+            # the relevant charts inline from Sections 3 and 4 and
+            # the Analytical Appendix carries the per-chart data
+            # tables. Keeping it produced a redundant 250-word
+            # ending that the rubric specifically does NOT grade.
+            # Brief now ends after Section 5: Final Recommendations.
         ]
         # PR #333 -- brief section plan injection. Mirrors the deck
         # path: cache-aware retrieval of the Opus story plan keyed by
@@ -15464,6 +15470,37 @@ _APPENDIX_WORD_CAP_INSTRUCTION = (
     "and require regeneration.")
 
 
+# June 26 2026 -- Citation discipline for the Benjamin vs Benjamini
+# split. Two different papers, two different claims; the model has
+# previously conflated them (e.g. attributing the FDR correction to
+# Benjamin et al. 2018 or attributing the p < 0.005 threshold to
+# Benjamini & Hochberg 1995). Threaded into the appendix sections
+# that actually cite either paper (C and E) so the constraint sits
+# next to the relevant prose. Mirrors the brief-side guidance in
+# _BRIEF_TONE_RULES_BASE.
+_APPENDIX_CITATION_DISCIPLINE = (
+    "\n\nCITATION DISCIPLINE -- Benjamin vs Benjamini (non-"
+    "negotiable):\n"
+    "Two different papers, two different claims; never swap or "
+    "conflate them in-text or in the reference list.\n"
+    "  - Benjamini & Hochberg (1995) -- the FDR (false discovery "
+    "rate) CORRECTION METHODOLOGY. Cite this whenever you "
+    "reference the q-value control, the BH procedure, or the "
+    "multiple-hypothesis correction technique.\n"
+    "  - Benjamin et al. (2018) -- the p < 0.005 THRESHOLD "
+    "PROPOSAL (Redefine Statistical Significance, Nature Human "
+    "Behaviour). Cite this whenever you reference the 0.005 "
+    "cutoff itself as the bar for declaring a finding "
+    "significant.\n"
+    "  - Wrong: 'no strategy clears p < 0.005 under Benjamin et "
+    "al. (2018) FDR correction' (the FDR correction is not from "
+    "that paper).\n"
+    "  - Right: 'no strategy clears the p < 0.005 threshold "
+    "(Benjamin et al., 2018) under Benjamini-Hochberg FDR "
+    "correction (Benjamini & Hochberg, 1995)' -- each citation "
+    "next to the claim it actually supports.")
+
+
 _APPENDIX_NARRATIVE_TASKS = {
     "appendix_a": (
         "Write a 100-130 word introduction to Section A: Data and "
@@ -15488,10 +15525,12 @@ _APPENDIX_NARRATIVE_TASKS = {
         "p-value, the FDR-corrected p-value, the Deflated Sharpe Ratio "
         "p-value, the Probabilistic Sharpe Ratio, and the SPA gate for "
         "every strategy except the benchmark. State plainly that no "
-        "strategy clears the Benjamin et al. 2018 p < 0.005 threshold "
-        "under FDR correction, and that we surface this honestly rather "
+        "strategy clears the p < 0.005 threshold (Benjamin et al., "
+        "2018) under Benjamini-Hochberg FDR correction (Benjamini & "
+        "Hochberg, 1995), and that we surface this honestly rather "
         "than report Sharpe rankings alone. Plain academic prose. "
-        "No em dashes."),
+        "No em dashes."
+        + _APPENDIX_CITATION_DISCIPLINE),
     "appendix_d": (
         "Write a 100-130 word introduction to Section D: Bootstrap "
         "Confidence Intervals. Note the methodology: block bootstrap "
@@ -15502,7 +15541,14 @@ _APPENDIX_NARRATIVE_TASKS = {
         "interval overlaps the benchmark's Sharpe. Note that "
         "substantial overlap is the analytical justification for "
         "treating static-strategy rankings as inconclusive. Plain "
-        "academic prose. No em dashes."),
+        "academic prose. No em dashes.\n\n"
+        "TABLE PLACEMENT NOTE: The renderer places Table D1 "
+        "immediately after this narrative paragraph -- write the "
+        "phrasing 'the table that follows' or 'Table D1 below' "
+        "rather than 'the table at the end of this appendix' or "
+        "any phrasing that implies Table D1 lives in a separate "
+        "evidence block. Table D1 is inline with Section D's "
+        "prose."),
     "appendix_e": (
         "Write a 100-130 word introduction to Section E: Factor "
         "Loadings. Note that the table that follows reports the "
@@ -15511,7 +15557,8 @@ _APPENDIX_NARRATIVE_TASKS = {
         "with a trailing asterisk on each coefficient significant at "
         "p < 0.05. State that the table is read for each strategy's "
         "primary return driver, not for stock-picking alpha. Plain "
-        "academic prose. No em dashes."),
+        "academic prose. No em dashes."
+        + _APPENDIX_CITATION_DISCIPLINE),
     "appendix_f": (
         "Write a 100-130 word introduction to Section F: Crisis Window "
         "Performance. Note that the table that follows reports each "
@@ -15519,9 +15566,22 @@ _APPENDIX_NARRATIVE_TASKS = {
         "(GFC 2008-2009, EU Debt 2011, COVID Crash, COVID Recovery, "
         "Rate Shock 2022). State explicitly that the headline figure is "
         "the cumulative return through the window, NOT the annualised "
-        "CAGR (the F3 fix). A trailing dagger on a cell flags a "
-        "partial-overlap window — the strategy started or ended inside "
-        "the window's date range. Plain academic prose. No em dashes."),
+        "CAGR (the F3 fix). Plain academic prose. No em dashes.\n\n"
+        "DAGGER FOOTNOTE DISCIPLINE (non-negotiable): The trailing "
+        "dagger (†) symbol on a Table F1 CELL flags a partial-"
+        "overlap window for that specific strategy -- meaning that "
+        "strategy's live history started AFTER the crisis window "
+        "began or ended BEFORE the window closed, so the cumulative "
+        "return is computed over only the overlapping subset of the "
+        "window. If a strategy's history fully covers the window, "
+        "the cell does NOT carry a dagger. If EVERY strategy in the "
+        "table fully covers EVERY crisis window (the common case "
+        "for the canonical strategies), the dagger does not appear "
+        "anywhere and you should not mention partial-overlap in the "
+        "narrative at all. NEVER describe the dagger as a uniform "
+        "marker applied to every row -- that contradicts the "
+        "footnote's definition and confuses readers. Mention the "
+        "dagger only if the rendered table actually carries it."),
     "appendix_g": (
         "Write a 100-130 word introduction to Section G: Transaction "
         "Cost Sensitivity. Note that the table that follows reports "
