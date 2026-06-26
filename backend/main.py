@@ -14024,6 +14024,404 @@ async def post_propose_fix(
     }
 
 
+# ── June 26 2026 -- direct section-patch path for apply-fix ──────────────
+#
+# Background. The legacy apply-fix flow (a) patched a story_plans row by
+# appending the patch_instruction to a section's `guidance` field, then
+# (b) kicked off a FULL document regeneration. That round-trip was
+# necessary when the fix changed the story plan's structural anchors
+# (numeric_anchors, central_argument), but for a localised correction
+# to one slide's prose / numbers it was overkill -- and it failed
+# outright on the deck because the story_plans row lookup was 409ing
+# (apply-fix story-plan-lookup PR #443 fixed the hash join, but Apply
+# Fix still 409s on any deck draft generated before a story plan was
+# computed -- pre-#332 drafts in particular).
+#
+# This path side-steps the regen requirement for fixes that can be
+# applied directly to the current draft's content_json. Branches by
+# document_type:
+#
+#   presentation_deck  -- find the slide by section_name (title match),
+#     send its elements array to Sonnet with the patch_instruction,
+#     replace the elements with the corrected version.
+#   executive_brief / analytical_appendix -- find the TipTap section by
+#     section_name (heading text match), send its nodes to Sonnet,
+#     replace the section's nodes with the corrected version.
+#   presentation_script -- no first-class section concept (per-slide
+#     regen lives at a different endpoint); falls through to the legacy
+#     path.
+#
+# Returns the response dict on success; the caller short-circuits the
+# legacy story-plan + regen block. Returns None when the direct path
+# can't apply (no current draft, section not found, Sonnet output
+# unparseable, target='document' on a section-only fix proposal) so the
+# caller falls back to the legacy path -- preserves the existing
+# regen-the-whole-doc behaviour as the safety net.
+
+
+_DECK_SLIDE_PATCH_SYSTEM_PROMPT = (
+    "You are a precise JSON editor for a presentation slide. You "
+    "will receive a slide title, a patch instruction describing a "
+    "targeted correction, and the slide's current `elements` array "
+    "as JSON.\n\n"
+    "Apply ONLY the change requested by the patch instruction. "
+    "Preserve every other field, every other element, and the "
+    "overall structure exactly. Do not rephrase prose that the "
+    "instruction does not touch; do not change colors, positions, "
+    "ids, types, or any element the instruction doesn't name.\n\n"
+    "Return ONLY the corrected elements array as valid JSON. No "
+    "commentary, no markdown fence, no explanation -- just the "
+    "array."
+)
+
+
+_TIPTAP_SECTION_PATCH_SYSTEM_PROMPT = (
+    "You are a precise JSON editor for one section of a document "
+    "written in TipTap JSON format. You will receive the section "
+    "name, a patch instruction describing a targeted correction, "
+    "and the section's current TipTap nodes as a JSON array "
+    "(starting with the heading node and ending just before the "
+    "next heading).\n\n"
+    "Apply ONLY the change requested by the patch instruction. "
+    "Preserve every other paragraph, the heading, marks, the node "
+    "ordering, and the TipTap structure exactly. Keep marker "
+    "callouts ([[BOB: ...]], [[VERIFY: ...]]) intact unless the "
+    "instruction explicitly says to remove them.\n\n"
+    "Return ONLY the corrected node array as valid JSON. No "
+    "commentary, no markdown fence, no explanation -- just the "
+    "array."
+)
+
+
+def _norm_title(s: str) -> str:
+    """Case-insensitive whitespace-collapsed title normalisation
+    for the slide / section title match. The fix proposal's
+    section_name often comes from the LLM's free-text description
+    of the finding; we accept moderate punctuation drift."""
+    import re as _re
+    return _re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+
+def _extract_json_array(raw: str) -> list | None:
+    """Tolerantly extract the first JSON array from a Sonnet
+    response. Strips a markdown ```json fence if present, then
+    falls back to the longest [...] span. Returns None on parse
+    failure or when the result isn't a list."""
+    import re as _re
+    if not raw:
+        return None
+    # Strip markdown fence.
+    fence = _re.search(
+        r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw)
+    candidate = fence.group(1) if fence else None
+    if candidate is None:
+        # Longest array span: from the first '[' to the last ']'.
+        first = raw.find("[")
+        last = raw.rfind("]")
+        if first == -1 or last == -1 or last <= first:
+            return None
+        candidate = raw[first:last + 1]
+    try:
+        parsed = json.loads(candidate)
+    except Exception:  # noqa: BLE001
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def _find_deck_slide_idx(
+    slides: list, section_name: str,
+) -> int | None:
+    """Find a slide by title match. Returns the index or None.
+    Case-insensitive, whitespace-collapsed."""
+    target = _norm_title(section_name)
+    if not target:
+        return None
+    for i, sl in enumerate(slides):
+        if not isinstance(sl, dict):
+            continue
+        if _norm_title(sl.get("title")) == target:
+            return i
+    return None
+
+
+def _node_text_for_match(node: Any) -> str:
+    """Flatten a TipTap node's text content recursively for
+    heading-title matching."""
+    if not isinstance(node, dict):
+        return ""
+    if node.get("text"):
+        return str(node["text"])
+    return "".join(
+        _node_text_for_match(c) for c in (node.get("content") or []))
+
+
+def _find_tiptap_section_range(
+    nodes: list, section_name: str,
+) -> tuple[int, int] | None:
+    """Returns (start_idx, end_idx_exclusive) of the matching
+    section -- from its heading node up to (but not including) the
+    next heading. None when no heading matches or the section is
+    empty. Matches against the heading's flattened text content
+    using _norm_title for resilience to whitespace + casing drift."""
+    target = _norm_title(section_name)
+    if not target:
+        return None
+    start = None
+    for i, n in enumerate(nodes):
+        if not isinstance(n, dict) or n.get("type") != "heading":
+            continue
+        title = _norm_title(_node_text_for_match(n))
+        if start is None:
+            if (title == target
+                    or target in title
+                    or title in target):
+                start = i
+            continue
+        # Already in section; next heading bounds it.
+        return start, i
+    if start is None:
+        return None
+    return start, len(nodes)
+
+
+async def _patch_deck_slide_via_sonnet(
+    slide: dict, patch_instruction: str,
+) -> list | None:
+    """Sends the slide's elements + the patch instruction to
+    Sonnet; returns the corrected elements array or None on
+    parse / validation failure. Validates that every returned
+    element is a dict carrying at minimum `id` and `type` keys
+    (preserves the canvas-element shape contract)."""
+    import asyncio as _asyncio
+    from agents.base import SONNET_MODEL, call_claude
+
+    elements = slide.get("elements") or []
+    user_message = (
+        f"SLIDE TITLE: {slide.get('title') or ''}\n\n"
+        f"PATCH INSTRUCTION:\n{patch_instruction}\n\n"
+        "CURRENT ELEMENTS JSON:\n"
+        f"{json.dumps(elements, indent=2)}\n\n"
+        "Return ONLY the corrected elements array as JSON."
+    )
+    try:
+        raw = await _asyncio.to_thread(
+            call_claude, SONNET_MODEL,
+            _DECK_SLIDE_PATCH_SYSTEM_PROMPT, user_message, 4000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_deck_sonnet_failed", error=str(exc))
+        return None
+    parsed = _extract_json_array(raw)
+    if parsed is None:
+        log.warning(
+            "apply_fix_deck_sonnet_unparseable",
+            raw_preview=(raw or "")[:200])
+        return None
+    if not all(
+        isinstance(e, dict) and "id" in e and "type" in e
+        for e in parsed
+    ):
+        log.warning("apply_fix_deck_element_shape_violation")
+        return None
+    return parsed
+
+
+async def _patch_tiptap_section_via_sonnet(
+    section_nodes: list, section_name: str,
+    patch_instruction: str,
+) -> list | None:
+    """Sends the section's TipTap nodes + the patch instruction to
+    Sonnet; returns the corrected node array or None on parse /
+    validation failure. Validates that every returned node is a
+    dict with a `type` field."""
+    import asyncio as _asyncio
+    from agents.base import SONNET_MODEL, call_claude
+
+    user_message = (
+        f"SECTION NAME: {section_name}\n\n"
+        f"PATCH INSTRUCTION:\n{patch_instruction}\n\n"
+        "CURRENT SECTION NODES (TipTap JSON):\n"
+        f"{json.dumps(section_nodes, indent=2)}\n\n"
+        "Return ONLY the corrected node array as JSON."
+    )
+    try:
+        raw = await _asyncio.to_thread(
+            call_claude, SONNET_MODEL,
+            _TIPTAP_SECTION_PATCH_SYSTEM_PROMPT,
+            user_message, 4000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_tiptap_sonnet_failed", error=str(exc))
+        return None
+    parsed = _extract_json_array(raw)
+    if parsed is None:
+        log.warning(
+            "apply_fix_tiptap_sonnet_unparseable",
+            raw_preview=(raw or "")[:200])
+        return None
+    if not all(
+        isinstance(n, dict) and "type" in n for n in parsed
+    ):
+        log.warning("apply_fix_tiptap_node_shape_violation")
+        return None
+    return parsed
+
+
+def _derive_content_text_from_tiptap(doc: dict) -> str:
+    """Plain-text projection of a TipTap doc for content_text.
+    Mirrors the editor's save-flow shape."""
+    out = []
+    for n in (doc.get("content") or []):
+        text = _node_text_for_match(n).strip()
+        if text:
+            out.append(text)
+    return "\n\n".join(out)
+
+
+def _derive_content_text_from_deck(deck: dict) -> str:
+    """Plain-text projection of a canvas deck for content_text.
+    Concatenates each slide's title + body text."""
+    out = []
+    for sl in (deck.get("slides") or []):
+        if not isinstance(sl, dict):
+            continue
+        out.append(f"Slide {sl.get('id', '')}: {sl.get('title', '')}")
+        for el in (sl.get("elements") or []):
+            if isinstance(el, dict) and el.get("type") == "text":
+                content = str(el.get("content") or "").strip()
+                if content:
+                    out.append(content)
+    return "\n".join(out)
+
+
+async def _mark_council_debate_fix_applied(
+    debate_id: int, new_draft_id: int | None,
+) -> None:
+    """Mark the council_debates row as applied. Best-effort: a
+    write failure logs but does not unwind the patch."""
+    try:
+        from sqlalchemy import text as _text
+        from database import (
+            AsyncSessionLocal as _ASL,  # type: ignore
+        )
+        if _ASL is None:
+            return
+        async with _ASL() as s:
+            await s.execute(_text(
+                "UPDATE council_debates SET "
+                "fix_applied = TRUE, "
+                "fix_applied_at = NOW(), "
+                "new_draft_id = COALESCE(:n, new_draft_id) "
+                "WHERE id = :id"),
+                {"id": int(debate_id),
+                 "n": new_draft_id})
+            await s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_mark_debate_failed", error=str(exc))
+
+
+async def _try_direct_section_patch(
+    *, document_type: str, target: str | None,
+    section_name: str | None, patch_instruction: str,
+    debate_id: int | None,
+) -> dict | None:
+    """Attempts to apply the fix as a direct in-place patch to the
+    current draft's content_json. Returns the response dict on
+    success; returns None when the direct path can't handle this
+    case (so the caller falls back to legacy story-plan + regen).
+
+    Conditions that return None (= fall through to legacy):
+      * target == 'document' (no specific section to patch)
+      * No section_name on the fix proposal
+      * No current draft for the document type
+      * Section / slide title can't be matched in the draft
+      * Sonnet response is unparseable or violates the shape
+      * presentation_script (no first-class section concept here)
+    """
+    if target != "section" or not section_name:
+        return None
+    if document_type not in (
+        "presentation_deck", "executive_brief",
+        "analytical_appendix",
+    ):
+        return None
+
+    from tools.editor_drafts import (
+        get_current_draft_by_type, update_draft,
+    )
+
+    draft = await get_current_draft_by_type(document_type)
+    if draft is None:
+        return None
+    content = draft.get("content_json")
+    if not isinstance(content, dict):
+        return None
+
+    if document_type == "presentation_deck":
+        slides = content.get("slides")
+        if not isinstance(slides, list):
+            return None
+        idx = _find_deck_slide_idx(slides, section_name)
+        if idx is None:
+            return None
+        new_elements = await _patch_deck_slide_via_sonnet(
+            slides[idx], patch_instruction)
+        if new_elements is None:
+            return None
+        new_slides = list(slides)
+        new_slides[idx] = {
+            **slides[idx], "elements": new_elements}
+        new_content = {**content, "slides": new_slides}
+        new_text = _derive_content_text_from_deck(new_content)
+    else:
+        # executive_brief or analytical_appendix -- TipTap shape
+        nodes = content.get("content")
+        if not isinstance(nodes, list):
+            return None
+        rng = _find_tiptap_section_range(nodes, section_name)
+        if rng is None:
+            return None
+        start, end = rng
+        section_nodes = nodes[start:end]
+        new_section = await _patch_tiptap_section_via_sonnet(
+            section_nodes, section_name, patch_instruction)
+        if new_section is None:
+            return None
+        new_nodes = nodes[:start] + new_section + nodes[end:]
+        new_content = {**content, "content": new_nodes}
+        new_text = _derive_content_text_from_tiptap(new_content)
+
+    ok = await update_draft(
+        int(draft["id"]), new_content, new_text)
+    if not ok:
+        log.warning(
+            "apply_fix_update_draft_failed",
+            document_type=document_type,
+            draft_id=draft.get("id"))
+        return None
+
+    if debate_id is not None:
+        await _mark_council_debate_fix_applied(
+            int(debate_id), int(draft["id"]))
+
+    log.info(
+        "apply_fix_direct_patch_applied",
+        document_type=document_type,
+        section_name=section_name,
+        draft_id=draft.get("id"))
+
+    return {
+        "ok": True,
+        "new_draft_id": int(draft["id"]),
+        "draft_label": (
+            f"Direct fix applied to '{section_name}'"),
+        "scope": "section",
+        "section_regenerated": section_name,
+        "in_place": True,
+    }
+
+
 @app.post("/api/v1/documents/apply-fix")
 @limiter.limit("6/minute")
 async def post_apply_fix(
@@ -14101,6 +14499,36 @@ async def post_apply_fix(
             "section_regenerated": (
                 section_name if target == "section" else None),
         }
+
+    # June 26 2026 -- direct section-patch path. Tried FIRST.
+    # Applies the fix in place to the current draft's content_json
+    # without requiring a story plan or a full document regen. Falls
+    # through to the legacy story-plan + regen block when:
+    #   * target='document' (no specific section to patch)
+    #   * no section_name on the fix proposal
+    #   * the document_type doesn't carry a first-class section
+    #     concept here (presentation_script)
+    #   * the section / slide title doesn't match anything in the
+    #     current draft
+    #   * the Sonnet response is unparseable or violates the shape
+    #     contract
+    # The fall-through preserves the existing regen-the-whole-doc
+    # behaviour as the safety net while the direct path covers the
+    # common case (one slide's numbers are wrong / one section's
+    # claim needs softening).
+    try:
+        direct = await _try_direct_section_patch(
+            document_type=document_type, target=target,
+            section_name=str(section_name) if section_name else None,
+            patch_instruction=patch_instruction,
+            debate_id=int(debate_id) if debate_id else None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_direct_patch_unexpected_error",
+            error=str(exc), document_type=document_type)
+        direct = None
+    if direct is not None:
+        return direct
 
     # 1. Patch the story_plans row. Best-effort -- if the patch
     # write fails we surface a 500 so the caller knows nothing was
