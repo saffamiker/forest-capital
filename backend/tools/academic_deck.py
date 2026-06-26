@@ -32,6 +32,7 @@ July 1 presentation.
 from __future__ import annotations
 
 import io
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -301,6 +302,27 @@ SLIDE FORMAT CONSTRAINTS (non-negotiable, apply to every slide):
 - No sub-bullets under any circumstance.
 - Speaker notes carry the full explanation. The slide carries
   the signal.
+- BULLET STRING DISCIPLINE: Bullets are PLAIN STRINGS in the
+  bullets array. Do NOT prefix any bullet with "- ", "* ",
+  "•", or any other marker character. The PPTX renderer adds
+  the bullet glyph automatically; a leading "- " renders as
+  "• - Foo" on the slide and reads as a defect. Wrong: "- The
+  blend outperforms...". Right: "The blend outperforms...".
+- TABLE OUTPUT DISCIPLINE (applies to slides with a Required
+  table: spec -- slides 4, 7, 9, 12): emit table_data as
+  STRUCTURED JSON {{"headers": [...], "rows": [[...]]}}. The
+  schema described in each slide's "Required table:" block
+  uses pipe-delimited prose to convey the column NAMES;
+  translate that schema into the structured object on output.
+  Do NOT emit pipe characters in any string. Do NOT place
+  the table in the bullets array. Do NOT wrap header or cell
+  values in surrounding pipes. Wrong:
+    "table_data": "| Strategy | Sharpe |\\n| Blend | 0.86 |"
+    "bullets": ["| Strategy | Sharpe |", ...]
+    {{"headers": ["| Strategy", "Sharpe |"], ...}}
+  Right:
+    "table_data": {{"headers": ["Strategy", "Sharpe"],
+                    "rows": [["Blend", "0.86"], ...]}}
 
 TOKEN FORMAT NOTE (non-negotiable, apply to every slide):
 - {{{{OOS_SHARPE_IMPROVEMENT_PCT}}}} already resolves to a complete
@@ -1335,26 +1357,138 @@ def _parse_markdown_table(s: str) -> tuple[list[str], list[list[str]]]:
     return rows[0], rows[1:]
 
 
-def _slide_table(sl: dict[str, Any]) -> tuple[list[str], list[list[str]]]:
-    """Extract (headers, rows-of-strings) from a slide's table_data, or
-    ([], []) when the slide carries no usable table.
+_BULLET_MARKER_RE = re.compile(r"^\s*[-*•‣◦·]\s+")
 
-    June 25 2026 -- string fallback. The prompt forbids markdown
-    tables in table_data but a model that doesn't honour the
-    instruction could emit a string containing pipes; the legacy
-    code returned ([], []) and the slide rendered with no table.
-    Now: if table_data is a string carrying '|', route through
-    _parse_markdown_table and surface the parsed structure so the
-    slide still gets a real PPTX table object."""
+
+def _strip_bullet_marker(bullet: str) -> str:
+    """June 25 2026 -- defensive cleanup for bullet strings the
+    LLM prefixed with a marker character. The PPTX renderer adds
+    the bullet glyph automatically; a leading '- Foo' would
+    render as '• - Foo' on the slide. Strips leading '-', '*',
+    '•' (U+2022), '‣' (U+2023), '◦' (U+25E6), '·' (U+00B7) plus
+    surrounding whitespace. Idempotent."""
+    if not isinstance(bullet, str):
+        return str(bullet)
+    return _BULLET_MARKER_RE.sub("", bullet, count=1).strip()
+
+
+def _strip_cell_pipes(cell: str) -> str:
+    """June 25 2026 -- defensive cleanup for table cells the LLM
+    wrapped in pipes (e.g. emitting {'headers': ['| Strategy',
+    'Sharpe |']} instead of {'headers': ['Strategy', 'Sharpe']}).
+    Strips leading/trailing '|' + surrounding whitespace."""
+    if not isinstance(cell, str):
+        return str(cell)
+    return cell.strip().strip("|").strip()
+
+
+def _lift_pipe_table_from_bullets(
+    bullets: list[str],
+) -> tuple[list[str], list[list[str]], list[str]]:
+    """June 25 2026 -- bullets-as-table fallback. The prompt
+    forbids placing a table in the bullets array, but a model
+    that ignores the instruction occasionally emits the entire
+    table as 3+ consecutive pipe-delimited bullets. Detect that
+    pattern (3+ consecutive bullets that look like a markdown
+    table row: bullet starts with '|' OR contains two or more
+    '|' characters), parse via _parse_markdown_table, and return
+    (headers, rows, remaining_bullets) where remaining_bullets
+    has the table lines removed so they don't ALSO render in the
+    text frame as garbage prose.
+
+    Returns ([], [], bullets) unchanged when no pipe-table run is
+    detected (the common case)."""
+    def _is_table_row(s: str) -> bool:
+        s = (s or "").strip()
+        if not s:
+            return False
+        return s.startswith("|") or s.count("|") >= 2
+
+    n = len(bullets)
+    # Scan for the longest consecutive run of table-row bullets.
+    best_start, best_len = -1, 0
+    i = 0
+    while i < n:
+        if _is_table_row(bullets[i]):
+            j = i
+            while j < n and _is_table_row(bullets[j]):
+                j += 1
+            run_len = j - i
+            if run_len > best_len:
+                best_start, best_len = i, run_len
+            i = j
+        else:
+            i += 1
+    if best_len < 3:
+        return [], [], bullets
+    # Reconstruct the markdown table by joining the run with
+    # newlines (each bullet was its own row) and parsing.
+    block = "\n".join(bullets[best_start:best_start + best_len])
+    headers, rows = _parse_markdown_table(block)
+    if not headers or not rows:
+        return [], [], bullets
+    # Remove the table bullets from the surviving bullet list.
+    remaining = (
+        bullets[:best_start] + bullets[best_start + best_len:])
+    return headers, rows, remaining
+
+
+def _slide_table(
+    sl: dict[str, Any],
+) -> tuple[list[str], list[list[str]], list[str] | None]:
+    """Extract (headers, rows-of-strings, bullets_to_use) from a
+    slide's table_data + bullets. Returns ([], [], None) when the
+    slide carries no usable table -- the third element is None to
+    signal 'no bullet edit needed' (the caller keeps the slide's
+    original bullets list); when non-None it's the bullets list
+    minus any rows that were lifted from a pipe-table-in-bullets
+    fallback below.
+
+    June 25 2026 -- three sources tried in order:
+      1. table_data dict with structured {headers, rows} (canonical
+         prompt-compliant shape)
+      2. table_data string containing pipes (the LLM-emitted
+         markdown-table string; parsed via _parse_markdown_table)
+      3. bullets list with a 3+ consecutive pipe-row run (the LLM
+         dumped the table into the bullets array; lifted via
+         _lift_pipe_table_from_bullets and the lifted bullets are
+         removed from the surviving bullets list so they don't
+         ALSO render as text-frame garbage)
+
+    Every cell value is run through _strip_cell_pipes for the
+    case where the LLM wrapped headers / cells in surrounding
+    pipes (e.g. {'headers': ['| Strategy', 'Sharpe |']})."""
     td = sl.get("table_data")
+    # Source 1: structured dict shape.
+    if isinstance(td, dict):
+        headers = [_strip_cell_pipes(h)
+                   for h in (td.get("headers") or [])]
+        rows = [[_strip_cell_pipes(c) for c in r]
+                for r in (td.get("rows") or [])
+                if isinstance(r, (list, tuple))]
+        if headers and rows:
+            return headers, rows, None
+    # Source 2: pipe-delimited string in table_data.
     if isinstance(td, str) and "|" in td:
-        return _parse_markdown_table(td)
-    if not isinstance(td, dict):
-        return [], []
-    headers = [str(h) for h in (td.get("headers") or [])]
-    rows = [[str(c) for c in r] for r in (td.get("rows") or [])
-            if isinstance(r, (list, tuple))]
-    return (headers, rows) if headers and rows else ([], [])
+        headers, rows = _parse_markdown_table(td)
+        if headers and rows:
+            return (
+                [_strip_cell_pipes(h) for h in headers],
+                [[_strip_cell_pipes(c) for c in r] for r in rows],
+                None,
+            )
+    # Source 3: 3+ consecutive pipe-row bullets.
+    bullets = sl.get("bullets") or []
+    if isinstance(bullets, list):
+        headers, rows, remaining = _lift_pipe_table_from_bullets(
+            [str(b) for b in bullets])
+        if headers and rows:
+            return (
+                [_strip_cell_pipes(h) for h in headers],
+                [[_strip_cell_pipes(c) for c in r] for r in rows],
+                remaining,
+            )
+    return [], [], None
 
 
 # Chart-description phrases that should be stripped from bullets on
@@ -1409,7 +1543,25 @@ def _render_content_slide(prs, sl, chart_png, idx, total) -> None:
         bullets = _strip_chart_bullets(bullets, idx)
         if not bullets:
             bullets = [_DATA_PENDING_BULLET]
-        headers, rows = _slide_table(sl)
+        # June 25 2026 -- _slide_table can lift a pipe-table out
+        # of the bullets array (the 'LLM dumped the table into
+        # bullets' fallback). When it does, the third return
+        # value is the bullets list MINUS the lifted rows so the
+        # text frame doesn't ALSO render those rows as prose
+        # garbage. None means 'no edit needed'.
+        headers, rows, surviving = _slide_table(sl)
+        if surviving is not None:
+            bullets = surviving or [_DATA_PENDING_BULLET]
+        # June 25 2026 -- strip leading bullet-marker characters
+        # ('- ', '* ', '•', etc.) from each bullet before writing
+        # to the text frame. Defence-in-depth alongside the BULLET
+        # STRING DISCIPLINE prompt instruction. The PPTX renderer
+        # adds the bullet glyph automatically; a leading '- '
+        # would otherwise render as '• - Foo' on the slide.
+        bullets = [_strip_bullet_marker(b) for b in bullets]
+        bullets = [b for b in bullets if b.strip()]
+        if not bullets:
+            bullets = [_DATA_PENDING_BULLET]
         has_table = bool(headers and rows)
         has_chart = idx in SLIDE_CHARTS
         role = SLIDE_CHARTS.get(idx, "chart")
