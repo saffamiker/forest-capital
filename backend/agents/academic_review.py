@@ -3076,14 +3076,44 @@ async def run_arbiter_fix_proposal(
     # Pull the current story plan for the target document so the
     # arbiter can scope the patch correctly. Falls back to a generic
     # context note when the story plan is unavailable.
+    #
+    # June 26 2026 -- deck-row lookup hash-join fix. The previous
+    # implementation queried get_cached_story_plan(dh, document_type)
+    # with dh = current_data_hash() (a 16-char bare hash). But
+    # story_plans.data_hash for deck rows is the COMPOUND storage
+    # hash that refresh_story_plan persists via
+    # cache_key_with_brief_and_appendix
+    # ("<data_hash>|<brief_hash>|<appendix_hash>"). The exact-match
+    # join never hit a deck row, so the arbiter wrote its fix
+    # proposal WITHOUT the deck's story-plan context -- the
+    # numeric anchors + slide-level guidance the arbiter is meant
+    # to scope the patch against were silently missing.
+    #
+    # The same diagnosis + fix already shipped at the script DOCX
+    # endpoint + _deck_story_plan_status + (this PR's) Apply Fix --
+    # all switched to get_latest_story_plan(document_type,
+    # exclude_fallback=True) which queries by document_type only +
+    # filters fallback rows at the SQL layer.
+    #
+    # Scope: presentation_deck only. Brief / appendix / script use
+    # the existing get_cached_story_plan pattern -- brief's
+    # cache_key_with_brief has a bare-data_hash fallback when
+    # brief_hash is empty (tools/brief_grounding.py:193) so the
+    # legacy join often still hits the brief row; appendix +
+    # script don't carry their own story_plans rows.
     story_plan: dict[str, Any] | None = None
     try:
-        from tools.story_plan import get_cached_story_plan
         from tools.audit_assembler import current_data_hash
-        dh = await current_data_hash() or ""
-        if dh:
-            story_plan = await get_cached_story_plan(
-                dh, document_type)
+        if document_type == "presentation_deck":
+            from tools.story_plan import get_latest_story_plan
+            story_plan = await get_latest_story_plan(
+                "deck", exclude_fallback=True)
+        else:
+            from tools.story_plan import get_cached_story_plan
+            dh = await current_data_hash() or ""
+            if dh:
+                story_plan = await get_cached_story_plan(
+                    dh, document_type)
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "fix_proposal_story_plan_read_failed",
