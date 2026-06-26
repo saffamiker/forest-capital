@@ -78,12 +78,29 @@ export interface AuditWarnings {
     direction:   AuditFlag[]
     consistency: AuditFlag[]
     citation:    AuditFlag[]
+    // June 26 2026 -- the backend has been emitting these five
+    // additional check categories (document_audit.py flag_counts
+    // sums all of them into `total`) but the banner never
+    // rendered FlagGroup blocks for them. Result: a draft with
+    // e.g. 3 numeric + 11 story_plan flags showed "Audit flagged
+    // 14 items" in the header but only 3 in the expanded view.
+    // Adding here so the banner can iterate all categories.
+    story_plan?:              AuditFlag[]
+    required_citations?:      AuditFlag[]
+    section_word_count?:      AuditFlag[]
+    unresolved_placeholders?: AuditFlag[]
+    raw_numeric?:             AuditFlag[]
   }
   flag_counts: {
     numeric:     number
     direction:   number
     consistency: number
     citation:    number
+    story_plan?:              number
+    required_citations?:      number
+    section_word_count?:      number
+    unresolved_placeholders?: number
+    raw_numeric?:             number
     total:       number
   }
   skipped?: Record<string, string>

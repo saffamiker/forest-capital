@@ -141,7 +141,15 @@ describe('AuditWarningsBanner', () => {
     expect(screen.queryByTestId('audit-warnings-banner')).toBeNull()
   })
 
-  it('renders skipped-checks footer when present', () => {
+  it('renders skipped-checks footer with human-readable labels', () => {
+    // June 26 2026 -- the banner's skipped section now uses
+    // human-readable labels for both the check name (via
+    // SKIPPED_CHECK_LABELS) and the reason string (via
+    // SKIPPED_REASON_LABELS) instead of the raw codes the test
+    // previously asserted. An unmapped reason falls back to the
+    // raw string so the test below covers both paths: the
+    // 'citation' check name maps to its label, the unknown
+    // reason 'no References section found' passes through.
     render(<AuditWarningsBanner draftId={6} audit={makeAudit({
       flag_counts: {
         numeric: 1, direction: 0, consistency: 0,
@@ -152,11 +160,26 @@ describe('AuditWarningsBanner', () => {
                     generated: 0.75, cache: 0.6291 }],
         direction: [], consistency: [], citation: [],
       },
-      skipped: { citation: 'no References section found' },
+      skipped: {
+        citation: 'no References section found',
+        story_plan:
+          'substitution_architecture_supersedes_this_check',
+      },
     })} />)
     fireEvent.click(screen.getByText(/Audit flagged 1 item/))
-    expect(screen.getByText(/Skipped:/)).toBeInTheDocument()
-    expect(screen.getByText(/citation \(no References section found\)/))
-      .toBeInTheDocument()
+    expect(screen.getByText(/Skipped checks:/)).toBeInTheDocument()
+    // Citation check name -> human label; unknown reason
+    // passes through unchanged.
+    expect(
+      screen.getByText(/Citation completeness/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/no References section found/)
+    ).toBeInTheDocument()
+    // Story plan check + known reason -> both human labels.
+    expect(
+      screen.getByText(/Story plan alignment/)).toBeInTheDocument()
+    expect(screen.getByText(
+      /substitution-architecture checks already cover/
+    )).toBeInTheDocument()
   })
 })
