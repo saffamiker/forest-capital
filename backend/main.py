@@ -5649,10 +5649,24 @@ async def _generate_script_document(
         _script_hash = await _curr_hash()
     except Exception:  # noqa: BLE001
         _script_hash = None
+
+    # June 26 2026 -- run the document audit against the
+    # generated content_text so the script draft carries
+    # audit_warnings just like the brief / appendix / deck do.
+    # The editor's AuditWarningsBanner reads draft.audit_warnings
+    # and renders the flagged-items list; without this call the
+    # script draft was always landing with audit_warnings=null
+    # and the banner stayed empty even when the script had real
+    # issues (numeric / direction / consistency / citation
+    # flags). Mirrors the pattern in _generate_brief_document +
+    # _generate_deck_document.
+    audit_warnings = await _run_document_audit(
+        result["content_text"], "presentation_script", email)
     new_draft = await create_draft(
         "presentation_script", email, "Presentation Script",
         result["content_json"], result["content_text"],
         created_from="generated",
+        audit_warnings=audit_warnings,
         data_hash=_script_hash)
     if new_draft is None:
         ref = uuid.uuid4().hex[:8]
