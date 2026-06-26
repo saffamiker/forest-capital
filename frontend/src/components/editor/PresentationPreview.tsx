@@ -109,11 +109,33 @@ export default function PresentationPreview({ slides, onClose }: Props) {
                 height: CANVAS_HEIGHT * scale,
                 background: slide.background || '#FFFFFF',
               }}>
-              {slide.elements.map((el) => (el.type === 'text'
-                ? <PreviewText key={el.id} el={el} scale={scale} />
-                : <PreviewChart key={el.id} chartKey={el.chartKey}
+              {slide.elements.map((el) => {
+                if (el.type === 'text') {
+                  return <PreviewText key={el.id} el={el}
+                                      scale={scale} />
+                }
+                if (el.type === 'chart') {
+                  return <PreviewChart key={el.id}
+                    chartKey={el.chartKey}
                     x={el.x * scale} y={el.y * scale}
-                    w={el.width * scale} h={el.height * scale} />))}
+                    w={el.width * scale} h={el.height * scale} />
+                }
+                // June 26 2026 -- new 'table' element type. The
+                // presentation preview shows a dashed-border
+                // placeholder for now; the centre-panel editor
+                // surfaces the full HTML table preview. PPTX
+                // export builds the real <a:tbl>.
+                return (
+                  <div key={el.id} style={{
+                    position: 'absolute',
+                    left: el.x * scale, top: el.y * scale,
+                    width: el.width * scale,
+                    height: el.height * scale,
+                    border: '1px dashed #94A3B8',
+                    background: 'rgba(241, 245, 249, 0.6)',
+                  }} />
+                )
+              })}
             </div>
           ) : (
             <p className="text-center" style={{ color: '#E2E8F0' }}>

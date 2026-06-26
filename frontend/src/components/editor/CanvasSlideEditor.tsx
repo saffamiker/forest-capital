@@ -474,13 +474,38 @@ export default function CanvasSlideEditor({
                       onTransformEnd={onTransformEnd(el)} />
                   )
                 }
-                return (
-                  <CanvasChartNode key={el.id} element={el}
-                    draggable={!el.locked}
-                    onSelect={() => onChartClick(el)}
-                    onDragEnd={onDragEnd(el)}
-                    onTransformEnd={onTransformEnd(el)} />
-                )
+                if (el.type === 'chart') {
+                  return (
+                    <CanvasChartNode key={el.id} element={el}
+                      draggable={!el.locked}
+                      onSelect={() => onChartClick(el)}
+                      onDragEnd={onDragEnd(el)}
+                      onTransformEnd={onTransformEnd(el)} />
+                  )
+                }
+                // June 26 2026 -- new 'table' element type.
+                // Renders as a Konva placeholder Rect (the
+                // full HTML table preview lives in the centre
+                // panel's React layer; the canvas just reserves
+                // the bounding box for drag/select). PPTX
+                // export builds the real <a:tbl> from the
+                // element's table_config.
+                if (el.type === 'table') {
+                  return (
+                    <Rect key={el.id} id={el.id} name="element"
+                      x={el.x} y={el.y}
+                      width={el.width} height={el.height}
+                      fill="rgba(241, 245, 249, 0.6)"
+                      stroke="#94A3B8" strokeWidth={1}
+                      dash={[4, 4]}
+                      draggable={!el.locked}
+                      onClick={() => setSelectedId(el.id)}
+                      onTap={() => setSelectedId(el.id)}
+                      onDragEnd={onDragEnd(el)}
+                      onTransformEnd={onTransformEnd(el)} />
+                  )
+                }
+                return null
               })}
 
               {/* Resize Transformer — desktop / pointer devices only.
