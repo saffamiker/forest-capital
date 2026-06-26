@@ -1833,6 +1833,169 @@ def _canvas_text(slide, el: dict[str, Any], left, top, width, height) -> None:
         run.font.color.rgb = color
 
 
+# ── Editor-export markdown-table extraction ──────────────────────────────────
+# June 26 2026 -- when a deck-draft text element's content carries a
+# markdown table (3+ consecutive '| ... |' lines), the editor export
+# now splits that text element into:
+#   prose-before -> rendered via _canvas_text
+#   table        -> rendered via _table -> real PPTX <a:tbl>
+#   prose-after  -> rendered via _canvas_text
+# Without this split the body text rendered as plain pipe-delimited
+# strings in a textbox (zero <a:tbl> shapes in the PPTX), which
+# regressed reviewability of every slide that carried a comparison
+# table. The split logic looks for ONE table block per text element
+# (the common case for the deck builder's _deck_slide_with_chart
+# output); multiple tables in a single element would lift only the
+# first and leave the rest as prose.
+
+
+def _extract_markdown_table_from_text(
+    text: str,
+) -> tuple[str, tuple[list[str], list[list[str]]] | None, str]:
+    """Returns (prose_before, (headers, rows) | None, prose_after).
+
+    Scans the given text for the LONGEST consecutive run of lines
+    matching the pipe-row regex (^\\s*\\|.*\\|\\s*$). A run of 2+
+    lines is parsed via _parse_markdown_table; on success the run
+    is removed from the surviving prose and returned as
+    (headers, rows). The 2-line minimum is the markdown table
+    bare-minimum (header + separator OR header + one data row).
+
+    Returns (text, None, '') unchanged when no qualifying run is
+    found -- the caller renders the original text as-is."""
+    if not text or "|" not in text:
+        return text, None, ""
+    lines = text.splitlines()
+    pipe_re = _PIPE_ROW_RE
+    n = len(lines)
+
+    # Find the longest consecutive run of pipe-row lines.
+    best_start, best_len = -1, 0
+    i = 0
+    while i < n:
+        if pipe_re.match(lines[i] or ""):
+            j = i
+            while j < n and pipe_re.match(lines[j] or ""):
+                j += 1
+            run_len = j - i
+            if run_len > best_len:
+                best_start, best_len = i, run_len
+            i = j
+        else:
+            i += 1
+
+    # Markdown table needs at least 2 lines (header + sep or
+    # header + data); a single pipe line is not enough.
+    if best_len < 2:
+        return text, None, ""
+
+    block = "\n".join(lines[best_start:best_start + best_len])
+    headers, rows = _parse_markdown_table(block)
+    if not headers or not rows:
+        return text, None, ""
+
+    prose_before = "\n".join(lines[:best_start]).rstrip()
+    prose_after = "\n".join(
+        lines[best_start + best_len:]).lstrip("\n")
+    return prose_before, (headers, rows), prose_after
+
+
+def _canvas_table(
+    slide, headers: list[str], rows: list[list[str]],
+    left, top, width, height,
+) -> None:
+    """Render a markdown-derived table as a native PPTX table
+    inside the editor-export canvas region. Reuses the styling
+    contract of _table (navy header band, alternating row fill,
+    Pt 11/10 sizing) but accepts EMU-typed left/top/width to
+    match the canvas coordinate flow + caps row count by the
+    available height (Inches(0.32) per row, conservative)."""
+    from pptx.util import Emu, Inches as _In, Pt as _Pt
+
+    if not headers or not rows:
+        return
+    max_rows_for_height = max(1, int(height / _In(0.32)))
+    rows = rows[: max_rows_for_height - 1] if (
+        max_rows_for_height >= 2) else rows[:1]
+    n_rows, n_cols = len(rows) + 1, len(headers)
+    tbl_shape = slide.shapes.add_table(
+        n_rows, n_cols, left, top, width, height)
+    table = tbl_shape.table
+    for c, label in enumerate(headers):
+        cell = table.cell(0, c)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = _NAVY
+        para = cell.text_frame.paragraphs[0]
+        run = para.add_run()
+        run.text = str(label)
+        run.font.size = _Pt(11)
+        run.font.bold = True
+        run.font.color.rgb = _WHITE
+    for r, row in enumerate(rows, start=1):
+        for c, value in enumerate(row):
+            if c >= n_cols:
+                break
+            cell = table.cell(r, c)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = (
+                _WHITE if r % 2
+                else RGBColor(0xF1, 0xF5, 0xF9))
+            para = cell.text_frame.paragraphs[0]
+            run = para.add_run()
+            run.text = str(value)
+            run.font.size = _Pt(10)
+
+
+def _canvas_text_or_table(
+    slide, el: dict[str, Any], left, top, width, height,
+) -> None:
+    """Wraps _canvas_text: when the element's content carries a
+    parseable markdown table, splits into prose-before / table /
+    prose-after sub-regions and renders each in its own shape so
+    the table becomes a real PPTX <a:tbl> instead of raw pipes in
+    a textbox. Falls back to plain _canvas_text when no table is
+    detected."""
+    from pptx.util import Emu
+
+    content = str(el.get("content") or "")
+    prose_before, table, prose_after = (
+        _extract_markdown_table_from_text(content))
+    if table is None:
+        _canvas_text(slide, el, left, top, width, height)
+        return
+
+    headers, rows = table
+
+    # Vertical layout: split the height into (prose_before |
+    # table | prose_after) proportionally to line count.
+    pb_lines = max(
+        prose_before.count("\n") + 1, 1) if prose_before else 0
+    pa_lines = max(
+        prose_after.count("\n") + 1, 1) if prose_after else 0
+    table_lines = len(rows) + 1
+    total_lines = pb_lines + table_lines + pa_lines
+    if total_lines <= 0:
+        return
+    h_per_line = int(height / total_lines)
+    pb_h = Emu(h_per_line * pb_lines) if pb_lines else Emu(0)
+    table_h = Emu(h_per_line * table_lines)
+    pa_h = Emu(h_per_line * pa_lines) if pa_lines else Emu(0)
+
+    cursor_top = top
+    if pb_lines:
+        pb_el = dict(el)
+        pb_el["content"] = prose_before
+        _canvas_text(slide, pb_el, left, cursor_top, width, pb_h)
+        cursor_top = Emu(int(cursor_top) + int(pb_h))
+    _canvas_table(
+        slide, headers, rows, left, cursor_top, width, table_h)
+    cursor_top = Emu(int(cursor_top) + int(table_h))
+    if pa_lines:
+        pa_el = dict(el)
+        pa_el["content"] = prose_after
+        _canvas_text(slide, pa_el, left, cursor_top, width, pa_h)
+
+
 def build_editor_pptx(
     draft: dict[str, Any],
     chart_pngs: dict[str, bytes] | None = None,
@@ -1884,7 +2047,17 @@ def build_editor_pptx(
             width = Emu(_emu_x(el.get("width", 0)))
             height = Emu(_emu_y(el.get("height", 0)))
             if el.get("type") == "text":
-                _canvas_text(s, el, left, top, width, height)
+                # June 26 2026 -- _canvas_text_or_table splits the
+                # text into prose-before / markdown-table / prose-
+                # after sub-regions when the content carries a
+                # pipe-delimited table, so the table renders as a
+                # real PPTX <a:tbl> instead of raw pipes in a
+                # textbox. Falls through to plain _canvas_text for
+                # text elements with no detectable table -- so
+                # existing behaviour is preserved for non-table
+                # bodies.
+                _canvas_text_or_table(
+                    s, el, left, top, width, height)
             elif el.get("type") == "chart":
                 png = pngs.get(str(el.get("id")))
                 if png:

@@ -182,11 +182,11 @@ def _canvas_slide(slide_id: int, title: str, content: str) -> dict[str, Any]:
         "background": "#FFFFFF",
         "speaker_notes": "",
         "elements": [
-            {"id": "el_001", "type": "text",
+            {"id": f"s{slide_id}_title", "type": "text",
              "x": 60, "y": 40, "width": 840, "height": 80,
              "content": title, "fontSize": 36, "fontWeight": "bold",
              "fontStyle": "normal", "color": "#1B2A4A", "locked": False},
-            {"id": "el_002", "type": "text",
+            {"id": f"s{slide_id}_body", "type": "text",
              "x": 60, "y": 150, "width": 840, "height": 330,
              "content": content, "fontSize": 18, "fontWeight": "normal",
              "fontStyle": "normal", "color": "#333333", "locked": False},
@@ -289,28 +289,39 @@ def _deck_slide_with_chart(
       - With chart: bullets 60,150 -> 460,470 (left 400px),
                     chart   500,150 -> 900,470 (right 400x320).
       - Without chart: bullets 60,150 -> 900,470 (full 840px).
-    """
+
+    June 26 2026 -- element ids namespaced by slide_id ('s4_title',
+    's4_body', 's4_chart' etc.). Previously every slide's elements
+    were hardcoded 'el_001'/'el_002'/'el_003', which broke the
+    editor-export chart lookup: build_editor_pptx builds
+    chart_pngs as {element_id: png} and looks up by id at render
+    time. With every chart element on every slide carrying id
+    'el_003' the dict comprehension overwrote each render onto a
+    single key, then every slide's pngs.get('el_003') returned
+    the same PNG -- python-pptx deduplicated identical bytes into
+    a single media/image1.png referenced from every slide. The
+    symptom was 'every chart slide showing the same chart'."""
     elements: list[dict[str, Any]] = [
-        {"id": "el_001", "type": "text",
+        {"id": f"s{slide_id}_title", "type": "text",
          "x": 60, "y": 40, "width": 840, "height": 80,
          "content": title, "fontSize": 36, "fontWeight": "bold",
          "fontStyle": "normal", "color": "#1B2A4A", "locked": False},
     ]
     if chart_key:
         elements.append({
-            "id": "el_002", "type": "text",
+            "id": f"s{slide_id}_body", "type": "text",
             "x": 60, "y": 150, "width": 400, "height": 320,
             "content": body, "fontSize": 16, "fontWeight": "normal",
             "fontStyle": "normal", "color": "#333333", "locked": False,
         })
         elements.append({
-            "id": "el_003", "type": "chart",
+            "id": f"s{slide_id}_chart", "type": "chart",
             "x": 500, "y": 150, "width": 400, "height": 320,
             "chartKey": chart_key, "verified": False, "locked": False,
         })
     else:
         elements.append({
-            "id": "el_002", "type": "text",
+            "id": f"s{slide_id}_body", "type": "text",
             "x": 60, "y": 150, "width": 840, "height": 320,
             "content": body, "fontSize": 18, "fontWeight": "normal",
             "fontStyle": "normal", "color": "#333333", "locked": False,
