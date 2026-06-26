@@ -14105,31 +14105,118 @@ async def post_apply_fix(
     # 1. Patch the story_plans row. Best-effort -- if the patch
     # write fails we surface a 500 so the caller knows nothing was
     # applied and the existing draft is unchanged.
+    #
+    # June 26 2026 -- deck-row lookup hash-join fix. The previous
+    # implementation queried
+    #   SELECT ... WHERE data_hash = current_data_hash() AND
+    #               document_type = :t
+    # but story_plans.data_hash for deck rows is the COMPOUND
+    # storage hash that refresh_story_plan persists via
+    # cache_key_with_brief_and_appendix
+    # ("<data_hash>|<brief_hash>|<appendix_hash>"), while
+    # current_data_hash() returns just the 16-char bare market-data
+    # hash. The exact-match join never hit a deck row, so apply-fix
+    # always 409'd "No story plan to patch" for the deck even when
+    # a fresh plan was sitting in the table.
+    #
+    # The same diagnosis + fix already shipped at two other sites
+    # (main.py:_deck_story_plan_status @ ~9301 and the script DOCX
+    # endpoint @ ~16116) -- both switched to
+    # get_latest_story_plan(document_type, exclude_fallback=True)
+    # which queries by document_type only + filters fallback rows
+    # at the SQL layer. This brings apply-fix in line for the deck.
+    #
+    # Scope: presentation_deck only. Brief's cache_key_with_brief
+    # has a bare-data_hash fallback when brief_hash is empty
+    # (see tools/brief_grounding.py:193), so the legacy join often
+    # still hits the brief row. Extending the fix to brief is a
+    # future tightening if real-world drift surfaces; the deck is
+    # the confirmed-broken case + the only one in scope here.
     try:
         from tools.audit_assembler import current_data_hash
+        from tools.story_plan import get_latest_story_plan
         from sqlalchemy import text as _text
         from database import (
             AsyncSessionLocal,  # type: ignore[attr-defined]
         )
-        dh = await current_data_hash() or ""
         if AsyncSessionLocal is None:
             raise RuntimeError("database unavailable")
+
+        # The story_plans table uses short document_type values
+        # ('deck', 'brief'); the apply-fix endpoint takes the long
+        # names. Translate once at the lookup boundary.
+        _SHORT_TYPE = {
+            "presentation_deck": "deck",
+            "executive_brief":   "brief",
+        }
+        sp_doc_type = _SHORT_TYPE.get(document_type, document_type)
+
         async with AsyncSessionLocal() as s:
-            r = await s.execute(_text(
-                "SELECT plan_json, central_argument FROM story_plans "
-                "WHERE data_hash = :h AND document_type = :t "
-                "ORDER BY computed_at DESC LIMIT 1"),
-                {"h": dh, "t": document_type})
-            row = r.fetchone()
-            if not row:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "No story plan to patch -- regenerate the "
-                        "document first to seed a plan, then re-run "
-                        "apply-fix."))
-            plan_json = row[0] or {}
-            central = row[1] or ""
+            plan_json: dict[str, Any] = {}
+            central: str = ""
+            update_hash: str = ""
+            if document_type == "presentation_deck":
+                # Deck-row hash-join fix path: query by
+                # document_type only (excluding fallback rows),
+                # then route the UPDATE via the row's actual
+                # storage hash surfaced as _storage_hash.
+                plan = await get_latest_story_plan(
+                    "deck", exclude_fallback=True)
+                if not plan:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "No story plan to patch -- regenerate "
+                            "the document first to seed a plan, "
+                            "then re-run apply-fix."))
+                # Reconstruct the plan_json dict in the same shape
+                # the legacy SELECT returned: strip the synthetic
+                # / column-only fields that get_latest_story_plan
+                # merges in. The plan_json column stores everything
+                # except the indexed columns broken out for query.
+                _SYNTHESIZED = {
+                    "full_script", "anticipated_questions",
+                    "dissenting_view", "limitations_surfaced",
+                    "computed_at",
+                }
+                plan_json = {
+                    k: v for k, v in plan.items()
+                    if not k.startswith("_")
+                    and k not in _SYNTHESIZED
+                }
+                central = str(
+                    plan_json.pop("central_argument", "") or "")
+                update_hash = str(plan.get("_storage_hash") or "")
+                if not update_hash:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Story plan found but its storage "
+                            "hash is unavailable; cannot route "
+                            "the patch."))
+            else:
+                # Legacy bare-hash path for brief / appendix /
+                # script. Brief works because cache_key_with_brief
+                # falls back to data_hash alone when brief_hash is
+                # empty; appendix + script don't carry their own
+                # story_plans rows, so the SELECT 409s as before.
+                dh = await current_data_hash() or ""
+                r = await s.execute(_text(
+                    "SELECT plan_json, central_argument FROM story_plans "
+                    "WHERE data_hash = :h AND document_type = :t "
+                    "ORDER BY computed_at DESC LIMIT 1"),
+                    {"h": dh, "t": sp_doc_type})
+                row = r.fetchone()
+                if not row:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "No story plan to patch -- regenerate the "
+                            "document first to seed a plan, then re-run "
+                            "apply-fix."))
+                plan_json = row[0] or {}
+                central = row[1] or ""
+                update_hash = dh
             # Apply the patch.
             if target == "document":
                 central = (
@@ -14166,7 +14253,13 @@ async def post_apply_fix(
                         detail=(
                             f"Section '{section_name}' not found "
                             f"in the {document_type} story plan."))
-            # Persist the patched plan.
+            # Persist the patched plan. UPDATE routes via
+            # update_hash + sp_doc_type so the deck path hits the
+            # composite-keyed row (update_hash = _storage_hash) and
+            # the brief / legacy path hits the bare-hash row
+            # (update_hash = current_data_hash()). Same unique
+            # (data_hash, document_type) constraint from migration
+            # 056 guarantees a single matching row in both cases.
             await s.execute(_text(
                 "UPDATE story_plans SET "
                 "plan_json = CAST(:p AS JSONB), "
@@ -14175,7 +14268,7 @@ async def post_apply_fix(
                 {
                     "p": json.dumps(plan_json),
                     "c": central,
-                    "h": dh, "t": document_type,
+                    "h": update_hash, "t": sp_doc_type,
                 })
             await s.commit()
     except HTTPException:
