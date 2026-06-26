@@ -95,7 +95,7 @@ def _stub_brief_appendix_grounding(monkeypatch):
     NOT fire during the document-generation contract tests. CI
     runs against a fresh DB with no drafts seeded; the stub
     bypasses the gate without requiring DB fixtures."""
-    async def _fake_brief(_email):
+    async def _fake_brief():
         return {
             "content_text": (
                 "## Executive Summary\n\nThe blend outperforms "
@@ -114,7 +114,7 @@ def _stub_brief_appendix_grounding(monkeypatch):
             "draft_id": 1,
         }
 
-    async def _fake_appendix(_email):
+    async def _fake_appendix():
         return {
             "content_text": (
                 "## Data Sources and Methodology\n\nS&P 500 + "

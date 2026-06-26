@@ -73,11 +73,11 @@ class TestAppendixPreflightHashMatch:
          stale -> 409 listing the stale metrics)"""
 
     def _stub_brief_and_appendix_grounding(self, monkeypatch):
-        async def _fake_brief(_email):
+        async def _fake_brief():
             return {"content_text": "brief body",
                     "content_hash": "h", "draft_id": 1}
 
-        async def _fake_appendix(_email):
+        async def _fake_appendix():
             return {"content_text": "appendix body",
                     "content_hash": "h", "draft_id": 2}
 
