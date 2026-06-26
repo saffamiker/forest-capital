@@ -16792,8 +16792,22 @@ async def _finalize_deck(
     try:
         from tools.editor_content import deck_slides_to_editor
         from tools.editor_drafts import create_draft
+        from tools.chart_config_defaults import (
+            default_strategy_names_from_cache,
+        )
 
-        content_json, content_text = deck_slides_to_editor(slides)
+        # June 26 2026 -- strategy_names sourced from the live
+        # strategy_results cache so each chart_config's series
+        # list (and each table_config's rows list) gets
+        # prepopulated with every strategy in cache order, all
+        # visible by default. The editor's Configure panel can
+        # then toggle individual series off. Falls back to [] when
+        # the cache is empty (cold env / pre-warm); the renderer's
+        # fallback path handles the absent-series case unchanged.
+        strategy_names = default_strategy_names_from_cache(
+            data.get("strategy_results"))
+        content_json, content_text = deck_slides_to_editor(
+            slides, strategy_names=strategy_names)
 
         # ── Concern 7h: pre-submission adversarial critic ─────
         try:
