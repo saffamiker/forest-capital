@@ -205,20 +205,27 @@ def cache_key_with_brief(
     return f"{data_hash}|{brief_hash}"
 
 
-async def get_brief_for_grounding(
-    email: str,
-) -> dict[str, Any] | None:
-    """Fetches the user's current executive_brief editor draft.
+async def get_brief_for_grounding() -> dict[str, Any] | None:
+    """Fetches the team's current executive_brief editor draft.
     Returns {content_text, content_hash, draft_id} when a non-
     empty draft exists, None otherwise.
 
     None is the signal the deck + appendix gates use to raise
     HTTPException(409, "Generate the executive brief first").
     Fail-open at the read level: a DB error returns None and the
-    caller treats it as no brief available."""
+    caller treats it as no brief available.
+
+    June 25 2026 -- team-shared lookup via
+    get_current_draft_by_type. The email parameter previously on
+    this signature has been removed: per the team-shared
+    documents architecture (PR #399 / #410), all team members
+    have equal generation rights and the cascade gate must pass
+    when ANY current non-deleted brief exists, not just when
+    the SESSION USER owns it. Bob's brief is Mike's brief is
+    Molly's brief."""
     try:
-        from tools.editor_drafts import get_current_draft
-        draft = await get_current_draft(email, "executive_brief")
+        from tools.editor_drafts import get_current_draft_by_type
+        draft = await get_current_draft_by_type("executive_brief")
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "brief_grounding_draft_read_failed", error=str(exc))
@@ -235,10 +242,8 @@ async def get_brief_for_grounding(
     }
 
 
-async def get_appendix_for_grounding(
-    email: str,
-) -> dict[str, Any] | None:
-    """Fetches the user's current analytical_appendix editor
+async def get_appendix_for_grounding() -> dict[str, Any] | None:
+    """Fetches the team's current analytical_appendix editor
     draft. Returns {content_text, content_hash, draft_id} when a
     non-empty draft exists, None otherwise.
 
@@ -254,10 +259,14 @@ async def get_appendix_for_grounding(
     None is the signal the deck gate uses to raise
     HTTPException(409, "Generate the analytical appendix
     first"). Fail-open at the read level.
+
+    June 25 2026 -- team-shared lookup (see
+    get_brief_for_grounding for the architectural rationale).
     """
     try:
-        from tools.editor_drafts import get_current_draft
-        draft = await get_current_draft(email, "analytical_appendix")
+        from tools.editor_drafts import get_current_draft_by_type
+        draft = await get_current_draft_by_type(
+            "analytical_appendix")
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "appendix_grounding_draft_read_failed", error=str(exc))

@@ -15350,7 +15350,7 @@ async def _generate_appendix_document(
     # would generate independently from raw cache and risk
     # framing drift. 409 surfaces inline in the editor.
     from tools.brief_grounding import get_brief_for_grounding
-    brief_grounding = await get_brief_for_grounding(email)
+    brief_grounding = await get_brief_for_grounding()
     if brief_grounding is None:
         raise HTTPException(
             status_code=409,
@@ -16620,7 +16620,7 @@ async def _generate_deck_document(
     from tools.brief_grounding import (
         get_appendix_for_grounding, get_brief_for_grounding,
     )
-    brief_grounding = await get_brief_for_grounding(email)
+    brief_grounding = await get_brief_for_grounding()
     if brief_grounding is None:
         raise HTTPException(
             status_code=409,
@@ -16630,7 +16630,7 @@ async def _generate_deck_document(
                 "document in the generation order "
                 "(brief -> appendix -> deck) and grounds itself "
                 "in both upstream documents."))
-    appendix_grounding = await get_appendix_for_grounding(email)
+    appendix_grounding = await get_appendix_for_grounding()
     if appendix_grounding is None:
         raise HTTPException(
             status_code=409,
