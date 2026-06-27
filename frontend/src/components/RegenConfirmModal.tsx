@@ -32,13 +32,22 @@ export interface RegenConfirmModalProps {
   documentName: string
   onCancel:  () => void
   onConfirm: () => void
-  /** June 25 2026 -- when supplied (and non-empty), the modal
-   *  swaps to 'Regeneration Warning' framing and renders the
-   *  list of unresolved critical audit-finding check names. Max
-   *  5 surfaced; the rest collapse under '… and N more'. Empty
-   *  array or undefined leaves the legacy 'Regenerate <doc>?'
-   *  framing unchanged. */
-  auditFindings?: string[] | undefined
+  /** June 27 2026 -- replaces the legacy auditFindings:string[]
+   *  prop with a simple unresolved-finding count. When > 0 the
+   *  modal renders the spec line:
+   *    "This document has N unresolved review findings.
+   *     Regenerating will clear them."
+   *  When 0 / undefined the warning line is omitted. Source: the
+   *  audit_warnings.flag_counts.total field from the current
+   *  draft row (populated by tools.document_audit). */
+  findingsCount?: number | undefined
+  /** June 27 2026 -- true when the current draft's updated_at
+   *  diverges from created_at by more than 60s (the same
+   *  threshold TileMetadataBlock uses). Surfaces the spec line:
+   *    "Your manual edits to this document will be lost."
+   *  False / undefined omits the warning. Source: derived at
+   *  the call site from the drafts API timestamps. */
+  hasManualEdits?: boolean | undefined
   /** June 25 2026 -- the source document_type being regenerated.
    *  Drives the cascade-impact callout that lists which other
    *  current drafts will be marked stale per _REGEN_CASCADE:
@@ -82,10 +91,12 @@ const _DOC_LABELS: Record<string, string> = {
 
 export default function RegenConfirmModal(
   {
-    open, documentName, onCancel, onConfirm, auditFindings,
-    sourceDocumentType,
+    open, documentName, onCancel, onConfirm, findingsCount,
+    hasManualEdits, sourceDocumentType,
   }: RegenConfirmModalProps,
 ) {
+  const findingsN = findingsCount ?? 0
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
   const cascadeTypes = (
     sourceDocumentType
       ? (_CASCADE_TYPES[sourceDocumentType] ?? [])
@@ -94,12 +105,28 @@ export default function RegenConfirmModal(
     (t) => _DOC_LABELS[t] ?? t)
   const overlayRef = useRef<HTMLDivElement | null>(null)
 
+  // June 27 2026 -- Cancel-as-default keyboard contract:
+  //   * Escape cancels (unchanged).
+  //   * Enter ALSO cancels (was a no-op; the spec wants Enter
+  //     and Esc to both back out so a stray Enter never fires
+  //     the destructive action). Confirmation requires an
+  //     explicit click / tab + Space on the Regenerate button.
+  // The Cancel button also gets autoFocus on open so the
+  // default focus target is Cancel, not Confirm.
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onCancel()
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        // Block Enter from triggering whichever button has focus
+        // (in case the user tabbed to Regenerate); cancel always.
+        e.preventDefault()
+        onCancel()
+      }
     }
     document.addEventListener('keydown', onKey)
+    // autoFocus on the Cancel button so Tab order starts on the
+    // safe action and a no-op keystroke can't confirm.
+    cancelRef.current?.focus()
     return () => document.removeEventListener('keydown', onKey)
   }, [open, onCancel])
 
@@ -131,40 +158,34 @@ export default function RegenConfirmModal(
             aria-hidden="true" />
           <div className="flex-1 space-y-2">
             <h3 className="text-white font-semibold text-sm">
-              {auditFindings && auditFindings.length > 0
-                ? 'Regeneration Warning'
-                : `Regenerate ${documentName}?`}
+              {`Regenerate ${documentName}?`}
             </h3>
-            {auditFindings && auditFindings.length > 0 && (
-              <div
-                data-testid="regen-confirm-audit-block"
-                className="text-xs text-amber-100/90 leading-relaxed
+            {findingsN > 0 && (
+              <p
+                data-testid="regen-confirm-findings-warning"
+                className="text-xs text-amber-200 leading-relaxed
                            rounded border border-warning/40
-                           bg-warning/5 p-2.5 space-y-1.5">
-                <p>
-                  {auditFindings.length} audit finding
-                  {auditFindings.length === 1 ? ' is' : 's are'}{' '}
-                  unresolved from a previous audit run.
-                  Regenerating will auto-resolve {' '}
-                  {auditFindings.length === 1 ? 'it' : 'them'}{' '}
-                  and create a fresh draft.
-                </p>
-                <ul className="list-disc list-inside text-2xs
-                               text-amber-100/85 space-y-0.5">
-                  {auditFindings.slice(0, 5).map((f, i) => (
-                    <li
-                      key={i}
-                      data-testid={`regen-confirm-audit-finding-${i}`}>
-                      {f}
-                    </li>
-                  ))}
-                  {auditFindings.length > 5 && (
-                    <li className="text-amber-100/60 italic">
-                      … and {auditFindings.length - 5} more
-                    </li>
-                  )}
-                </ul>
-              </div>
+                           bg-warning/10 p-2.5">
+                This document has {findingsN} unresolved review
+                finding{findingsN === 1 ? '' : 's'}.
+                Regenerating will clear {' '}
+                {findingsN === 1 ? 'it' : 'them'}.
+              </p>
+            )}
+            {hasManualEdits && (
+              // June 27 2026 -- per spec: warn the user that any
+              // manual edits to the draft (made via the in-platform
+              // editor since generation) will be lost on regen.
+              // Detected at the call site via updated_at > created_at
+              // + 60s tolerance (the same threshold TileMetadataBlock
+              // uses).
+              <p
+                data-testid="regen-confirm-manual-edits-warning"
+                className="text-xs text-red-200 leading-relaxed
+                           rounded border border-red-500/50
+                           bg-red-500/10 p-2.5 font-semibold">
+                Your manual edits to this document will be lost.
+              </p>
             )}
             <p className="text-xs text-slate-300 leading-relaxed">
               This will replace the current draft for the whole
@@ -200,13 +221,26 @@ export default function RegenConfirmModal(
             )}
           </div>
         </div>
+        {/* June 27 2026 button contract per spec:
+              * Cancel is leftmost, autoFocused on open so the
+                default keyboard target is the safe action.
+              * Regenerate is styled DESTRUCTIVE (red) to signal
+                that confirming destroys the current draft.
+              * Enter / Escape both cancel (handled by the
+                keydown listener above) -- pressing Enter while
+                Cancel has focus also cancels via the button's
+                native click semantics. */}
         <div className="flex items-center justify-end gap-2 mt-5">
           <button
             type="button"
+            ref={cancelRef}
             onClick={onCancel}
+            autoFocus
             data-testid="regen-confirm-modal-cancel"
             className="px-3 py-1.5 rounded text-xs border border-border
-                       text-muted hover:text-white hover:bg-navy-700">
+                       text-white bg-navy-700 hover:bg-navy-600
+                       focus:outline-none focus:ring-2
+                       focus:ring-electric/60 font-semibold">
             Cancel
           </button>
           <button
@@ -214,10 +248,10 @@ export default function RegenConfirmModal(
             onClick={onConfirm}
             data-testid="regen-confirm-modal-confirm"
             className="px-3 py-1.5 rounded text-xs font-semibold
-                       bg-electric text-white hover:bg-blue-500">
-            {auditFindings && auditFindings.length > 0
-              ? 'Regenerate Anyway'
-              : 'Regenerate'}
+                       bg-red-600 text-white hover:bg-red-500
+                       focus:outline-none focus:ring-2
+                       focus:ring-red-400/70">
+            Regenerate
           </button>
         </div>
       </div>
