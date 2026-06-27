@@ -342,3 +342,140 @@ class TestLiveCioAndRegimeReadsUnchanged:
                 "live regime signals are intentionally LIVE per "
                 "operator spec; do NOT route through a snapshot "
                 "table")
+
+
+# ── LEAK 1 -- strategy_cache hash-aware via gather_document_data ──
+
+
+class TestGatherDocumentDataHashAware:
+    """PR 1 v3 (LEAK 1 closer). The dominant substitution-table
+    leak was gather_document_data calling get_latest_strategy_cache()
+    -- which returns the LIVE latest strategy_results_cache row
+    regardless of data_hash. Under freeze, ~20 deck/brief/appendix
+    headline tokens (Sharpe / max_drawdown / recovery / blend
+    weights) silently received LIVE values.
+
+    Fix: gather_document_data accepts optional data_hash. When
+    supplied, routes through get_strategy_cache(data_hash) instead
+    of get_latest_strategy_cache. On miss raises
+    StrategyCacheMissingForHashError -- the 3 doc generators
+    propagate (the outer try/except logs + raises so the job
+    worker writes the error to the job row, surfacing to the user
+    as 'Run light refresh and try again')."""
+
+    @pytest.mark.asyncio
+    async def test_with_data_hash_routes_through_hash_aware_loader(
+            self, monkeypatch):
+        from tools import academic_export as ae
+        # Force non-test branch so the strategy load fires.
+        monkeypatch.setattr(ae, "ENVIRONMENT", "production")
+
+        seen: list[str] = []
+
+        async def _hash_aware(h):
+            seen.append(("hash_aware", h))
+            return None  # simulate miss -> raises
+
+        async def _latest():
+            seen.append(("latest", None))
+            raise AssertionError(
+                "get_latest_strategy_cache MUST NOT fire when "
+                "data_hash supplied")
+
+        monkeypatch.setattr(
+            "tools.cache.get_strategy_cache", _hash_aware)
+        monkeypatch.setattr(
+            "tools.cache.get_latest_strategy_cache", _latest)
+        # Other reads in gather_document_data -- short-circuit so
+        # the function returns once the strategy load resolves.
+        async def _empty():
+            return {}
+        async def _empty_l():
+            return []
+        monkeypatch.setattr(
+            "tools.cache.get_monthly_returns", _empty)
+        monkeypatch.setattr(
+            "tools.cache.get_ff_factors", _empty_l)
+
+        with pytest.raises(
+                ae.StrategyCacheMissingForHashError) as exc:
+            await ae.gather_document_data(
+                data_hash="c421fb895347f924")
+        assert "c421fb89" in str(exc.value)
+        assert "light refresh" in str(exc.value)
+        # The hash-aware loader fired, the latest loader did NOT.
+        assert ("hash_aware", "c421fb895347f924") in seen
+        assert all(k != "latest" for k, _v in seen)
+
+    @pytest.mark.asyncio
+    async def test_without_data_hash_falls_through_to_latest(
+            self, monkeypatch):
+        from tools import academic_export as ae
+        monkeypatch.setattr(ae, "ENVIRONMENT", "production")
+
+        called: dict[str, bool] = {
+            "hash_aware": False, "latest": False}
+
+        async def _hash_aware(h):
+            called["hash_aware"] = True
+            raise AssertionError(
+                "get_strategy_cache MUST NOT fire when no "
+                "data_hash supplied (legacy path uses latest)")
+
+        async def _latest():
+            called["latest"] = True
+            return None  # cold cache -> bundle stays empty
+
+        monkeypatch.setattr(
+            "tools.cache.get_strategy_cache", _hash_aware)
+        monkeypatch.setattr(
+            "tools.cache.get_latest_strategy_cache", _latest)
+        async def _empty():
+            return {}
+        async def _empty_l():
+            return []
+        monkeypatch.setattr(
+            "tools.cache.get_monthly_returns", _empty)
+        monkeypatch.setattr(
+            "tools.cache.get_ff_factors", _empty_l)
+
+        bundle = await ae.gather_document_data()  # no data_hash
+        # Falls through gracefully -- no exception.
+        assert bundle["available"] is False
+        assert called["latest"] is True
+        assert called["hash_aware"] is False
+
+    def test_three_generators_thread_data_hash_through(self):
+        """Source inspection: every doc-generator path that calls
+        gather_document_data or gather_analytical_appendix_data
+        must pass data_hash=. Catches a future regression that
+        accidentally drops the kwarg."""
+        import inspect
+        from main import (
+            _generate_brief_document,
+            _generate_appendix_document,
+            _build_deck_context,
+        )
+        for fn in (
+            _generate_brief_document,
+            _generate_appendix_document,
+            _build_deck_context,
+        ):
+            src = inspect.getsource(fn)
+            # Each generator must thread data_hash through to the
+            # gather function. The exact kwarg name is 'data_hash'.
+            assert "data_hash=" in src, (
+                f"{fn.__name__} not threading data_hash through "
+                "the gather call")
+
+    def test_exception_class_carries_spec_message(self):
+        from tools.academic_export import (
+            StrategyCacheMissingForHashError,
+        )
+        err = StrategyCacheMissingForHashError(
+            "c421fb895347f924")
+        msg = str(err)
+        assert "c421fb89" in msg
+        assert "Run light refresh and try again" in msg
+        # The error class also carries the hash on the attribute.
+        assert err.data_hash == "c421fb895347f924"
