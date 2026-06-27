@@ -1,5 +1,5 @@
 /**
- * FixProposalCard -- June 23 2026, Concern 7k-v + 7k-vi.
+ * FixProposalCard -- June 27 2026.
  *
  * The per-finding fix proposal block that renders inside the
  * critic findings panel for Fatal + Major severity. Two shapes:
@@ -7,7 +7,7 @@
  *   Fatal (auto_proposed=true)
  *     The arbiter already generated a proposal during the debate
  *     round. The card is pre-populated; the user only sees the
- *     "Apply Fix" button + confirmation modal.
+ *     "Apply Fix" button.
  *
  *   Major (auto_proposed=false)
  *     The card shows a "Propose Fix" button that calls
@@ -16,18 +16,31 @@
  *     button.
  *
  * Minor findings render no card -- they're not eligible for
- * story-plan injection.
+ * fix-proposal injection.
  *
- * The confirmation modal lives in this component and fires on
- * Apply Fix; on confirm, /api/v1/documents/apply-fix is called
- * with the proposal payload. A spinner + status row replaces the
- * action area while the regen is in flight.
+ * June 27 2026 -- the legacy regenerate path is gone. Clicking
+ * Apply Fix now ALWAYS runs the surgical splice flow:
+ *   1. /propose-fix-text -- backend extracts the flagged section
+ *      from content_json, Sonnet-patches it, returns a preview
+ *      (no draft mutation).
+ *   2. User reviews the diff inline (original vs suggested).
+ *   3. Accept -> /accept-fix-text -- backend splices the patched
+ *      section back into content_json at the same position, writes
+ *      via update_draft. All other sections preserved verbatim.
+ *   4. Reject -> discard the preview, no changes made.
+ *
+ * If the section can't be located in the current draft, the
+ * backend returns a 422/409 with a structured detail; we surface
+ * an "Open in editor" deep-link instead of falling back to any
+ * regeneration. The Apply-Fix-and-Regenerate confirmation modal
+ * + the full-document regen path have been removed.
  */
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import axios from 'axios'
 import {
   Wrench, Loader2, AlertCircle, CheckCircle, ChevronDown,
-  ChevronRight, Check, X, FileEdit,
+  ChevronRight, Check, X, ExternalLink,
 } from 'lucide-react'
 
 import type {
@@ -35,8 +48,13 @@ import type {
 } from '../stores/academicReviewStore'
 
 
-// June 25 2026 -- Copilot-style inline-edit flow shape. Returned by
-// POST /api/v1/council/debates/{id}/propose-fix-text.
+// June 27 2026 -- the suggestion shape returned by POST
+// /api/v1/council/debates/{id}/propose-fix-text. original_text +
+// suggested_text are PLAIN-TEXT renderings of the located JSON
+// section, intended only for the diff display. The actual content_
+// json splice is cached server-side and written via
+// /accept-fix-text; the frontend no longer round-trips
+// content_text.
 interface InlineFixSuggestion {
   finding_id:     number
   section_name:   string | null
@@ -44,6 +62,57 @@ interface InlineFixSuggestion {
   suggested_text: string
   proposal_id:    number
   cached?:        boolean
+  document_type?: string
+}
+
+// Structured error detail returned by the inline-fix endpoints
+// when the section can't be located / preview / splice fails.
+// Surfaced as an actionable "Open in editor" link instead of any
+// regenerate fallback.
+interface InlineFixErrorDetail {
+  detail:        string
+  hint?:         string | null
+  section_name?: string | null
+  document_type?: string | null
+}
+
+// Pull the structured detail out of an axios error response. The
+// backend sends either {detail: <string>} or {detail: <object>}
+// depending on the failure mode.
+function _parseInlineErr(
+  err: unknown,
+): { message: string; structured?: InlineFixErrorDetail } {
+  if (!axios.isAxiosError(err)) {
+    return { message: String(err) }
+  }
+  const d = err.response?.data?.detail
+  if (typeof d === 'string') return { message: d }
+  if (d && typeof d === 'object' && 'detail' in d) {
+    const so = d as InlineFixErrorDetail
+    return { message: so.detail, structured: so }
+  }
+  return { message: err.message || 'Inline fix failed.' }
+}
+
+// Find a current draft id for a document type so we can build a
+// deep-link to the editor when the inline patch can't be applied.
+// Returns null when the draft isn't loaded / no current draft.
+async function _findCurrentDraftId(
+  documentType: string,
+): Promise<number | null> {
+  try {
+    const res = await axios.get<{
+      drafts: Array<{
+        id: number; document_type: string; is_current?: boolean
+      }>
+    }>('/api/v1/documents/drafts')
+    const draft = (res.data?.drafts ?? []).find(
+      (d) => d.document_type === documentType
+        && d.is_current !== false)
+    return draft ? draft.id : null
+  } catch {
+    return null
+  }
 }
 
 
@@ -97,13 +166,17 @@ export default function FixProposalCard(
   const [localProposal, setLocalProposal] = useState<
     FixProposal | null>(proposal)
   const [expanded, setExpanded] = useState(true)
-  const [confirmOpen, setConfirmOpen] = useState(false)
   const [proposingBusy, setProposingBusy] = useState(false)
-  const [applyingBusy, setApplyingBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [applied, setApplied] = useState(false)
-  const [appliedLabel, setAppliedLabel] = useState<string | null>(
-    null)
+  // June 27 2026 -- structured error from the inline-fix endpoints
+  // when the section can't be located. Carries detail / hint /
+  // section_name so we render an actionable editor deep-link
+  // instead of a generic toast + no fallback to regeneration.
+  const [errorDetail, setErrorDetail] =
+    useState<InlineFixErrorDetail | null>(null)
+  // The editor deep-link target the structured error resolves to.
+  const [editorLink, setEditorLink] =
+    useState<{ href: string; label: string } | null>(null)
 
   // Inline-edit flow state. suggestion holds the diff payload from
   // /propose-fix-text; inlineBusy covers both fetch + accept calls.
@@ -113,6 +186,32 @@ export default function FixProposalCard(
   const [inlineBusy, setInlineBusy] = useState(false)
   const [rejected, setRejected] = useState(false)
   const [inlineApplied, setInlineApplied] = useState(false)
+
+  // Surface a structured 422/409 from the inline-fix endpoints
+  // with an actionable editor deep-link. Replaces every previous
+  // "regenerate" code path -- the user always edits directly when
+  // the inline splice can't apply.
+  const _surfaceInlineError = async (
+    err: unknown, fallbackMsg: string,
+  ): Promise<void> => {
+    const parsed = _parseInlineErr(err)
+    setError(parsed.message || fallbackMsg)
+    setErrorDetail(parsed.structured ?? null)
+    if (parsed.structured?.section_name) {
+      const docType = (
+        parsed.structured.document_type || documentType)
+      const draftId = await _findCurrentDraftId(docType)
+      if (draftId) {
+        setEditorLink({
+          href: `/editor/${draftId}`,
+          label: `Open ${
+            parsed.structured.section_name} in editor`,
+        })
+        return
+      }
+    }
+    setEditorLink(null)
+  }
 
   const sev = finding.severity
   if (sev === 'Minor') return null
@@ -157,42 +256,17 @@ export default function FixProposalCard(
     }
   }
 
-  const handleApply = async (): Promise<void> => {
-    if (!localProposal) return
-    setConfirmOpen(false)
-    setApplyingBusy(true)
-    setError(null)
-    try {
-      const res = await axios.post<{
-        ok: boolean
-        draft_label?: string
-        scope?: string
-      }>('/api/v1/documents/apply-fix', {
-        document_type: documentType,
-        finding_id: findingId,
-        fix_proposal: localProposal,
-        debate_id: debateId,
-        confirmed: true,
-      })
-      if (res.data.ok) {
-        setApplied(true)
-        const label = res.data.draft_label || 'Post-critic revision'
-        setAppliedLabel(label)
-        onApplied?.(label)
-      } else {
-        setError('Apply-fix returned a failure status.')
-      }
-    } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail ?? err.message)
-        : 'Apply-fix failed.'
-      setError(String(msg))
-    } finally {
-      setApplyingBusy(false)
-    }
-  }
+  // June 27 2026 -- handleApply REMOVED. The legacy "Apply Fix
+  // and Regenerate" path that POSTed /apply-fix and kicked off a
+  // full document regen is gone. Apply Fix now ALWAYS runs the
+  // surgical splice flow below (propose -> preview -> accept).
 
-  // Copilot-style inline edit: fetch the section-scoped diff.
+  // Step 1 of Apply Fix -- fetch the section-scoped preview from
+  // /propose-fix-text. Backend extracts the section from
+  // content_json, Sonnet-patches it, returns the original +
+  // suggested as plain text for the diff display. The patched
+  // JSON is cached server-side; accept-fix-text reads it back to
+  // perform the splice. Nothing in the draft mutates here.
   const handlePreviewInline = async (): Promise<void> => {
     if (!debateId) {
       setError('No debate id -- cannot preview inline edit.')
@@ -213,6 +287,8 @@ export default function FixProposalCard(
     }
     setInlineBusy(true)
     setError(null)
+    setErrorDetail(null)
+    setEditorLink(null)
     try {
       const res = await axios.post<InlineFixSuggestion>(
         `/api/v1/council/debates/${debateId}/propose-fix-text`,
@@ -221,10 +297,8 @@ export default function FixProposalCard(
       ACTIVE_SUGGESTION_REGISTRY.findingId = findingId
       ACTIVE_SUGGESTION_REGISTRY.documentType = documentType
     } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail ?? err.message)
-        : 'Could not preview inline edit.'
-      setError(String(msg))
+      await _surfaceInlineError(
+        err, 'Could not preview inline edit.')
     } finally {
       setInlineBusy(false)
     }
@@ -237,70 +311,42 @@ export default function FixProposalCard(
     ACTIVE_SUGGESTION_REGISTRY.documentType = null
   }
 
-  // Accept = PATCH the current draft with content_text rewritten
-  // (original swapped for suggested), then mark fix_applied on
-  // council_debates. The frontend reloads the draft afterwards via
-  // the parent's onApplied callback so the editor reflects the
-  // change immediately. Caveats:
-  //   - The string replace runs against content_text. content_json
-  //     is regenerated server-side by the next save via the
-  //     existing tooling that derives content_json from
-  //     content_text on PATCH. If that derivation is absent for a
-  //     given doc type, the diff still reflects content_text -- the
-  //     editor renders content_json which would be stale until the
-  //     next regen. Acceptable MVP behaviour for the brief / script
-  //     / appendix; the deck (canvas) doesn't surface this flow.
+  // Step 3 of Apply Fix -- POST /accept-fix-text and let the
+  // backend splice the cached suggested_section_json into the
+  // CURRENT draft's content_json. The backend re-locates the
+  // section in current state (so any manual edits between preview
+  // and accept are respected), splices, writes via update_draft.
+  // Frontend no longer touches content_text or content_json
+  // directly -- one POST and we're done.
+  //
+  // June 27 2026 -- replaces the previous PATCH /drafts/{id} with
+  // content_text string-replace approach that could silently
+  // overwrite the whole document when the section couldn't be
+  // located cleanly.
   const handleAcceptInline = async (): Promise<void> => {
     if (!suggestion || !debateId) return
     setInlineBusy(true)
     setError(null)
+    setErrorDetail(null)
+    setEditorLink(null)
     try {
-      // 1. Fetch the current draft + patch content_text.
-      const draftsRes = await axios.get<{
-        drafts: Array<{
-          id: number; document_type: string
-          is_current?: boolean
-          content_text: string | null
-        }>
-      }>('/api/v1/documents/drafts')
-      const draft = (draftsRes.data?.drafts ?? []).find(
-        (d) => d.document_type === documentType
-          && d.is_current !== false)
-      if (!draft) {
-        setError('No current draft to patch.')
-        setInlineBusy(false)
-        return
-      }
-      const ct = draft.content_text || ''
-      if (!ct.includes(suggestion.original_text)) {
-        setError(
-          'The original text could not be located in the current '
-          + 'draft -- it may have been edited since the suggestion '
-          + 'was generated. Re-preview to refresh.')
-        setInlineBusy(false)
-        return
-      }
-      const newContentText = ct.replace(
-        suggestion.original_text, suggestion.suggested_text)
-      await axios.patch(
-        `/api/v1/documents/drafts/${draft.id}`,
-        { content_text: newContentText })
-
-      // 2. Mark fix_applied on council_debates.
-      await axios.post(
+      const res = await axios.post<{
+        ok: boolean
+        new_draft_id: number
+        section_name: string | null
+        applied_at: string
+      }>(
         `/api/v1/council/debates/${debateId}/accept-fix-text`,
-        { finding_id: findingId, new_draft_id: draft.id })
-
+        { finding_id: findingId })
       setInlineApplied(true)
       setSuggestion(null)
       ACTIVE_SUGGESTION_REGISTRY.findingId = null
       ACTIVE_SUGGESTION_REGISTRY.documentType = null
-      onApplied?.(`Section ${suggestion.section_name || ''} updated`)
+      onApplied?.(
+        `Section ${res.data.section_name || ''} updated`.trim())
     } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail ?? err.message)
-        : 'Could not accept the inline edit.'
-      setError(String(msg))
+      await _surfaceInlineError(
+        err, 'Could not accept the inline edit.')
     } finally {
       setInlineBusy(false)
     }
@@ -334,26 +380,19 @@ export default function FixProposalCard(
 
       {expanded && (
         <>
-          {applied && (
-            <div className="text-2xs text-success flex items-start
-                            gap-1.5">
-              <CheckCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              <span>
-                Fix applied. A new draft is being generated:{' '}
-                <strong>{appliedLabel}</strong>. The existing draft
-                is preserved -- switch between versions in the
-                editor toolbar.
-              </span>
-            </div>
-          )}
-          {!applied && !localProposal && (
+          {/* June 27 2026 -- removed the "applied + regenerating"
+              status block. Apply Fix is now a synchronous splice
+              (no async draft regen), so the success state lives
+              on inlineApplied below in the diff-panel branch. */}
+          {!localProposal && (
             <div className="text-2xs text-slate-300 leading-relaxed">
-              The arbiter can propose a story-plan patch to address
-              this finding. The proposal is shown to you for
-              review before any regeneration runs.
+              The arbiter can propose a section-scoped patch to
+              address this finding. The proposal is shown to you
+              for review; applying splices the patched section
+              into the draft (no full-document regeneration).
             </div>
           )}
-          {!applied && !localProposal && (
+          {!localProposal && (
             <button
               type="button"
               onClick={() => { void handlePropose() }}
@@ -369,7 +408,7 @@ export default function FixProposalCard(
                 : <><Wrench className="w-3 h-3" /> Propose Fix</>}
             </button>
           )}
-          {!applied && localProposal && (
+          {localProposal && (
             <>
               <div className="text-2xs space-y-1">
                 <div>
@@ -404,43 +443,33 @@ export default function FixProposalCard(
                 </div>
               </div>
               <div className="flex flex-wrap gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setConfirmOpen(true)}
-                  disabled={applyingBusy || inlineApplied}
-                  data-testid={`apply-fix-${findingId}`}
-                  className="flex items-center gap-1.5 text-2xs
-                              px-2 py-1 rounded bg-warning
-                              text-navy-900 hover:bg-amber-400
-                              disabled:opacity-50
-                              disabled:cursor-not-allowed">
-                  {applyingBusy
-                    ? <><Loader2 className="w-3 h-3 animate-spin" />
-                        Applying…</>
-                    : <><Wrench className="w-3 h-3" /> Apply Fix
-                        (regenerate)</>}
-                </button>
+                {/* June 27 2026 -- the legacy "Apply Fix
+                    (regenerate)" button + confirmation modal have
+                    been removed. Apply Fix now ALWAYS runs the
+                    surgical splice flow: preview the patched
+                    section, then Accept (write) or Reject
+                    (discard). No regeneration under any
+                    circumstance. */}
                 {!inlineApplied && (
                   <button
                     type="button"
                     onClick={() => { void handlePreviewInline() }}
                     disabled={inlineBusy || suggestion !== null}
-                    data-testid={`preview-inline-fix-${findingId}`}
-                    title="Preview a section-scoped text edit you can accept or reject before any regeneration runs."
+                    data-testid={`apply-fix-${findingId}`}
+                    title="Preview a section-scoped patch you can accept or reject. No full-document regeneration."
                     className="flex items-center gap-1.5 text-2xs
-                                px-2 py-1 rounded
-                                border border-electric/50
-                                text-electric hover:bg-electric/10
+                                px-2 py-1 rounded bg-warning
+                                text-navy-900 hover:bg-amber-400
                                 disabled:opacity-50
                                 disabled:cursor-not-allowed">
                     {inlineBusy
                       ? <><Loader2 className="w-3 h-3 animate-spin" />
-                          Building diff…</>
+                          Building patch…</>
                       : (rejected
-                          ? <><FileEdit className="w-3 h-3" />
-                              Re-propose Inline Edit</>
-                          : <><FileEdit className="w-3 h-3" />
-                              Preview Inline Edit</>)}
+                          ? <><Wrench className="w-3 h-3" />
+                              Re-preview Fix</>
+                          : <><Wrench className="w-3 h-3" />
+                              Apply Fix</>)}
                   </button>
                 )}
               </div>
@@ -550,124 +579,35 @@ export default function FixProposalCard(
             </>
           )}
           {error && (
-            <div className="text-2xs text-danger flex items-start
-                            gap-1.5">
-              <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-              <span>{error}</span>
+            <div className="text-2xs text-danger flex flex-col
+                            gap-1.5"
+              data-testid={`apply-fix-error-${findingId}`}>
+              <div className="flex items-start gap-1.5">
+                <AlertCircle
+                  className="w-3 h-3 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+              {errorDetail?.hint && (
+                <div className="text-2xs text-muted italic ml-4.5">
+                  {errorDetail.hint}
+                </div>
+              )}
+              {editorLink && (
+                <Link
+                  to={editorLink.href}
+                  data-testid={
+                    `apply-fix-editor-link-${findingId}`}
+                  className="ml-4.5 inline-flex items-center
+                             gap-1 text-2xs text-electric
+                             hover:text-electric/80 underline">
+                  <ExternalLink className="w-3 h-3" />
+                  {editorLink.label}
+                </Link>
+              )}
             </div>
           )}
         </>
       )}
-
-      {confirmOpen && localProposal && (
-        <ApplyFixConfirmModal
-          proposal={localProposal}
-          isCross={!!isCross}
-          documentType={documentType}
-          onCancel={() => setConfirmOpen(false)}
-          onConfirm={() => { void handleApply() }} />
-      )}
-    </div>
-  )
-}
-
-
-function ApplyFixConfirmModal(
-  {
-    proposal, isCross, documentType, onCancel, onConfirm,
-  }: {
-    proposal:     FixProposal
-    isCross:      boolean
-    documentType: string
-    onCancel:     () => void
-    onConfirm:    () => void
-  },
-): React.ReactElement {
-  const scope = proposal.target === 'document'
-    ? 'Full document'
-    : `Section: "${proposal.section_name || '?'}"`
-  const estimate = proposal.target === 'document'
-    ? '60-120 seconds' : '15-30 seconds'
-  const targetDocLabel = (
-    isCross && proposal.target_document
-      ? proposal.target_document
-      : documentType)
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center
-                 bg-black/60 backdrop-blur-sm p-4"
-      onClick={onCancel}
-      data-testid="apply-fix-confirm-modal">
-      <div
-        className="card max-w-lg w-full p-5"
-        onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-white font-semibold text-sm mb-3">
-          {isCross
-            ? `Apply Fix and Regenerate ${targetDocLabel}?`
-            : 'Apply Fix and Regenerate?'}
-        </h3>
-        <div className="space-y-1.5 text-xs text-slate-300">
-          <div>
-            <span className="text-muted">Scope:</span>{' '}
-            <strong>{scope}</strong>
-          </div>
-          <div>
-            <span className="text-muted">Estimated time:</span>{' '}
-            {estimate}
-          </div>
-          {isCross && (
-            <div>
-              <span className="text-muted">Source of truth:</span>{' '}
-              <strong>
-                {proposal.source_of_truth_document}
-              </strong>
-              {' '}<span className="text-muted">→ updating:</span>{' '}
-              <strong>{proposal.target_document}</strong>
-            </div>
-          )}
-          <div>
-            <span className="text-muted">Rationale:</span>{' '}
-            {proposal.rationale}
-          </div>
-          <div>
-            <span className="text-muted">Change:</span>{' '}
-            {proposal.patch_instruction}
-          </div>
-        </div>
-        <p className="text-2xs text-muted italic mt-3
-                      leading-relaxed">
-          This will create a new draft version alongside your
-          existing draft. Your current draft is preserved and you
-          can switch between versions in the editor.
-          {isCross && (
-            <>
-              {' '}
-              The {proposal.source_of_truth_document} is not
-              modified.
-            </>
-          )}
-        </p>
-        <div className="flex items-center justify-end gap-2 mt-4">
-          <button
-            type="button"
-            onClick={onCancel}
-            data-testid="apply-fix-confirm-cancel"
-            className="px-3 py-1.5 rounded text-xs border
-                       border-border text-muted hover:text-white
-                       hover:bg-navy-700">
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            data-testid="apply-fix-confirm-apply"
-            className="px-3 py-1.5 rounded text-xs font-semibold
-                       bg-warning text-navy-900
-                       hover:bg-amber-400">
-            Apply and Regenerate
-          </button>
-        </div>
-      </div>
     </div>
   )
 }
