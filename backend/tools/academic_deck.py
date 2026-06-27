@@ -921,6 +921,23 @@ _GREY = RGBColor(0x4A, 0x4A, 0x6A)
 _ACCENT = RGBColor(0x1D, 0x4E, 0xD8)
 _AMBER = RGBColor(0xB4, 0x53, 0x09)
 
+# June 27 2026 -- Molly reference deck palette (PR B specialized
+# renderers). Added alongside the existing _NAVY / _ACCENT block so
+# the title slide + split panel + card grid + scorecard + feature
+# rows all draw from a single palette source. Kept separate from
+# the generic _NAVY/_ACCENT used by the legacy uniform renderer so
+# a future palette refresh on Molly's side touches only this block.
+_MOLLY_NAVY  = RGBColor(0x1E, 0x27, 0x61)  # title chrome + header bands
+_MOLLY_TEAL  = RGBColor(0x02, 0x80, 0x90)  # accent (highlighted row / card)
+_TEAL_LIGHT  = RGBColor(0xE8, 0xF4, 0xF8)  # alt card / row background
+_NAVY_LIGHT  = RGBColor(0xEE, 0xF0, 0xF8)  # alt card / row background
+_GOLD_LIGHT  = RGBColor(0xFF, 0xF8, 0xE1)  # 3rd feature-row background
+_INK_DARK    = RGBColor(0x1A, 0x1A, 0x2E)  # body text on light backgrounds
+# Council-signal palette (slide 8 scorecard cell_style_hook).
+_SIGNAL_RED   = RGBColor(0xFF, 0x6B, 0x6B)  # BEAR
+_SIGNAL_AMBER = RGBColor(0xF9, 0xA8, 0x25)  # TRANSITION
+_SIGNAL_GREEN = RGBColor(0x4C, 0xAF, 0x50)  # BULL
+
 _SLIDE_W = Inches(13.333)
 _SLIDE_H = Inches(7.5)
 
@@ -1287,8 +1304,34 @@ def _callout(slide, left, top, width, height, heading, value, *,
 
 def _table(slide, headers: list[str], rows: list[list[str]], *,
            left=Inches(0.7), top=Inches(1.4), width=Inches(12.0),
-           max_rows=11) -> None:
-    """A light-styled native PowerPoint table. [DATA PENDING] when empty."""
+           max_rows=11,
+           cell_style_hook=None) -> None:
+    """A light-styled native PowerPoint table. [DATA PENDING] when empty.
+
+    June 27 2026 -- cell_style_hook (PR B). When supplied, the hook
+    is called for EVERY body cell with kwargs:
+
+      hook(row_idx, col_idx, header, value, row_values) -> dict | None
+
+    Returns a style-overrides dict OR None (use defaults). Supported
+    override keys:
+
+      'fill':      RGBColor for cell fill
+      'text':      RGBColor for the run's font color
+      'bold':      bool for the run's font weight
+      'row_fill':  RGBColor that overrides the alternating-row fill
+                   for the ENTIRE row (applied to every cell on the
+                   row when ANY cell in the row returns it; the first
+                   non-None row_fill wins per row).
+
+    The hook receives the full row_values tuple so it can look up
+    sibling-column values (e.g. inspect 'Council Signal' to pick the
+    badge color for the signal column, OR shade the entire row based
+    on an 'Outcome' column). Returning None for a cell uses the
+    default header / alternating-row styling.
+
+    The hook signature is keyword-friendly: the caller's hook can
+    accept **kwargs to ignore fields it doesn't need."""
     if not rows:
         _textbox(slide, left, top, width, Inches(1.0),
                  "[DATA PENDING] — table data unavailable. Warm the "
@@ -1311,16 +1354,54 @@ def _table(slide, headers: list[str], rows: list[list[str]], *,
         run.font.bold = True
         run.font.color.rgb = _WHITE
     for r, row in enumerate(rows, start=1):
+        # First pass: ask the hook for every cell, collect overrides
+        # + look for a row_fill that wins for the whole row.
+        cell_overrides: list[dict | None] = []
+        row_fill: "RGBColor | None" = None
+        for c in range(n_cols):
+            if c >= len(row):
+                cell_overrides.append(None)
+                continue
+            ov = None
+            if cell_style_hook is not None:
+                try:
+                    ov = cell_style_hook(
+                        row_idx=r, col_idx=c,
+                        header=headers[c] if c < len(headers) else "",
+                        value=row[c],
+                        row_values=tuple(row))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "deck_table_cell_style_hook_failed",
+                        error=str(exc), row=r, col=c)
+                    ov = None
+            if (isinstance(ov, dict) and row_fill is None
+                    and ov.get("row_fill") is not None):
+                row_fill = ov["row_fill"]
+            cell_overrides.append(ov if isinstance(ov, dict) else None)
+        default_row_fill = (
+            _WHITE if r % 2 else RGBColor(0xF1, 0xF5, 0xF9))
+        effective_row_fill = (
+            row_fill if row_fill is not None else default_row_fill)
+        # Second pass: write the cells with overrides applied.
         for c, value in enumerate(row):
+            if c >= n_cols:
+                break
             cell = table.cell(r, c)
             cell.fill.solid()
+            ov = cell_overrides[c] if c < len(cell_overrides) else None
             cell.fill.fore_color.rgb = (
-                _WHITE if r % 2 else RGBColor(0xF1, 0xF5, 0xF9))
+                ov.get("fill") if (ov and ov.get("fill") is not None)
+                else effective_row_fill)
             para = cell.text_frame.paragraphs[0]
             run = para.add_run()
             run.text = str(value)
             run.font.size = Pt(10)
-            run.font.color.rgb = _INK
+            run.font.color.rgb = (
+                ov.get("text") if (ov and ov.get("text") is not None)
+                else _INK)
+            if ov and ov.get("bold"):
+                run.font.bold = True
 
 
 def _footer(slide, idx: int, total: int) -> None:
@@ -1615,11 +1696,535 @@ def _strip_chart_bullets(
     return keep
 
 
+# ── PR B (June 27 2026) specialized per-slide renderers ─────────────────
+#
+# Five renderers add Molly-reference layouts to the deck builder. The
+# dispatch lives at the top of _render_content_slide; the generic
+# bullets / chart / table renderer continues to serve slides 2 and 5
+# (Agenda + Capital Preservation -- intentionally uniform), so the
+# legacy code path is preserved verbatim for those.
+#
+# All renderers take the same signature as _render_content_slide
+# (prs, sl, chart_png, idx, total) so the dispatch can call any of
+# them uniformly. Each is fully guarded -- one bad slide degrades
+# to a [DATA PENDING] placeholder rather than crashing the deck.
+
+
+def _card(slide, *, left, top, width, height,
+          bg_color, header_text, body_text,
+          highlight: bool = False) -> None:
+    """Draw a single rounded card. Used by _render_card_grid_slide
+    and _render_split_panel_slide's left-panel stat cards.
+
+    highlight=True swaps the bg to _MOLLY_TEAL with white text and
+    a thicker title -- used for the Regime-Conditional card so the
+    panel reads the recommended choice at a glance."""
+    rect = slide.shapes.add_shape(
+        MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
+    rect.fill.solid()
+    rect.fill.fore_color.rgb = (
+        _MOLLY_TEAL if highlight else bg_color)
+    rect.line.fill.background()
+    rect.shadow.inherit = False
+    tf = rect.text_frame
+    tf.margin_left = Inches(0.18)
+    tf.margin_right = Inches(0.18)
+    tf.margin_top = Inches(0.14)
+    tf.margin_bottom = Inches(0.14)
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    title_color = _WHITE if highlight else _MOLLY_NAVY
+    body_color = _WHITE if highlight else _INK_DARK
+    p1 = tf.paragraphs[0]
+    p1.space_after = Pt(4)
+    r1 = p1.add_run()
+    r1.text = header_text or ""
+    r1.font.size = Pt(15)
+    r1.font.bold = True
+    r1.font.color.rgb = title_color
+    if body_text:
+        p2 = tf.add_paragraph()
+        r2 = p2.add_run()
+        r2.text = body_text
+        r2.font.size = Pt(13)
+        r2.font.color.rgb = body_color
+
+
+def _render_title_slide(prs, sl, chart_png, idx, total) -> None:
+    """Slide 1 -- title chrome. Navy header bar full width carrying
+    the deck title. Centered title large font. Subtitle line for the
+    course / program. Presenter line for the team. No bullet content
+    area. Per PR B spec."""
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    try:
+        # Navy header bar full width (taller than the generic
+        # _title_bar's 1.0" so the title sits in a true title-slide
+        # band, not the content-slide chrome).
+        bar = s.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, 0, 0, _SLIDE_W, Inches(3.0))
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = _MOLLY_NAVY
+        bar.line.fill.background()
+        bar.shadow.inherit = False
+        tf = bar.text_frame
+        tf.margin_left = Inches(0.8)
+        tf.margin_right = Inches(0.8)
+        tf.word_wrap = True
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        r = p.add_run()
+        r.text = sl.get("title") or SLIDE_TITLES[idx - 1]
+        r.font.size = Pt(36)
+        r.font.bold = True
+        r.font.color.rgb = _WHITE
+
+        # Teal accent rule under the title bar.
+        rule = s.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, Inches(0), Inches(3.0),
+            _SLIDE_W, Inches(0.08))
+        rule.fill.solid()
+        rule.fill.fore_color.rgb = _MOLLY_TEAL
+        rule.line.fill.background()
+        rule.shadow.inherit = False
+
+        # Subtitle: course / program. Centered.
+        _textbox(s, Inches(0.8), Inches(3.7),
+                 _SLIDE_W - Inches(1.6), Inches(0.6),
+                 "Forest Capital  /  McColl School of Business",
+                 size=20, color=_MOLLY_NAVY,
+                 anchor=MSO_ANCHOR.MIDDLE)
+
+        # Presenter line.
+        _textbox(s, Inches(0.8), Inches(4.6),
+                 _SLIDE_W - Inches(1.6), Inches(0.6),
+                 "Group 1: Bob Thao, Michael Ruurds, Molly Murdock",
+                 size=16, color=_INK_DARK,
+                 anchor=MSO_ANCHOR.MIDDLE)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_title_slide_failed", error=str(exc))
+    _footer(s, idx, total)
+
+
+def _render_split_panel_slide(
+        prs, sl, chart_png, idx, total) -> None:
+    """Slide 3 -- The Investment Case split panel.
+
+    LEFT 50%: three strategy stat callout cards stacked vertically.
+    Each card: strategy name bold, IS Sharpe large, "full period"
+    small label. The Regime-Conditional card is highlighted in
+    _MOLLY_TEAL with white text.
+
+    RIGHT 50%: OOS results table (Strategy / OOS Sharpe / Max
+    Drawdown / OOS CAGR) with the navy header band + alternating
+    rows + the Regime-Conditional row highlighted teal.
+
+    "+98% vs benchmark" callout below the table.
+
+    Data source: the slide's bullets array carries the three IS
+    setup lines (one per strategy); the slide's table_data carries
+    the OOS verdict table. Bullets shape:
+      ["Strategy Name | IS Sharpe", ...] -- the '|' separates
+      the card header from the body. When the LLM emits plain
+      prose bullets the renderer still draws them; the highlight
+      pass keys off the Regime-Conditional string."""
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    title = sl.get("title") or SLIDE_TITLES[idx - 1]
+    try:
+        _title_bar(s, title)
+
+        # ── LEFT PANEL (50%) -- stat cards ──────────────────────
+        left_x = Inches(0.5)
+        card_w = Inches(6.0)
+        cards_top = Inches(1.4)
+        card_h = Inches(1.7)
+        card_gap = Inches(0.15)
+        bullets = (sl.get("bullets")
+                   or [_DATA_PENDING_BULLET] * 3)
+        # Strip bullet markers + chart-describing lines.
+        bullets = [_strip_bullet_marker(b) for b in bullets]
+        bullets = [b for b in bullets if b.strip()][:3]
+        while len(bullets) < 3:
+            bullets.append(_DATA_PENDING_BULLET)
+        for i, raw in enumerate(bullets):
+            # Card header / body split on '|'; fall back to a
+            # heuristic when the bullet is a single sentence
+            # (split on the first colon, or use the bullet as
+            # body with a numbered fallback header).
+            parts = raw.split("|", 1)
+            if len(parts) == 2:
+                header_text = parts[0].strip()
+                body_text = parts[1].strip()
+            elif ":" in raw:
+                header_text, body_text = raw.split(":", 1)
+                header_text = header_text.strip()
+                body_text = body_text.strip()
+            else:
+                header_text = f"Strategy {i + 1}"
+                body_text = raw.strip()
+            highlight = (
+                "regime" in header_text.lower()
+                or "regime" in body_text.lower())
+            bg = _TEAL_LIGHT if i % 2 == 0 else _NAVY_LIGHT
+            top = Inches(1.4 + i * (1.7 + 0.15))
+            _card(s, left=left_x, top=top,
+                  width=card_w, height=card_h,
+                  bg_color=bg,
+                  header_text=header_text,
+                  body_text=body_text,
+                  highlight=highlight)
+
+        # ── RIGHT PANEL (50%) -- OOS results table ─────────────
+        headers, rows, _surviving = _slide_table(sl, slide_idx=idx)
+        right_x = Inches(6.85)
+        right_w = Inches(6.0)
+        table_top = Inches(1.4)
+        if headers and rows:
+            # Highlight the Regime-Conditional row teal.
+            def _row_hook(*, row_idx, col_idx, header,
+                          value, row_values, **_):
+                row_text = " ".join(
+                    str(v).lower() for v in row_values)
+                if ("regime" in row_text
+                        or "dynamic" in row_text):
+                    return {
+                        "row_fill": _MOLLY_TEAL,
+                        "text": _WHITE,
+                        "bold": True,
+                    }
+                return None
+            _table(s, headers, rows,
+                   left=right_x, top=table_top,
+                   width=right_w, max_rows=8,
+                   cell_style_hook=_row_hook)
+        else:
+            _textbox(s, right_x, table_top,
+                     right_w, Inches(1.0),
+                     "[DATA PENDING] -- OOS verdict table "
+                     "unavailable. Warm caches + regenerate.",
+                     size=14, color=_AMBER)
+
+        # "+98% vs benchmark" callout below the table.
+        callout_top = Inches(5.5)
+        callout = s.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE,
+            right_x, callout_top, right_w, Inches(0.95))
+        callout.fill.solid()
+        callout.fill.fore_color.rgb = _MOLLY_TEAL
+        callout.line.fill.background()
+        callout.shadow.inherit = False
+        ctf = callout.text_frame
+        ctf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        ctf.margin_left = Inches(0.18)
+        ctf.margin_right = Inches(0.18)
+        cp = ctf.paragraphs[0]
+        cp.alignment = PP_ALIGN.CENTER
+        cr = cp.add_run()
+        cr.text = (
+            "+98% Sharpe improvement vs benchmark "
+            "across the OOS window")
+        cr.font.size = Pt(16)
+        cr.font.bold = True
+        cr.font.color.rgb = _WHITE
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deck_split_panel_slide_failed", error=str(exc))
+    _footer(s, idx, total)
+
+
+def _render_card_grid_slide(
+        prs, sl, chart_png, idx, total) -> None:
+    """Slides 4, 6, 7, 9, 11 -- two or three cards side by side.
+
+    Each card: alternating _TEAL_LIGHT / _NAVY_LIGHT background,
+    bold header, body text. For slide 4 (Why Static Failed) the
+    layout splits 50/50: cards on the left, rolling_correlation
+    chart on the right. The other card-grid slides use the full
+    width.
+
+    Card content comes from the slide's bullets array; same '|' /
+    ':' split convention as the split-panel left panel."""
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    title = sl.get("title") or SLIDE_TITLES[idx - 1]
+    try:
+        _title_bar(s, title)
+        bullets = sl.get("bullets") or [_DATA_PENDING_BULLET]
+        bullets = [_strip_bullet_marker(b) for b in bullets]
+        bullets = [b for b in bullets if b.strip()]
+        if not bullets:
+            bullets = [_DATA_PENDING_BULLET]
+        # Clamp to a max of 3 cards (fits comfortably side-by-side).
+        bullets = bullets[:3]
+
+        # A slide carries a chart slot when SLIDE_CHARTS pins one,
+        # whether or not the PNG actually arrived. _image still
+        # drops a "[Chart unavailable: ...]" placeholder when the
+        # PNG is None so the slot stays visible. Cards fit in the
+        # left 50% when a slot is reserved; otherwise they spread
+        # horizontally.
+        has_chart_slot = idx in SLIDE_CHARTS
+        cards_x = Inches(0.5)
+        cards_top = Inches(1.4)
+        cards_h = Inches(5.4)
+        if has_chart_slot:
+            cards_w = Inches(6.0)
+        else:
+            cards_w = Inches(12.33)
+        card_count = len(bullets)
+        # Cards stack vertically inside the cards_w column when a
+        # chart slot is reserved (3 cards * 1.7" each + gaps fits
+        # within 5.4"); otherwise lay out horizontally to fill the
+        # width.
+        if has_chart_slot:
+            card_h = Inches(1.7)
+            card_gap = 0.15
+            for i, raw in enumerate(bullets):
+                hdr, body = _split_card_line(raw, i + 1)
+                bg = (
+                    _TEAL_LIGHT if i % 2 == 0 else _NAVY_LIGHT)
+                top = Inches(
+                    1.4 + i * (1.7 + card_gap))
+                _card(s, left=cards_x, top=top,
+                      width=cards_w, height=card_h,
+                      bg_color=bg,
+                      header_text=hdr, body_text=body)
+            _image(s, chart_png,
+                   left=Inches(6.85), top=Inches(1.5),
+                   width=Inches(6.0),
+                   fallback=SLIDE_CHARTS.get(idx, "chart"))
+        else:
+            # Horizontal layout: divide cards_w equally.
+            gap = Inches(0.25)
+            total_gap = gap * (card_count - 1)
+            card_w = (cards_w - total_gap) // max(1, card_count)
+            for i, raw in enumerate(bullets):
+                hdr, body = _split_card_line(raw, i + 1)
+                bg = (
+                    _TEAL_LIGHT if i % 2 == 0 else _NAVY_LIGHT)
+                left = cards_x + (card_w + gap) * i
+                _card(s, left=left, top=cards_top,
+                      width=card_w, height=cards_h,
+                      bg_color=bg,
+                      header_text=hdr, body_text=body)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deck_card_grid_slide_failed", error=str(exc))
+    _footer(s, idx, total)
+
+
+def _split_card_line(raw: str, fallback_n: int) -> tuple[str, str]:
+    """Split a single bullet string into (header, body). Tries '|'
+    first, then ':', then falls back to a numbered header. Used by
+    both _render_card_grid_slide and _render_split_panel_slide."""
+    parts = raw.split("|", 1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    if ":" in raw:
+        h, b = raw.split(":", 1)
+        return h.strip(), b.strip()
+    return f"Point {fallback_n}", raw.strip()
+
+
+def _render_scorecard_slide(
+        prs, sl, chart_png, idx, total) -> None:
+    """Slide 8 -- What the Model Gets Wrong: 2 of 9 scorecard.
+
+    Standard _table renderer plus a cell_style_hook that:
+      * Inspects a 'Council Signal' / 'Signal' column for BEAR /
+        TRANSITION / BULL and paints the cell with the corresponding
+        signal-palette fill + appropriate text color.
+      * Shades 'Added value' outcome rows in _TEAL_LIGHT and leaves
+        'Did not add value' rows on the default alternating fill.
+
+    Column detection is case- + substring-tolerant so an LLM that
+    emits 'Council signal' or 'Signal' both hit the badge path; same
+    for 'Outcome' vs 'Result' on the row-shade column."""
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    title = sl.get("title") or SLIDE_TITLES[idx - 1]
+    try:
+        _title_bar(s, title)
+        bullets = sl.get("bullets") or []
+        bullets = [_strip_bullet_marker(b) for b in bullets]
+        bullets = [b for b in bullets if b.strip()][:2]
+        if bullets:
+            _bullets(s, bullets,
+                     left=Inches(0.5), top=Inches(1.2),
+                     width=Inches(12.33), height=Inches(1.0),
+                     size=14)
+            table_top = Inches(2.3)
+        else:
+            table_top = Inches(1.4)
+        headers, rows, _surviving = _slide_table(sl, slide_idx=idx)
+
+        # Column-index lookups -- substring-tolerant.
+        def _col_idx(*candidates: str) -> int | None:
+            for cand in candidates:
+                cand_l = cand.lower()
+                for i, h in enumerate(headers):
+                    if cand_l in str(h).lower():
+                        return i
+            return None
+        signal_col = _col_idx("council signal", "signal")
+        outcome_col = _col_idx("outcome", "result")
+
+        def _scorecard_hook(*, row_idx, col_idx, header,
+                            value, row_values, **_):
+            v_lower = str(value).lower().strip()
+            # Signal badge column.
+            if signal_col is not None and col_idx == signal_col:
+                if "bear" in v_lower:
+                    return {"fill": _SIGNAL_RED, "text": _WHITE,
+                            "bold": True}
+                if "transition" in v_lower:
+                    return {"fill": _SIGNAL_AMBER,
+                            "text": _INK_DARK, "bold": True}
+                if "bull" in v_lower:
+                    return {"fill": _SIGNAL_GREEN,
+                            "text": _WHITE, "bold": True}
+            # Outcome-driven row shading.
+            if outcome_col is not None:
+                outcome_v = (
+                    str(row_values[outcome_col])
+                    if outcome_col < len(row_values) else "")
+                if "added value" in outcome_v.lower():
+                    return {"row_fill": _TEAL_LIGHT}
+            return None
+
+        if headers and rows:
+            _table(s, headers, rows,
+                   left=Inches(0.5), top=table_top,
+                   width=Inches(12.33), max_rows=9,
+                   cell_style_hook=_scorecard_hook)
+        else:
+            _textbox(s, Inches(0.5), table_top,
+                     Inches(12.33), Inches(1.0),
+                     "[DATA PENDING] -- scorecard table "
+                     "unavailable. Warm caches + regenerate.",
+                     size=14, color=_AMBER)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deck_scorecard_slide_failed", error=str(exc))
+    _footer(s, idx, total)
+
+
+def _render_feature_rows_slide(
+        prs, sl, chart_png, idx, total) -> None:
+    """Slide 10 -- Live Demo three-row feature block.
+
+    Three full-width rows. Each row: icon circle on the left
+    (_MOLLY_NAVY fill, numeric badge as the icon), bold feature
+    title, description text. Row backgrounds alternate _TEAL_LIGHT
+    / _NAVY_LIGHT / _GOLD_LIGHT to match Molly's three-row color
+    scheme.
+
+    Row content comes from the slide's bullets array. Each bullet
+    is split on '|' (or ':') into (title, body) using the same
+    convention as the card grid + split-panel."""
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    title = sl.get("title") or SLIDE_TITLES[idx - 1]
+    try:
+        _title_bar(s, title)
+        bullets = sl.get("bullets") or [_DATA_PENDING_BULLET]
+        bullets = [_strip_bullet_marker(b) for b in bullets]
+        bullets = [b for b in bullets if b.strip()][:3]
+        while len(bullets) < 3:
+            bullets.append(_DATA_PENDING_BULLET)
+
+        row_colors = (_TEAL_LIGHT, _NAVY_LIGHT, _GOLD_LIGHT)
+        rows_top = Inches(1.3)
+        row_h = Inches(1.75)
+        row_gap = Inches(0.15)
+        full_w = Inches(12.33)
+        icon_w = Inches(1.2)
+
+        for i, raw in enumerate(bullets):
+            hdr, body = _split_card_line(raw, i + 1)
+            top = Inches(
+                1.3 + i * (1.75 + 0.15))
+            bg = row_colors[i % len(row_colors)]
+            # Row background rectangle.
+            row_rect = s.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(0.5), top, full_w, row_h)
+            row_rect.fill.solid()
+            row_rect.fill.fore_color.rgb = bg
+            row_rect.line.fill.background()
+            row_rect.shadow.inherit = False
+            # Icon circle (navy fill, white numeric badge).
+            icon = s.shapes.add_shape(
+                MSO_SHAPE.OVAL,
+                Inches(0.75), top + Inches(0.275),
+                Inches(1.2), Inches(1.2))
+            icon.fill.solid()
+            icon.fill.fore_color.rgb = _MOLLY_NAVY
+            icon.line.fill.background()
+            icon.shadow.inherit = False
+            itf = icon.text_frame
+            itf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            ip = itf.paragraphs[0]
+            ip.alignment = PP_ALIGN.CENTER
+            ir = ip.add_run()
+            ir.text = str(i + 1)
+            ir.font.size = Pt(28)
+            ir.font.bold = True
+            ir.font.color.rgb = _WHITE
+            # Header + body to the right of the icon.
+            text_left = Inches(2.15)
+            text_w = full_w - Inches(1.85)
+            tbox = s.shapes.add_textbox(
+                text_left, top + Inches(0.18),
+                text_w, row_h - Inches(0.3))
+            ttf = tbox.text_frame
+            ttf.word_wrap = True
+            tp = ttf.paragraphs[0]
+            tp.space_after = Pt(4)
+            tr = tp.add_run()
+            tr.text = hdr
+            tr.font.size = Pt(18)
+            tr.font.bold = True
+            tr.font.color.rgb = _MOLLY_NAVY
+            if body:
+                bp = ttf.add_paragraph()
+                br = bp.add_run()
+                br.text = body
+                br.font.size = Pt(14)
+                br.font.color.rgb = _INK_DARK
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deck_feature_rows_slide_failed", error=str(exc))
+    _footer(s, idx, total)
+
+
 def _render_content_slide(prs, sl, chart_png, idx, total) -> None:
     """Lay out one content slide: title bar, bullets, optional table, optional
     chart. Adds exactly one slide. Slides in SLIDE_CHARTS always reserve a
     chart slot — a None PNG degrades to a [DATA PENDING] note. Fully guarded so
-    a malformed slide never raises out of the builder."""
+    a malformed slide never raises out of the builder.
+
+    June 27 2026 (PR B) -- per-slide dispatch at the top routes the
+    Molly-reference slides to their specialized renderers. Slides 2
+    (Agenda) and 5 (Capital Preservation) fall through to the
+    generic bullets / chart / table renderer below; everything else
+    has a dedicated layout."""
+    if idx == 1:
+        return _render_title_slide(prs, sl, chart_png, idx, total)
+    if idx == 3:
+        return _render_split_panel_slide(
+            prs, sl, chart_png, idx, total)
+    if idx in (4, 6, 7, 9, 11):
+        return _render_card_grid_slide(
+            prs, sl, chart_png, idx, total)
+    if idx == 8:
+        return _render_scorecard_slide(
+            prs, sl, chart_png, idx, total)
+    if idx == 10:
+        return _render_feature_rows_slide(
+            prs, sl, chart_png, idx, total)
     s = _blank(prs)
     _bg(s, _WHITE)
     title = sl.get("title") or SLIDE_TITLES[idx - 1]
