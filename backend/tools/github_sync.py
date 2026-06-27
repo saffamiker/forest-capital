@@ -44,6 +44,12 @@ async def fetch_merged_pr_count(repo: str, token: str) -> int | None:
     Returns None when GITHUB_TOKEN is unset or the API errors, so the
     caller shows a dash (or a cached value) rather than a wrong number.
     The search API needs an authenticated request for a private repo.
+
+    June 27 2026 -- 401 is split out from the generic failure log so
+    operators can see at a glance that the token is invalid / expired
+    (vs a transient 5xx or rate limit). No retry on any failure --
+    the caller's negative cache suppresses further hits for the
+    configured TTL.
     """
     if not token:
         return None
@@ -61,6 +67,20 @@ async def fetch_merged_pr_count(repo: str, token: str) -> int | None:
                 params={"q": f"repo:{repo} type:pr is:merged base:main",
                         "per_page": 1},
             )
+            if resp.status_code == 401:
+                # Distinguish the auth-failure case so the operator
+                # knows to refresh GITHUB_TOKEN on Render rather than
+                # chase a transient API outage. Single warning per
+                # call; the caller's negative cache silences repeats
+                # for the configured TTL (no log spam).
+                log.warning(
+                    "github_pr_count_unauthorized", repo=repo,
+                    status=401,
+                    hint=("GITHUB_TOKEN is missing or expired -- "
+                          "refresh the Render env var. Classic PAT "
+                          "needs 'repo' scope; fine-grained PAT "
+                          "needs read access to PRs + Issues."))
+                return None
             if resp.status_code != 200:
                 log.warning("github_pr_count_failed", repo=repo,
                             status=resp.status_code)

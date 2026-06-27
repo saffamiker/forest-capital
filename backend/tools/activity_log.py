@@ -683,17 +683,48 @@ async def _read_page_views(session, text, session_type, date_from, date_to,
 # hour so the Team Activity summary does not call GitHub on every load (and
 # stays within the search-API rate limit). A stale-but-non-None cached value
 # is preferred over None on a transient API failure.
-_pr_count_cache: dict[str, Any] = {"count": None, "ts": 0.0}
-_PR_COUNT_TTL_SECONDS = 3600.0
+#
+# June 27 2026 -- the cache now ALSO tracks the last FAILURE timestamp
+# so a broken token (401) doesn't get hammered + re-logged on every
+# get_activity_summary() call (Academic Review assembles team-activity
+# context every run; each run was firing a fresh 401 + warning log).
+# The negative-cache TTL is shorter than the positive one so the
+# operator's token refresh on Render takes effect within a few
+# minutes rather than waiting out the full 1-hour positive window.
+_pr_count_cache: dict[str, Any] = {
+    "count": None,        # last successful count
+    "ts": 0.0,            # last success timestamp
+    "failed_at": 0.0,     # last failure timestamp (0 = never failed)
+}
+_PR_COUNT_TTL_SECONDS = 3600.0        # positive cache: 1 hour
+_PR_COUNT_FAILURE_TTL_SECONDS = 300.0  # negative cache: 5 minutes
 
 
 async def get_merged_pr_count() -> int | None:
-    """Total merged PRs against main, via the GitHub API, cached for an hour.
-    None when no GITHUB_TOKEN is configured or the API has never succeeded."""
+    """Total merged PRs against main, via the GitHub API.
+
+    Cached for an hour on success. On failure (missing token, 401,
+    network error, rate limit, ...) the result is negative-cached for
+    5 minutes so a broken token doesn't spam api.github.com with
+    requests + log lines on every Academic Review run. Returns the
+    last good value when one exists; otherwise None.
+    """
     import time
     now = time.time()
     cached = _pr_count_cache["count"]
-    if cached is not None and now - _pr_count_cache["ts"] < _PR_COUNT_TTL_SECONDS:
+    # Positive cache hit -- short-circuit.
+    if (cached is not None
+            and now - _pr_count_cache["ts"]
+                < _PR_COUNT_TTL_SECONDS):
+        return cached
+    # Negative cache hit -- short-circuit WITHOUT a fresh API call.
+    # The last failure was recent enough that another attempt would
+    # almost certainly fail the same way (the token is still
+    # invalid / the rate limit hasn't reset). Returning the last
+    # good value (or None) without re-hitting the API keeps the
+    # log clean.
+    if (now - _pr_count_cache["failed_at"]
+            < _PR_COUNT_FAILURE_TTL_SECONDS):
         return cached
     try:
         from config import GITHUB_REPO, GITHUB_TOKEN
@@ -702,10 +733,24 @@ async def get_merged_pr_count() -> int | None:
         if count is not None:
             _pr_count_cache["count"] = count
             _pr_count_cache["ts"] = now
+            _pr_count_cache["failed_at"] = 0.0  # reset negative cache
             return count
+        # Failure path -- record the timestamp so the negative cache
+        # suppresses further calls for the TTL. fetch_merged_pr_count
+        # has already logged the cause; we don't double-log here.
+        _pr_count_cache["failed_at"] = now
     except Exception as exc:  # noqa: BLE001
+        _pr_count_cache["failed_at"] = now
         log.warning("merged_pr_count_unavailable", error=str(exc))
     return cached  # last good value (or None if never fetched)
+
+
+def _reset_pr_count_cache() -> None:
+    """Test-only -- clear both positive + negative caches so each
+    spec starts from a clean slate."""
+    _pr_count_cache["count"] = None
+    _pr_count_cache["ts"] = 0.0
+    _pr_count_cache["failed_at"] = 0.0
 
 
 async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
