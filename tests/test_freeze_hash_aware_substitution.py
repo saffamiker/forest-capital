@@ -479,3 +479,108 @@ class TestGatherDocumentDataHashAware:
         assert "Run light refresh and try again" in msg
         # The error class also carries the hash on the attribute.
         assert err.data_hash == "c421fb895347f924"
+
+
+# ── LEAK 1 self-heal -- light refresh uses freeze hash ────────────
+
+
+class TestLightRefreshUsesFreezeHashWhenActive:
+    """PR 1 v4 (architectural-rule closure). Under freeze, the doc
+    generators raise StrategyCacheMissingForHashError when the
+    freeze hash has no strategy_results_cache row. The user-facing
+    spec message is 'Run light refresh and try again' -- which
+    REQUIRES light refresh to warm the strategy cache under the
+    FREEZE hash, not the live hash. Otherwise the error is NOT
+    self-healing and the user loops infinitely:
+
+      deck export -> miss -> error -> light refresh -> cache
+      populated under LIVE hash -> freeze-hash slot still empty
+      -> deck export -> miss -> error -> ...
+
+    Fix: post_light_refresh routes the strategy_hash through
+    get_effective_data_hash(live_hash). All downstream writes
+    (set_strategy_cache, refresh_academic_analytics,
+    refresh_oos_cost_sensitivity, the editor_drafts UPDATE, the
+    response's strategy_hash field) inherit the effective hash."""
+
+    def test_post_light_refresh_threads_effective_hash(self):
+        """Source inspection: post_light_refresh MUST call
+        get_effective_data_hash(live_hash) before writing the
+        strategy cache. Catches a future regression that drops the
+        freeze-aware indirection."""
+        import inspect
+        from main import post_light_refresh
+        src = inspect.getsource(post_light_refresh)
+        assert "get_effective_data_hash" in src, (
+            "post_light_refresh MUST route the strategy_hash "
+            "through get_effective_data_hash so light refresh "
+            "warms the FREEZE hash slot under freeze. Without "
+            "this, StrategyCacheMissingForHashError is not "
+            "self-healing -- the user loops infinitely.")
+        # The downstream writes must use the resolved
+        # strategy_hash (which now carries the effective hash),
+        # NOT a separate live-hash variable.
+        assert "set_strategy_cache(\n            strategy_hash" in src \
+            or "set_strategy_cache(strategy_hash" in src, (
+                "set_strategy_cache MUST be passed strategy_hash "
+                "(the effective hash), not live_hash directly")
+        assert "refresh_academic_analytics(strategy_hash)" in src, (
+            "refresh_academic_analytics MUST be passed "
+            "strategy_hash (the effective hash)")
+        assert "refresh_oos_cost_sensitivity(strategy_hash)" in src, (
+            "refresh_oos_cost_sensitivity MUST be passed "
+            "strategy_hash (the effective hash)")
+
+    def test_get_effective_data_hash_returns_freeze_when_active(
+            self, monkeypatch):
+        """End-to-end pin on the upstream helper. When freeze is
+        active with freeze_hash 'c421fb895347f924',
+        get_effective_data_hash returns the freeze hash REGARDLESS
+        of the live hash. post_light_refresh's three-line pattern
+        depends on this -- pin it so a future submission_freeze
+        refactor cannot accidentally invert the semantics."""
+        import asyncio
+        from tools import submission_freeze as sf
+
+        async def _frozen_config():
+            return {
+                "active": True,
+                "freeze_hash": "c421fb895347f924",
+            }
+
+        monkeypatch.setattr(
+            sf, "get_freeze_config", _frozen_config)
+
+        async def _run():
+            return await sf.get_effective_data_hash(
+                "d0b1339e06845559")  # different live hash
+
+        result = asyncio.run(_run())
+        assert result == "c421fb895347f924", (
+            "get_effective_data_hash MUST return the freeze hash "
+            "when freeze is active, regardless of the live hash. "
+            "Without this, light refresh would warm the cache "
+            "under the wrong slot.")
+
+    def test_get_effective_data_hash_returns_live_when_inactive(
+            self, monkeypatch):
+        """Mirror pin: when freeze is OFF,
+        get_effective_data_hash MUST return the live hash unchanged.
+        This is the legacy / live-platform path -- a refactor that
+        always returned the freeze hash would break the
+        live-dashboard generators."""
+        import asyncio
+        from tools import submission_freeze as sf
+
+        async def _off_config():
+            return {"active": False, "freeze_hash": None}
+
+        monkeypatch.setattr(
+            sf, "get_freeze_config", _off_config)
+
+        async def _run():
+            return await sf.get_effective_data_hash(
+                "d0b1339e06845559")
+
+        result = asyncio.run(_run())
+        assert result == "d0b1339e06845559"

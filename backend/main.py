@@ -3559,10 +3559,26 @@ async def post_light_refresh(
         from tools.cache import set_strategy_cache
         from tools.data_fetcher import get_full_history_async
         from tools.audit_assembler import current_data_hash
+        from tools.submission_freeze import get_effective_data_hash
         history = await get_full_history_async()
         monthly = history.get("equity_monthly")
         n_rows = len(monthly) if monthly is not None else 0
-        strategy_hash = await current_data_hash()
+        # June 27 2026 (PR 1 v4 -- architectural-rule closure) --
+        # under freeze, light refresh MUST warm the strategy cache
+        # under the FREEZE hash, not the live hash. Otherwise the
+        # StrategyCacheMissingForHashError raised by the 3 doc
+        # generators (PR 1 v3) is NOT self-healing: the user runs
+        # light refresh, the cache populates under the live hash,
+        # the freeze-hash slot is still empty, the next deck export
+        # fails again -- infinite loop. Routing through
+        # get_effective_data_hash makes the cache write land in the
+        # correct slot for whichever mode the platform is in. All
+        # downstream uses below (refresh_academic_analytics,
+        # refresh_oos_cost_sensitivity, the editor_drafts UPDATE,
+        # the response's strategy_hash field) inherit the effective
+        # hash automatically -- no further changes needed.
+        live_hash = await current_data_hash()
+        strategy_hash = await get_effective_data_hash(live_hash)
         if not strategy_hash:
             # current_data_hash returns "" on a degraded data path
             # (the source tables haven't loaded). Fall through with
