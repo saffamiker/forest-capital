@@ -174,13 +174,24 @@ class TestAgendaSlideNoChart:
         """The chart slots renumbered along with the slides. In
         the 11-slide deck charts were on slides 4, 5, 11; in the
         12-slide deck they're on slides 5, 6, 12 (each shifted
-        by +1 due to the agenda insert; the closing-slide chart
-        also shifted)."""
+        by +1 due to the agenda insert).
+
+        June 27 2026 -- post-drift-reconciliation. SLIDE_CHARTS
+        was extended to cover slides 4, 7, 8 (which the editor
+        canvas always had charts on) and slide 6's role flipped
+        from 'strategy_comparison_oos_sharpe' to
+        'cumulative_returns' + slide 12's key changed from
+        'efficient_frontier' to 'risk_return' (the canonical
+        renderer dispatch key) so the export agrees with the
+        canvas. See _assert_chart_maps_match in editor_content.py."""
         from tools.academic_deck import SLIDE_CHARTS
         assert SLIDE_CHARTS == {
-            5: "rolling_correlation",
-            6: "strategy_comparison_oos_sharpe",
-            12: "efficient_frontier",
+            4:  "rolling_sharpe",
+            5:  "rolling_correlation",
+            6:  "cumulative_returns",
+            7:  "oos_performance",
+            8:  "regime_signals",
+            12: "risk_return",
         }
 
 

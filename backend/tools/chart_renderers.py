@@ -138,6 +138,7 @@ def render_extended_charts(
     chart_key: str,
     data: dict[str, Any],
     extras: dict[str, Any] | None = None,
+    chart_config: dict | None = None,
 ) -> dict[str, bytes | None]:
     """
     Renders one of the extended canvas charts to a light-mode PNG.
@@ -148,6 +149,12 @@ def render_extended_charts(
 
     Single-chart dispatch (not the deck's "render every chart at once"
     pattern) so the canvas editor pays only for what it asks for.
+
+    June 26 2026 -- chart_config flows to each renderer via
+    **kwargs. Renderers that opt in (rolling_sharpe, oos_performance,
+    regime_signals -- the three the deck uses) call
+    chart_render._apply_chart_config on their axes before _finish;
+    others ignore it. None preserves byte-identical legacy output.
     """
     extras = extras or {}
     charts: dict[str, bytes | None] = {chart_key: None}
@@ -166,7 +173,9 @@ def render_extended_charts(
         return charts
 
     try:
-        png = renderer(data, extras, plt)
+        # Renderers accept **kwargs so chart_config can flow without
+        # every renderer needing to declare it explicitly.
+        png = renderer(data, extras, plt, chart_config=chart_config)
         charts[chart_key] = png
     except Exception as exc:  # noqa: BLE001
         log.warning("extended_chart_failed", chart_key=chart_key,
@@ -179,7 +188,7 @@ def render_extended_charts(
 # ── regime_signals — HMM posterior probability stacked area ───────────────────
 
 def _render_regime_signals(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     P(regime=BULL/TRANSITION/BEAR) over the full monthly history as a
@@ -216,13 +225,16 @@ def _render_regime_signals(
     ax.set_title("HMM Regime Probability Over Time", fontsize=11)
     ax.legend(loc="upper left", fontsize=8, frameon=False, ncol=3)
     _style(ax)
+    # June 26 2026 -- editor overrides via chart_config kwarg.
+    from tools.chart_render import _apply_chart_config
+    _apply_chart_config(ax, _kwargs.get("chart_config"))
     return _finish(fig, plt)
 
 
 # ── regime_conditional_returns — mean monthly return per regime, per asset ────
 
 def _render_regime_conditional_returns(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     Grouped bar chart: x-axis = asset (Equity / IG / HY); within each
@@ -298,7 +310,7 @@ def _render_regime_conditional_returns(
 # ── factor_loadings — Carhart betas with 95% CIs (horizontal bars) ────────────
 
 def _render_factor_loadings(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     Horizontal bar chart of BENCHMARK's four Carhart factor betas with
@@ -364,7 +376,7 @@ def _render_factor_loadings(
 # ── factor_returns_attribution — per-year factor contribution (stacked) ───────
 
 def _render_factor_returns_attribution(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     Stacked bar chart per calendar year: each bar's segments are the
@@ -499,7 +511,7 @@ def _pairs_to_indexed_series(pairs: list[Any]):
 # ── drawdown_periods — underwater equity curve, strategy vs benchmark ─────────
 
 def _render_drawdown_periods(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     Underwater curve — % below the running peak — for the strategy and
@@ -548,7 +560,7 @@ def _render_drawdown_periods(
 # ── monthly_returns_heatmap — year × month grid, strategy on top, bench below ─
 
 def _render_monthly_returns_heatmap(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     Two stacked calendar heatmaps — the strategy on top, the benchmark
@@ -623,7 +635,7 @@ def _render_monthly_returns_heatmap(
 # ── rolling_sharpe — 36-month rolling Sharpe, strategy vs benchmark ───────────
 
 def _render_rolling_sharpe(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     36-month rolling Sharpe ratio for the strategy and benchmark on a
@@ -675,13 +687,16 @@ def _render_rolling_sharpe(
     ax.set_ylabel("Sharpe ratio")
     ax.legend(fontsize=8, frameon=False)
     _style(ax)
+    # June 26 2026 -- editor overrides via chart_config kwarg.
+    from tools.chart_render import _apply_chart_config
+    _apply_chart_config(ax, _kwargs.get("chart_config"))
     return _finish(fig, plt)
 
 
 # ── rolling_excess_return — strategy minus benchmark, 12-month trailing ───────
 
 def _render_rolling_excess_return(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     12-month rolling total return of each strategy minus the 100%
@@ -775,7 +790,7 @@ def _render_rolling_excess_return(
 # ── return_distribution — histogram with normal overlay, strategy vs benchmark
 
 def _render_return_distribution(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     Overlaid monthly-return histograms — strategy and benchmark — with
@@ -835,7 +850,7 @@ def _render_return_distribution(
 # ── significance_journey — Tier 1 gate pass/fail matrix ───────────────────────
 
 def _render_significance_journey(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     A row-per-gate × column-per-strategy matrix of green (PASS) / red
@@ -919,7 +934,7 @@ def _render_significance_journey(
 # ── oos_performance — IS vs OOS cumulative returns ─────────────────────────────
 
 def _render_oos_performance(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     Cumulative growth-of-$1 for the strategy, with the last
@@ -970,13 +985,16 @@ def _render_oos_performance(
     ax.set_ylabel("Growth of $1")
     ax.legend(fontsize=8, frameon=False, loc="upper left")
     _style(ax)
+    # June 26 2026 -- editor overrides via chart_config kwarg.
+    from tools.chart_render import _apply_chart_config
+    _apply_chart_config(ax, _kwargs.get("chart_config"))
     return _finish(fig, plt)
 
 
 # ── p_value_distribution — FDR-corrected p-values across strategies ───────────
 
 def _render_p_value_distribution(
-    data: dict[str, Any], extras: dict[str, Any], plt,
+    data: dict[str, Any], extras: dict[str, Any], plt, **_kwargs,
 ) -> bytes | None:
     """
     Bar chart of every strategy's FDR-corrected p-value with a dashed

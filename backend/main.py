@@ -12909,8 +12909,16 @@ async def _editor_export(editor_draft_id: int) -> Response:
             try:
                 w = min(2000, max(80, int(el.get("width") or 360) * 2))
                 h = min(2000, max(80, int(el.get("height") or 220) * 2))
+                # June 26 2026 -- chart_config flows through so
+                # editor overrides (title / axis / colors / series
+                # visibility) reach the matplotlib output. Legacy
+                # elements without chart_config pass None and the
+                # renderer falls back to its hardcoded defaults.
+                cfg = el.get("chart_config")
+                cfg_dict = cfg if isinstance(cfg, dict) else None
                 png = await render_chart_png(
-                    str(el["chartKey"]), "light", w, h)
+                    str(el["chartKey"]), "light", w, h,
+                    chart_config=cfg_dict)
                 return (str(el.get("id")), png)
             except Exception:  # noqa: BLE001 — skip, builder degrades
                 return None
@@ -16890,6 +16898,14 @@ def _render_deck_slide_charts(
     and the operator sees the slot-unavailable WARNING via _image().
     """
     from tools.academic_deck import SLIDE_CHARTS
+    # June 27 2026 -- additional renderers for the reconciled
+    # SLIDE_CHARTS (slides 4 / 6 / 7 / 8 / 12 gained chart roles
+    # when the generation map was brought into alignment with the
+    # editor canvas).
+    from tools.chart_render import render_cumulative_returns
+    from tools.chart_renderers import (
+        render_extended_charts as _render_extended_charts,
+    )
     from tools.chart_render import (
         render_efficient_frontier, render_rolling_correlation,
         render_strategy_comparison,
@@ -16907,18 +16923,55 @@ def _render_deck_slide_charts(
     # time. blend_series is reserved for future role additions (e.g. an
     # explicit cumulative-return overlay slot); kept on the signature
     # so the existing call sites do not have to change.
+    # Extended-renderer helper: a single dispatch through
+    # render_extended_charts so a chart_renderers.py role plugs in
+    # with a one-line entry instead of needing its own import.
+    # Returns PNG bytes or None on failure (matches the contract
+    # of the chart_render.render_* helpers).
+    def _extended(key: str) -> bytes | None:
+        try:
+            return _render_extended_charts(key, data).get(key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "deck_chart_extended_render_failed",
+                key=key, error=str(exc))
+            return None
+
     chart_role_renderers = {
+        # slide 4 -- rolling-Sharpe comparison (extended renderer)
+        "rolling_sharpe":
+            lambda d: _extended("rolling_sharpe"),
+        # slide 5
         "rolling_correlation":
             lambda d: render_rolling_correlation(d),
-        # render_strategy_comparison's default arguments render every
-        # strategy as bars; the slide spec instructs the model to
-        # surface only the three relevant rows in its table, but the
-        # chart renderer produces the full comparison so the visual
-        # carries the cohort context.
+        # slide 6 -- post-reconciliation: cumulative_returns
+        # (previously strategy_comparison_oos_sharpe). Matches
+        # what the editor canvas shows on slide 6.
+        "cumulative_returns":
+            lambda d: render_cumulative_returns(d),
+        # slide 7 -- OOS performance (extended renderer)
+        "oos_performance":
+            lambda d: _extended("oos_performance"),
+        # slide 8 -- live regime signals (extended renderer)
+        "regime_signals":
+            lambda d: _extended("regime_signals"),
+        # slide 12 -- canonical key 'risk_return' from
+        # chart_render._DECK_KEYS (formerly 'efficient_frontier'
+        # in this dispatch). render_efficient_frontier is still
+        # the underlying matplotlib function; only the dispatch
+        # key changed to match the renderer registry.
+        # blend_weights drives the live marker on the frontier;
+        # the rest of the sweep comes from analytics_metrics_cache.
+        "risk_return":
+            lambda d: render_efficient_frontier(
+                d, blend_weights=blend_weights),
+        # Legacy keys retained as aliases so any pre-reconciliation
+        # caller that still requests the old roles continues to
+        # work (e.g. a story plan from a draft generated before
+        # the reconciliation). Defensive only -- SLIDE_CHARTS no
+        # longer uses these roles.
         "strategy_comparison_oos_sharpe":
             lambda d: render_strategy_comparison(d),
-        # blend_weights drives the live marker on the frontier; the
-        # rest of the sweep comes from analytics_metrics_cache.
         "efficient_frontier":
             lambda d: render_efficient_frontier(
                 d, blend_weights=blend_weights),
@@ -17359,8 +17412,22 @@ async def _finalize_deck(
     try:
         from tools.editor_content import deck_slides_to_editor
         from tools.editor_drafts import create_draft
+        from tools.chart_config_defaults import (
+            default_strategy_names_from_cache,
+        )
 
-        content_json, content_text = deck_slides_to_editor(slides)
+        # June 26 2026 -- strategy_names sourced from the live
+        # strategy_results cache so each chart_config's series
+        # list (and each table_config's rows list) gets
+        # prepopulated with every strategy in cache order, all
+        # visible by default. The editor's Configure panel can
+        # then toggle individual series off. Falls back to [] when
+        # the cache is empty (cold env / pre-warm); the renderer's
+        # fallback path handles the absent-series case unchanged.
+        strategy_names = default_strategy_names_from_cache(
+            data.get("strategy_results"))
+        content_json, content_text = deck_slides_to_editor(
+            slides, strategy_names=strategy_names)
 
         # ── Concern 7h: pre-submission adversarial critic ─────
         try:

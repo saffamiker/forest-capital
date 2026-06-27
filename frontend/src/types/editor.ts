@@ -37,6 +37,83 @@ export interface CanvasTextElement extends CanvasElementBase {
   color: string
 }
 
+/** Chart visual / data configuration, prepopulated at deck
+ *  generation time and editable in the slide editor. All fields
+ *  are OPTIONAL -- when absent the renderer uses its hardcoded
+ *  defaults (so legacy drafts created before this schema rev
+ *  render unchanged). The fields cover presentation only; the
+ *  underlying data source is still the verified analytics cache. */
+export interface ChartConfig {
+  /** Logical chart kind. The renderer dispatches off chartKey
+   *  for the data wiring; chart_type is an editor hint + a guard
+   *  against silently swapping a line-chart's renderer for a
+   *  bar-chart's data shape. */
+  chart_type?: 'line' | 'bar' | 'scatter' | 'waterfall' | 'table'
+  /** Override the default chart title (defaults to the renderer's
+   *  hardcoded string). */
+  title?: string
+  /** Caption rendered below the chart on the slide. */
+  caption?: string
+  /** Mirror of the chart element's chartKey -- carried in config
+   *  so the editor can show / re-assign a renderer without
+   *  reaching into the parent element. */
+  renderer_key?: string
+  color_scheme?: {
+    primary?:   string
+    secondary?: string
+    benchmark?: string
+    accent?:    string
+  }
+  axis?: {
+    x_label?: string
+    y_label?: string
+    x_min?: number | null
+    x_max?: number | null
+    y_min?: number | null
+    y_max?: number | null
+  }
+  /** Per-series controls -- visibility, label, color override.
+   *  Prepopulated with one entry per strategy in the analytics
+   *  cache at generation time (all visible by default). */
+  series?: Array<{
+    key:     string
+    label:   string
+    visible: boolean
+    color?:  string
+  }>
+  date_range?: {
+    start?:  string | null
+    end?:    string | null
+    preset?: 'full' | 'post_2022' | 'oos_only' | 'custom'
+  }
+  highlight_regime_breaks?: boolean
+  show_benchmark?: boolean
+}
+
+/** Table visual / data configuration, prepopulated at deck
+ *  generation time and editable in the slide editor. */
+export interface TableConfig {
+  /** Logical table kind -- drives the default columns + the
+   *  cache the rows are pulled from. */
+  table_type?:
+    | 'performance' | 'correlation' | 'factor_loadings' | 'drawdown'
+  title?:   string
+  caption?: string
+  /** Strategy IDs to include as rows (when the table's cell
+   *  data is looked up at render time from the analytics cache)
+   *  OR a list-of-lists where each row already carries its cell
+   *  data verbatim (the deck-generation prepopulated shape).
+   *  The renderer accepts both; the Configure panel writes
+   *  whichever shape the user is editing. */
+  rows?: string[] | string[][]
+  /** Metric column ids to include (e.g. 'sharpe', 'max_dd').
+   *  Empty / absent => the table_type's default column set. */
+  columns?: string[]
+  highlight_best?:  boolean
+  highlight_worst?: boolean
+  decimal_places?:  number
+}
+
 /** A chart element — a platform chart rendered server-side as a PNG. */
 export interface CanvasChartElement extends CanvasElementBase {
   type: 'chart'
@@ -44,9 +121,24 @@ export interface CanvasChartElement extends CanvasElementBase {
   chartKey: string
   /** The presenter confirms the chart reflects current platform data. */
   verified: boolean
+  /** Optional appearance + filtering overrides for the renderer.
+   *  Absence preserves the renderer's hardcoded defaults. */
+  chart_config?: ChartConfig
 }
 
-export type CanvasElement = CanvasTextElement | CanvasChartElement
+/** A native table element -- promoted to a first-class canvas
+ *  element type June 26 2026 so Molly can edit table appearance +
+ *  row/column selection in the slide editor without falling back
+ *  to markdown-pipe text inside a body element. Renders as a real
+ *  PPTX <a:tbl> on export. */
+export interface CanvasTableElement extends CanvasElementBase {
+  type: 'table'
+  /** Optional appearance + selection overrides. */
+  table_config?: TableConfig
+}
+
+export type CanvasElement =
+  | CanvasTextElement | CanvasChartElement | CanvasTableElement
 
 /** One slide of a presentation_deck draft's content_json. */
 export interface CanvasSlide {
