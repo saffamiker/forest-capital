@@ -621,46 +621,16 @@ export default function DocumentGenerationPanel() {
     // canonical "current" draft. always-confirm on Regenerate is
     // the safe default.
     //
-    // June 27 2026 -- consolidated brief onto the same
-    // RegenConfirmModal flow as deck / appendix / script. The
-    // dedicated BriefRegenConfirmModal was retired so all four
-    // document types share one modal contract.
-    //
-    // For the executive brief specifically, a pre-flight check
-    // against /api/v1/story-plans/exists is still performed so
-    // brief regens that touch no downstream plans skip the modal
-    // entirely. This pre-flight is removed in the next commit
-    // (modal becomes unconditional per spec); kept here so the
-    // consolidation lands as a focused refactor without changing
-    // the trigger conditions in the same diff.
+    // June 27 2026 -- modal fires UNCONDITIONALLY on every
+    // Regenerate click for every document type. The brief's
+    // legacy pre-flight against /api/v1/story-plans/exists (which
+    // skipped the modal when no downstream plans existed) was
+    // removed: per the spec the user must always actively
+    // confirm they want to regenerate, with no exceptions. Bob
+    // and Molly never lose the prior draft to a misclick.
     if (opts?.regenerate && !opts?._fromRegenConfirm) {
-      if (doc.documentType === 'executive_brief') {
-        try {
-          const res = await axios.get<{
-            exists: boolean
-            types: Record<string, boolean>
-          }>('/api/v1/story-plans/exists', {
-            params: {
-              document_types:
-                'presentation_deck,'
-                + 'analytical_appendix,'
-                + 'presentation_script',
-            },
-          })
-          if (res.data.exists) {
-            setRegenConfirm({ open: true, pendingDoc: doc })
-            return
-          }
-        } catch {
-          // Pre-flight failure -- fall through to Generate.
-          // The backend clear is fail-open too: if it can't run
-          // the DELETE, the brief still generates. The modal is
-          // a courtesy warning, not a hard gate.
-        }
-      } else {
-        setRegenConfirm({ open: true, pendingDoc: doc })
-        return
-      }
+      setRegenConfirm({ open: true, pendingDoc: doc })
+      return
     }
     // June 25 2026 -- client-side blocking gate narrowed to
     // caches_not_warm only. Per the platform's fail-open

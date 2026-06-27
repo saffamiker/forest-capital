@@ -222,29 +222,13 @@ describe('DocumentGenerationPanel — async generation', () => {
     })
 
   it('Brief Regenerate is a no-op when the user dismisses the '
-    + 'unified RegenConfirmModal (June 27 2026 -- brief '
-    + 'consolidated onto RegenConfirmModal)', async () => {
-      // The brief regen path runs a pre-flight GET to
-      // /api/v1/story-plans/exists and, when downstream plans
-      // exist, opens the unified RegenConfirmModal (brief used
-      // to have a dedicated BriefRegenConfirmModal -- retired).
-      // Pinning the cancel branch guards against the modal
-      // being silently removed.
-      mockedAxios.get.mockImplementation((url: string) => {
-        if (url === '/api/v1/story-plans/exists') {
-          return Promise.resolve({
-            data: {
-              exists: true,
-              types: {
-                presentation_deck: true,
-                analytical_appendix: true,
-                presentation_script: false,
-              },
-            },
-          })
-        }
-        return Promise.resolve({ data: { jobs: [] } })
-      })
+    + 'unified RegenConfirmModal (June 27 2026 -- modal is '
+    + 'unconditional: no pre-flight gate)', async () => {
+      // The brief regen modal fires on EVERY Regenerate click --
+      // no pre-flight check against /api/v1/story-plans/exists,
+      // no skip-when-no-downstream-plans short-circuit. The user
+      // must always actively confirm. Pinning the cancel branch
+      // guards against the modal being silently removed.
       renderPanel(<DocumentGenerationPanel />)
       trackJob({
         job_id: 'j-brief-c', document_type: 'executive_brief',
@@ -255,12 +239,19 @@ describe('DocumentGenerationPanel — async generation', () => {
       const button = await within(card).findByTestId(
         'regenerate-brief')
       fireEvent.click(button)
-      // Modal opens on the pre-flight result.
+      // Modal opens unconditionally.
       const cancel = await screen.findByTestId(
         'regen-confirm-modal-cancel')
       fireEvent.click(cancel)
       // Cancel suppresses the POST.
       expect(mockedAxios.post).not.toHaveBeenCalled()
+      // No story-plans pre-flight should fire.
+      const callsToStoryPlans =
+        mockedAxios.get.mock.calls.filter(
+          ([url]) =>
+            typeof url === 'string'
+            && url.includes('/api/v1/story-plans/exists'))
+      expect(callsToStoryPlans).toHaveLength(0)
     })
 
   it('shows the error state with Try Again on a failed job', async () => {
