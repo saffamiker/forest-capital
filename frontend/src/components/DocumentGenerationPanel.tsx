@@ -29,6 +29,9 @@ import {
   jobForType, type GenJob,
 } from '../lib/generationJobs'
 import {
+  setCurrentDraftPresence,
+} from '../lib/currentDraftPresence'
+import {
   ReportBlockingModal, useReportReadinessGate,
 } from './ReportReadinessIndicator'
 import { BriefWorkflowModal } from './BriefWorkflowModal'
@@ -559,6 +562,12 @@ export default function DocumentGenerationPanel() {
           }
         }
         setCurrentDraftByType(map)
+        // June 27 2026 (BUG 2 -- toast suppression). Push the
+        // current-draft map into the shared presence store so
+        // GenerationToast (mounted in MainLayout) can suppress
+        // the red error banner when a usable draft exists for
+        // a failed job's doc_type.
+        setCurrentDraftPresence(res.data?.drafts ?? [])
       })
       .catch(() => { /* no-op -- tile stays metadata-less */ })
     // Also fetch the live strategy hash for the mismatch check.
@@ -684,8 +693,33 @@ export default function DocumentGenerationPanel() {
     try {
       const res = await axios.post<{ job_id: string; status: string }>(
         doc.endpoint)
+      // June 27 2026 (BUG 1) -- validate the response carries a
+      // string job_id BEFORE trackJob. Without this guard, a
+      // server response that omits job_id (5xx wrapped as 200 by
+      // a proxy, sync short-circuit endpoint, etc.) would
+      // register {job_id: undefined, ...} in the polling store;
+      // the next poll GET /api/v1/jobs/undefined 404s and flips
+      // status to 'failed' with 'Generation job is no longer
+      // available' -- exactly the stale-job UX BUG 2 surfaces.
+      // Defense in depth: refuse to track an invalid job and
+      // surface a clear error instead.
+      const jobId = res.data?.job_id
+      if (typeof jobId !== 'string' || jobId.trim() === '') {
+        setErrors((prev) => ({
+          ...prev,
+          [doc.id]: (
+            'Server accepted the request but did not return a '
+            + 'job id. Refresh and check Reports -- the job may '
+            + 'still be queued. Try Again to re-submit.'),
+        }))
+        // Best-effort: pick up any newly-queued backend job the
+        // /api/v1/jobs list endpoint can see, in case the
+        // response shape was malformed but the job was created.
+        void loadExistingJobs()
+        return
+      }
       trackJob({
-        job_id: res.data.job_id, document_type: doc.documentType,
+        job_id: jobId, document_type: doc.documentType,
         status: 'pending', draft_id: null, download_url: null, error: null,
       })
     } catch (err) {
@@ -720,6 +754,20 @@ export default function DocumentGenerationPanel() {
           // server's authoritative state from this 422.
           void readinessGate.reload()
           return
+        }
+      }
+      // June 27 2026 (BUG 1 -- POST-throw with new-job survival).
+      // If the POST request failed but the server may have
+      // accepted it (timeout / 502 / 504 from the proxy), pull
+      // the canonical jobs list so a freshly-queued job gets
+      // tracked even though our response never came back. The
+      // refresh is best-effort -- it does nothing if no new job
+      // exists. Skip for 4xx codes where the server explicitly
+      // rejected the request (no new job to recover).
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status
+        if (!status || status >= 500) {
+          void loadExistingJobs()
         }
       }
       let msg = 'Generation failed. Please try again.'
