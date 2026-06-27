@@ -499,6 +499,42 @@ async def create_draft(
     never sees a half-applied state. Manual / uploaded drafts
     skip the cascade.
     """
+    # June 26 2026 -- never promote a NULL / empty content_json
+    # draft to is_current=true for GENERATED drafts. A generation
+    # job that failed before the LLM returned could land here with
+    # content_json=None or {}; the existing single-INSERT path
+    # would still SET is_current=true and clear is_current on the
+    # previous good draft, leaving the team with a blank editor
+    # and the prior draft hidden (observed 2026-06-26 with draft
+    # 65 / analytical_appendix: is_current=true but content_json=
+    # NULL; draft 60 with content_len=15336 hidden).
+    #
+    # Scoped to created_from='generated' because:
+    #   * manual creation legitimately starts with an empty body
+    #     and is filled in via PATCH /drafts/{id} (the
+    #     editor_create_draft test scaffolding follows this shape)
+    #   * uploaded creation supplies its own content_json verbatim
+    #     and shouldn't be second-guessed at the create boundary
+    # Generated drafts are the only path that comes from an
+    # opaque async pipeline whose failure modes include "row
+    # exists but content never landed". Pre-flight the guard
+    # there.
+    #
+    # On guard fire: log + return None. The previous current
+    # draft is unchanged; the caller surfaces the failure rather
+    # than handing back a poisoned draft id.
+    if created_from == "generated" and (
+            content_json is None or not content_json):
+        log.warning(
+            "editor_create_draft_rejected_empty_content_json",
+            document_type=document_type,
+            owner_email=owner_email,
+            created_from=created_from,
+            content_json_kind=type(content_json).__name__,
+            hint=(
+                "Generation produced no content; previous current "
+                "draft preserved."))
+        return None
     try:
         from sqlalchemy import text
         sf = _session()
@@ -627,6 +663,116 @@ async def create_draft(
     except Exception as exc:  # noqa: BLE001
         log.warning("editor_create_draft_failed", error=str(exc))
         return None
+
+
+async def recover_null_current_drafts() -> int:
+    """June 26 2026 -- auto-recovery for the NULL-current-draft bug.
+
+    For each document_type, finds rows where is_current=true AND
+    content_json IS NULL (orphaned by an interrupted generation
+    job that landed the row but never wrote content). The fix is:
+      1. Clear is_current=false on the broken row -- it stays in
+         the table as a historical record but is no longer
+         surfaced to the editor / Academic Review / exports.
+      2. Find the most recent draft for the same document_type
+         WHERE content_json IS NOT NULL AND is_deleted = false,
+         and SET is_current=true on it -- restores the team's
+         prior good draft as the canonical version.
+      3. Log a warning naming both rows so the operator can see
+         the auto-recovery fired in Render logs.
+
+    Returns the total number of recoveries applied (= count of
+    document_types whose current row was a NULL-content shell).
+    Fail-open: a DB error logs + returns 0 -- the caller never
+    blocks on this housekeeping.
+
+    Called from two places:
+      * lifespan() at startup so a crash-loop never leaves the
+        team without a current draft.
+      * post_light_refresh after the existing draft-hash UPDATE
+        so a refresh that was racing a botched generation
+        recovers without an operator restart.
+
+    Idempotent: a subsequent call finds no NULL-current rows
+    (because the previous call cleared them) and returns 0.
+    """
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return 0
+
+        async with sf() as s:
+            # Find every broken row in one query: is_current=true
+            # AND content_json IS NULL (the failure shape).
+            broken = await s.execute(text(
+                "SELECT id, document_type FROM editor_drafts "
+                "WHERE is_current = true "
+                "AND is_deleted = false "
+                "AND content_json IS NULL"))
+            broken_rows = list(broken.fetchall())
+            if not broken_rows:
+                return 0
+
+            recoveries = 0
+            for broken_id, doc_type in broken_rows:
+                # Step 1 -- demote the broken row.
+                await s.execute(text(
+                    "UPDATE editor_drafts SET is_current = false "
+                    "WHERE id = :id"),
+                    {"id": int(broken_id)})
+
+                # Step 2 -- find the most recent good draft for
+                # this document_type to restore as is_current.
+                # Prefer updated_at DESC so a draft the team has
+                # since edited wins over an older un-touched one.
+                good = await s.execute(text(
+                    "SELECT id FROM editor_drafts "
+                    "WHERE document_type = :t "
+                    "AND content_json IS NOT NULL "
+                    "AND is_deleted = false "
+                    "AND id <> :bid "
+                    "ORDER BY updated_at DESC, id DESC LIMIT 1"),
+                    {"t": doc_type, "bid": int(broken_id)})
+                good_row = good.fetchone()
+
+                if good_row is None:
+                    # No prior good draft for this document_type.
+                    # The team will see the editor as 'no draft
+                    # yet, generate one' -- the correct end state
+                    # vs surfacing a blank draft as current.
+                    log.warning(
+                        "editor_null_current_no_prior_recovery",
+                        document_type=doc_type,
+                        broken_draft_id=int(broken_id),
+                        hint=(
+                            "Broken is_current draft demoted but "
+                            "no prior good draft found to restore. "
+                            "Generate the document to seed a new "
+                            "draft."))
+                else:
+                    good_id = int(good_row[0])
+                    await s.execute(text(
+                        "UPDATE editor_drafts SET is_current = true "
+                        "WHERE id = :id"),
+                        {"id": good_id})
+                    log.warning(
+                        "editor_null_current_recovered",
+                        document_type=doc_type,
+                        broken_draft_id=int(broken_id),
+                        restored_draft_id=good_id,
+                        hint=(
+                            "Auto-recovered prior good draft after "
+                            "broken NULL-content current row."))
+                recoveries += 1
+
+            await s.commit()
+            return recoveries
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_recover_null_current_drafts_failed",
+            error=str(exc))
+        return 0
 
 
 async def update_draft(
