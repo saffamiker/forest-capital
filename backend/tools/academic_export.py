@@ -45,7 +45,9 @@ log = structlog.get_logger(__name__)
 DATA_PENDING = "[DATA PENDING]"
 
 
-async def load_substitution_metric_sources() -> tuple[
+async def load_substitution_metric_sources(
+    data_hash: str | None = None,
+) -> tuple[
     list[dict], list[dict], dict | None, dict | None,
 ]:
     """Read the analytics_metrics_cache metric_kinds that feed
@@ -53,11 +55,19 @@ async def load_substitution_metric_sources() -> tuple[
     factor loadings, net-of-cost Sharpe, and crisis-window
     drawdown tokens.
 
+    data_hash -- June 27 2026. When supplied, routes through
+    get_metric(data_hash, metric_kind) so the deck / brief /
+    appendix under submission freeze read the metrics row that
+    matches the freeze hash, NOT the latest row. Without this,
+    a freeze-keyed substitution table was being populated with
+    LIVE metric values (same architectural bug class as
+    get_latest_recommendation vs get_cached_for_hash for the
+    CIO row). When None (legacy callers, live platform reads),
+    falls through to get_latest_metric and returns the most
+    recent row per metric_kind regardless of hash.
+
     Returns (regime_conditional, factor_loadings,
-    cost_sensitivity, crisis_performance) -- all four from the
-    LATEST cached row per metric_kind, regardless of hash
-    match. The brief / appendix / deck / data-reference-sheet
-    callsites pass these as kwargs to get_substitution_table.
+    cost_sensitivity, crisis_performance).
 
     Single read for both academic_analytics fields -- the payload
     bundles regime_conditional + factor_loadings together at
@@ -69,10 +79,6 @@ async def load_substitution_metric_sources() -> tuple[
     and feeds the per-strategy GFC / Rate Shock 2022 drawdown
     tokens.
 
-    June 22 2026 -- crisis_performance added as 4th return slot
-    so slides 4 and 6 stop rendering [DATA PENDING] for the
-    crisis-window cells.
-
     Fail-open: missing fields return empty lists / None so the
     substitution table degrades to em-dashes rather than raising.
     """
@@ -81,8 +87,16 @@ async def load_substitution_metric_sources() -> tuple[
     cost_sensitivity: dict | None = None
     crisis_performance: dict | None = None
     try:
-        from tools.precomputed_analytics import get_latest_metric
-        aa = await get_latest_metric("academic_analytics")
+        from tools.precomputed_analytics import (
+            get_latest_metric, get_metric,
+        )
+
+        async def _read(kind: str) -> Any:
+            if data_hash:
+                return await get_metric(data_hash, kind)
+            return await get_latest_metric(kind)
+
+        aa = await _read("academic_analytics")
         if isinstance(aa, dict):
             rc = aa.get("regime_conditional")
             if isinstance(rc, list):
@@ -90,10 +104,10 @@ async def load_substitution_metric_sources() -> tuple[
             fl = aa.get("factor_loadings")
             if isinstance(fl, list):
                 factor_loadings = fl
-        cs = await get_latest_metric("oos_cost_sensitivity")
+        cs = await _read("oos_cost_sensitivity")
         if isinstance(cs, dict):
             cost_sensitivity = cs
-        cp = await get_latest_metric("crisis_performance")
+        cp = await _read("crisis_performance")
         if isinstance(cp, dict):
             crisis_performance = cp
     except Exception as exc:  # noqa: BLE001
@@ -105,13 +119,62 @@ async def load_substitution_metric_sources() -> tuple[
         cost_sensitivity, crisis_performance)
 
 
-async def gather_document_data() -> dict[str, Any]:
+class StrategyCacheMissingForHashError(RuntimeError):
+    """June 27 2026 -- raised by gather_document_data when called
+    with an explicit data_hash that has no strategy_results_cache
+    row. Translated by the 3 document generators in main.py into
+    HTTPException 500 with the spec error:
+        'Export failed: strategy cache unavailable for hash <prefix>.
+         Run light refresh and try again.'
+
+    This was the dominant freeze leak before PR 1 v3: the strategy
+    headlines (Sharpe / max_drawdown / recovery / blend weights)
+    were sourced from get_latest_strategy_cache() which returns the
+    live latest row regardless of hash. Under freeze, the deck /
+    brief / appendix substitution table would carry post-freeze
+    strategy values for ~20 distinct tokens. With this exception
+    the freeze deck fails loudly when the freeze hash has no
+    cached strategy results, instead of silently leaking live."""
+
+    def __init__(self, data_hash: str):
+        super().__init__(
+            f"Export failed: strategy_results_cache has no row "
+            f"for hash {data_hash[:8]}. Run light refresh and "
+            "try again.")
+        self.data_hash = data_hash
+
+
+async def gather_document_data(
+    data_hash: str | None = None,
+) -> dict[str, Any]:
     """
     Assembles the full data bundle the document builders consume.
 
-    Never raises — every failure mode degrades to available=False with
-    empty collections, so a caller can build a structurally complete
-    document carrying [DATA PENDING] markers in place of live figures.
+    data_hash -- June 27 2026 (PR 1 v3, LEAK 1 closer). When
+    supplied, the strategy_results_cache read routes through the
+    hash-aware get_strategy_cache(data_hash) instead of
+    get_latest_strategy_cache(). On hash miss raises
+    StrategyCacheMissingForHashError -- the 3 document generators
+    catch + translate to HTTPException 500 with the spec
+    'Run light refresh and try again' message. Without this, the
+    freeze deck silently leaked LIVE strategy values into ~20
+    headline tokens (Sharpe / max_drawdown / recovery / blend
+    weights). When None (legacy / live-platform callers),
+    falls through to get_latest_strategy_cache (legacy behaviour).
+
+    SOFT LEAK 2 reminder: get_monthly_returns() reads the
+    market_data_monthly table with NO hash filter. Under the
+    current freeze (Dec 2025) the table has no rows past freeze
+    date so rolling correlation tokens are de-facto frozen, but
+    this is NOT structurally enforced. A future backfill of
+    post-freeze market data would leak the rolling correlation
+    tokens. Acceptable for now per operator spec; flagged here
+    so a future audit catches the soft leak if it surfaces.
+
+    Never silently degrades on hash miss (would mask freeze
+    integrity violation). Other failure modes (cold caches, API
+    timeouts) still degrade to available=False with empty
+    collections.
     """
     bundle: dict[str, Any] = {
         "available": False,
@@ -147,12 +210,35 @@ async def gather_document_data() -> dict[str, Any]:
         import pandas as pd
 
         from tools.cache import (
-            get_ff_factors, get_latest_strategy_cache, get_monthly_returns,
+            get_ff_factors, get_latest_strategy_cache,
+            get_monthly_returns, get_strategy_cache,
         )
         from tools import analytics as an
 
         monthly = await get_monthly_returns()
-        strategies = await get_latest_strategy_cache()
+        # June 27 2026 (PR 1 v3 LEAK 1 closer) -- hash-aware
+        # strategy load. When data_hash is supplied (the 3 doc
+        # generators always supply it now), pull the exact
+        # strategy_results_cache row keyed to that hash. On miss
+        # under freeze, raise loudly -- DO NOT fall back to
+        # get_latest_strategy_cache (would silently leak LIVE
+        # strategy headlines into the freeze-locked deliverable).
+        if data_hash:
+            strategies = await get_strategy_cache(data_hash)
+            if strategies is None:
+                log.warning(
+                    "gather_document_data_strategy_cache_miss",
+                    data_hash=data_hash[:8],
+                    hint=(
+                        "Run /api/v1/light-refresh to recompute "
+                        "strategy_results_cache for the active hash, "
+                        "then retry document export."))
+                raise StrategyCacheMissingForHashError(data_hash)
+        else:
+            # Legacy / live-platform path -- the latest cached row
+            # regardless of hash. Acceptable when no hash discipline
+            # is required (e.g. interactive dashboard reads).
+            strategies = await get_latest_strategy_cache()
         ff = await get_ff_factors()
 
         if monthly and strategies:
@@ -265,6 +351,14 @@ async def gather_document_data() -> dict[str, Any]:
                 ),
                 "validated_constants": validated_constants,
             })
+    except StrategyCacheMissingForHashError:
+        # June 27 2026 (PR 1 v3, LEAK 1 closer) -- DO NOT swallow.
+        # The hash-aware strategy load raised because the freeze
+        # hash has no cached strategy_results_cache row. Re-raise
+        # so the 3 document generators see the spec error + the
+        # job worker writes 'Run light refresh and try again' to
+        # the user-facing job error field.
+        raise
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_export_analytics_failed", error=str(exc))
 
@@ -1368,7 +1462,9 @@ def table_invariant_summary(
 # ── Analytical Appendix data gather (June 2 2026) ─────────────────────────────
 
 
-async def gather_analytical_appendix_data() -> dict[str, Any]:
+async def gather_analytical_appendix_data(
+    data_hash: str | None = None,
+) -> dict[str, Any]:
     """
     Assembles the data bundle behind the eight-section analytical
     appendix. Builds on gather_document_data() (which already produces
@@ -1386,11 +1482,23 @@ async def gather_analytical_appendix_data() -> dict[str, Any]:
                                    rendered in the appendix footer for
                                    reproducibility
 
+    data_hash -- June 27 2026 (PR 1 v3, LEAK 1 closer). Threaded
+    through to gather_document_data so the strategy_results_cache
+    read is hash-aware. Under freeze, a miss on the freeze hash
+    raises StrategyCacheMissingForHashError. The four additional
+    appendix-specific reads (bootstrap_ci_sharpe, crisis_performance,
+    oos_cost_sensitivity, invariant_summary) below STILL use
+    get_latest_metric -- those are a SEPARATE freeze leak class
+    (same architectural shape as the load_substitution_metric_sources
+    fix from PR 1 v1) that a follow-up PR can close once the
+    operator confirms the appendix-specific metric tokens are also
+    in freeze scope.
+
     Every cache read is fail-open — a missing row leaves the field
     None and the DOCX builder degrades that section to a "no data on
     record" line. The appendix is always assemblable.
     """
-    bundle = await gather_document_data()
+    bundle = await gather_document_data(data_hash=data_hash)
 
     # ── Bootstrap CI table — lives inside the academic_analytics row.
     try:

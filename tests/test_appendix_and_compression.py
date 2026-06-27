@@ -124,7 +124,7 @@ class TestAppendixPreflightCacheGate:
         import main as main_module
         from fastapi import HTTPException
 
-        async def _empty_data():
+        async def _empty_data(data_hash=None):
             return {
                 "available": True,
                 "study_period": {},
@@ -164,7 +164,7 @@ class TestAppendixPreflightCacheGate:
         import main as main_module
         from fastapi import HTTPException
 
-        async def _empty_data():
+        async def _empty_data(data_hash=None):
             return {
                 "available": True,
                 "study_period": {},
@@ -200,7 +200,7 @@ class TestAppendixPreflightCacheGate:
         import main as main_module
         from fastapi import HTTPException
 
-        async def _data_missing_cost():
+        async def _data_missing_cost(data_hash=None):
             return {
                 "available": True,
                 "study_period": {},

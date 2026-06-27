@@ -3559,10 +3559,26 @@ async def post_light_refresh(
         from tools.cache import set_strategy_cache
         from tools.data_fetcher import get_full_history_async
         from tools.audit_assembler import current_data_hash
+        from tools.submission_freeze import get_effective_data_hash
         history = await get_full_history_async()
         monthly = history.get("equity_monthly")
         n_rows = len(monthly) if monthly is not None else 0
-        strategy_hash = await current_data_hash()
+        # June 27 2026 (PR 1 v4 -- architectural-rule closure) --
+        # under freeze, light refresh MUST warm the strategy cache
+        # under the FREEZE hash, not the live hash. Otherwise the
+        # StrategyCacheMissingForHashError raised by the 3 doc
+        # generators (PR 1 v3) is NOT self-healing: the user runs
+        # light refresh, the cache populates under the live hash,
+        # the freeze-hash slot is still empty, the next deck export
+        # fails again -- infinite loop. Routing through
+        # get_effective_data_hash makes the cache write land in the
+        # correct slot for whichever mode the platform is in. All
+        # downstream uses below (refresh_academic_analytics,
+        # refresh_oos_cost_sensitivity, the editor_drafts UPDATE,
+        # the response's strategy_hash field) inherit the effective
+        # hash automatically -- no further changes needed.
+        live_hash = await current_data_hash()
+        strategy_hash = await get_effective_data_hash(live_hash)
         if not strategy_hash:
             # current_data_hash returns "" on a degraded data path
             # (the source tables haven't loaded). Fall through with
@@ -16432,7 +16448,22 @@ async def _generate_brief_document(
             "Could not clear downstream story plans: %s", _exc)
 
     try:
-        data = await gather_document_data()
+        # June 27 2026 (PR 1 v3, LEAK 1 closer) -- compute the
+        # effective data_hash inline so gather_document_data can
+        # route the strategy_results_cache read through the hash-
+        # aware path. Under freeze, a miss raises
+        # StrategyCacheMissingForHashError which the outer except
+        # translates to a 500.
+        from tools.audit_assembler import (
+            current_data_hash as _brief_current_hash,
+        )
+        from tools.submission_freeze import (
+            get_effective_data_hash as _brief_eff_hash,
+        )
+        _brief_live = await _brief_current_hash()
+        _brief_data_hash = await _brief_eff_hash(_brief_live)
+        data = await gather_document_data(
+            data_hash=_brief_data_hash or None)
         avail = data["available"]
         pending = (f"{DATA_PENDING} -- analytics caches not warm. Load the "
                    "dashboard once, then regenerate this brief.")
@@ -16770,9 +16801,15 @@ async def _generate_brief_document(
             from tools.academic_export import (
                 load_substitution_metric_sources,
             )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
             regime_conditional_rows, factor_loadings_rows, \
                 cost_sensitivity_payload, crisis_payload = (
-                    await load_substitution_metric_sources())
+                    await load_substitution_metric_sources(
+                        data_hash=data_hash or None))
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -16796,7 +16833,8 @@ async def _generate_brief_document(
                 regime_conditional=regime_conditional_rows,
                 factor_loadings=factor_loadings_rows,
                 cost_sensitivity=cost_sensitivity_payload,
-                crisis_performance=crisis_payload)
+                crisis_performance=crisis_payload,
+                hash_verified=True)
             log.info("substitution_table_built",
                      document_type="executive_brief",
                      data_hash=(data_hash or "")[:8],
@@ -17229,7 +17267,24 @@ async def _generate_appendix_document(
                 "deck / appendix) must share a single narrative."))
 
     try:
-        data = await gather_analytical_appendix_data()
+        # June 27 2026 (PR 1 v3, LEAK 1 closer) -- compute the
+        # effective data_hash inline + thread it into
+        # gather_analytical_appendix_data so the inner
+        # gather_document_data call routes the strategy_results_
+        # cache read through get_strategy_cache(data_hash) instead
+        # of get_latest_strategy_cache. Under freeze, a miss
+        # raises StrategyCacheMissingForHashError (translated to a
+        # 500 by the outer except).
+        from tools.audit_assembler import (
+            current_data_hash as _appx_current_hash,
+        )
+        from tools.submission_freeze import (
+            get_effective_data_hash as _appx_eff_hash,
+        )
+        _appx_live = await _appx_current_hash()
+        _appx_data_hash = await _appx_eff_hash(_appx_live)
+        data = await gather_analytical_appendix_data(
+            data_hash=_appx_data_hash or None)
         avail = data["available"]
         pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
                    "dashboard once, then regenerate this appendix.")
@@ -17405,9 +17460,15 @@ async def _generate_appendix_document(
             from tools.academic_export import (
                 load_substitution_metric_sources,
             )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
             regime_conditional_rows, factor_loadings_rows, \
                 cost_sensitivity_payload, crisis_payload = (
-                    await load_substitution_metric_sources())
+                    await load_substitution_metric_sources(
+                        data_hash=data_hash or None))
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -17424,7 +17485,8 @@ async def _generate_appendix_document(
                 regime_conditional=regime_conditional_rows,
                 factor_loadings=factor_loadings_rows,
                 cost_sensitivity=cost_sensitivity_payload,
-                crisis_performance=crisis_payload)
+                crisis_performance=crisis_payload,
+                hash_verified=True)
             log.info("substitution_table_built",
                      document_type="analytical_appendix",
                      data_hash=(data_hash or "")[:8],
@@ -17996,10 +18058,26 @@ async def _build_deck_context(
     streaming endpoints can build the deck-generation context block
     from a single source. Returns (data, blend_weights, blend_series,
     n_strategies). All four fail-open: a cold cache produces an empty
-    bundle rather than raising."""
-    from tools.academic_export import gather_document_data
+    bundle rather than raising.
 
-    data = await gather_document_data()
+    June 27 2026 (PR 1 v3, LEAK 1 closer) -- computes the effective
+    data_hash inline and threads it into gather_document_data so the
+    strategy_results_cache read is hash-aware. Under freeze, a miss
+    on the freeze hash raises StrategyCacheMissingForHashError (the
+    deck generator wrapper catches + translates to HTTPException
+    500 with the spec 'Run light refresh and try again' message).
+    Without this, the deck's headline strategy tokens (Sharpe /
+    max_drawdown / recovery / blend weights -- ~20 tokens total)
+    silently leaked LIVE strategy results into the freeze-locked
+    deliverable."""
+    from tools.academic_export import gather_document_data
+    from tools.audit_assembler import current_data_hash
+    from tools.submission_freeze import get_effective_data_hash
+
+    live_hash = await current_data_hash()
+    deck_data_hash = await get_effective_data_hash(live_hash)
+    data = await gather_document_data(
+        data_hash=deck_data_hash or None)
 
     # ── Live regime context (Slide 6) — current_regime / regime_confidence
     #    / blend_weights from detect_current_regime() + the regime blend,
@@ -18687,9 +18765,15 @@ async def _generate_deck_document(
             from tools.academic_export import (
                 load_substitution_metric_sources,
             )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
             regime_conditional_rows, factor_loadings_rows, \
                 cost_sensitivity_payload, crisis_payload = (
-                    await load_substitution_metric_sources())
+                    await load_substitution_metric_sources(
+                        data_hash=data_hash or None))
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -18706,7 +18790,8 @@ async def _generate_deck_document(
                 regime_conditional=regime_conditional_rows,
                 factor_loadings=factor_loadings_rows,
                 cost_sensitivity=cost_sensitivity_payload,
-                crisis_performance=crisis_payload)
+                crisis_performance=crisis_payload,
+                hash_verified=True)
             log.info("substitution_table_built",
                      document_type="presentation_deck",
                      data_hash=(data_hash or "")[:8],
