@@ -103,8 +103,8 @@ class TestDeckSlideChartAutoEmbed:
     def test_every_chart_slide_has_a_chart_after_full_run(self):
         """End-to-end across the full deck: every slide listed in
         DECK_SLIDE_CHART_KEYS lands a chart element in the editor
-        canvas. June 22 2026 -- 12-slide deck (agenda insert +
-        AI/demo flip)."""
+        canvas. June 27 2026 -- 11-slide deck (Investment Case
+        merge collapsed old slides 3 + 4 into one)."""
         from tools.academic_deck import DECK_SLIDE_COUNT
         from tools.editor_content import (
             DECK_SLIDE_CHART_KEYS, deck_slides_to_editor,
@@ -113,7 +113,7 @@ class TestDeckSlideChartAutoEmbed:
         # for all slides; the chart-auto-embed must still fire.
         content_json, _ = deck_slides_to_editor([])
         slides = content_json["slides"]
-        assert len(slides) == DECK_SLIDE_COUNT == 12
+        assert len(slides) == DECK_SLIDE_COUNT == 11
         for slide_num, expected_key in DECK_SLIDE_CHART_KEYS.items():
             slide = slides[slide_num - 1]
             chart_elements = [

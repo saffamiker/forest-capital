@@ -27,7 +27,7 @@ CONTRACT
       - Exact key set: every key in the template must be present,
         no additional keys.
       - All values must be strings.
-      - All 12 slide numbers ("1" through "12") must be present.
+      - All 11 slide numbers ("1" through "11") must be present.
       - version + generated_from match TEMPLATE_VERSION / current
         template build identifier.
       - String length limits per field.
@@ -60,8 +60,15 @@ log = structlog.get_logger(__name__)
 TEMPLATE_VERSION = 1
 
 
-# Slides 1-12 (matches DECK_SLIDE_COUNT).
-_SLIDE_NUMBERS: tuple[str, ...] = tuple(str(i) for i in range(1, 13))
+# Slide-number key set (matches DECK_SLIDE_COUNT).
+#
+# June 27 2026 -- bumped from range(1, 13) to range(1, 12) after the
+# Investment Case merge collapsed the deck from 12 to 11 slides to
+# match Molly's reference. A follow-up PR is planned to make this
+# tuple dynamic (read DECK_SLIDE_COUNT at validation time) so the
+# next deck-rebuild doesn't need a manual bump here; this commit
+# keeps the change scoped to the collapse.
+_SLIDE_NUMBERS: tuple[str, ...] = tuple(str(i) for i in range(1, 12))
 
 # Overridable field names per slide. Fixed set -- adding a field
 # requires bumping TEMPLATE_VERSION.
@@ -96,32 +103,36 @@ def _default_so_what_for_slide(slide_number: int) -> str:
     locked titles -- every entry is the short answer to "what
     does this slide prove?" Used to seed the template so Molly
     has a starting point rather than a blank field."""
+    # June 27 2026 -- renumbered for the 11-slide deck. Old
+    # slides 3 (Three Strategies setup) + 4 (The Numbers OOS
+    # verdict) merged into new slide 3 (Investment Case split
+    # panel); every subsequent slide shifted down by one.
     defaults = {
         1: ("Headline proof point: dynamic regime-conditional "
             "beats 100% equity on OOS Sharpe."),
         2: ("Structural agenda walking the panel through the "
             "deck sections."),
-        3: ("Frame the three strategies and the central "
-            "question they answer."),
-        4: ("Pin the canonical numbers behind the headline: "
-            "0.86 / 0.43 across 53 OOS months."),
-        5: ("Identify the 2022 correlation break as the "
+        3: ("Frame the three strategies on the left (IS setup) "
+            "and pin the canonical OOS numbers on the right "
+            "(0.86 / 0.43 across 53 OOS months) in a single "
+            "split-panel slide."),
+        4: ("Identify the 2022 correlation break as the "
             "diagnosis for static allocation underperformance."),
-        6: ("Drawdown depth and recovery time -- the capital "
+        5: ("Drawdown depth and recovery time -- the capital "
             "preservation story."),
-        7: ("Confirm the OOS result holds up across the test "
+        6: ("Confirm the OOS result holds up across the test "
             "window (no in-sample fit, no overfitting)."),
-        8: ("Live regime watchpoints update at generation "
+        7: ("Live regime watchpoints update at generation "
             "time -- VIX, yield curve, credit spread, equity "
             "trend."),
-        9: ("Honest disclosure: 2 of 9 stress scenarios show "
+        8: ("Honest disclosure: 2 of 9 stress scenarios show "
             "the model degrading -- capital preservation, not "
             "market timing."),
-        10: ("How the AI council was used + what the methodology "
-             "passes that worked and didn't."),
-        11: ("Open the live platform and walk through the "
+        9: ("How the AI council was used + what the methodology "
+            "passes that worked and didn't."),
+        10: ("Open the live platform and walk through the "
              "regime classification + recommendation flow."),
-        12: ("The investable recommendation, the conditions on "
+        11: ("The investable recommendation, the conditions on "
              "it, and the failure modes to monitor."),
     }
     return defaults.get(slide_number, "")
@@ -131,8 +142,15 @@ def _default_bullet_guidance_for_slide(slide_number: int) -> str:
     """The bullet-writing guidance default. The BULLET DISCIPLINE
     block in SLIDE_SPECIFICATIONS already says "no more than N"
     -- this guidance lets Molly add slide-specific tone (e.g.
-    "lead with the panel's likely first question")."""
-    if slide_number in (4, 6, 7, 8, 9, 12):
+    "lead with the panel's likely first question").
+
+    June 27 2026 -- table-heavy slide set renumbered for the
+    11-slide deck. New set: 5 (Capital Preservation), 6 (Does It
+    Hold Up OOS), 7 (Live Regime), 8 (What Wrong), 11 (The
+    Answer allocation table). Slide 3 (Investment Case split
+    panel) is NOT in this set because its bullets are the
+    LEFT-panel stat cards, not orienting prose above a table."""
+    if slide_number in (5, 6, 7, 8, 11):
         return (
             "Table-heavy slide. Bullets above the table are "
             "ORIENTING only -- name what the table is and why it "
@@ -147,12 +165,16 @@ def _default_speaker_note_directive_for_slide(
         slide_number: int) -> str:
     """The speaker_note_directive seeds tone/cue for the speaker
     notes pass. Per-slide so the speaker can rehearse from the
-    panel-facing prose without re-deriving the talking points."""
-    if slide_number == 11:
+    panel-facing prose without re-deriving the talking points.
+
+    June 27 2026 -- Live Demo moved from slide 11 to slide 10
+    and the Recommendation moved from slide 12 to slide 11 after
+    the Investment Case merge."""
+    if slide_number == 10:
         return (
             "Live demo step-by-step script -- four steps total, "
             "~50s each. Open analyticsdesk.app and narrate.")
-    if slide_number == 12:
+    if slide_number == 11:
         return (
             "Recommendation framing: state the answer, state "
             "the conditions, name the failure modes the panel "
@@ -166,8 +188,13 @@ def _default_speaker_note_directive_for_slide(
 def _default_max_bullets_for_slide(slide_number: int) -> str:
     """Default max_bullets ceiling per slide. Table-heavy slides
     get 2; non-table slides get 3. String-typed because all
-    template values must be strings; coerced to int on read."""
-    return "2" if slide_number in (4, 6, 7, 8, 9, 12) else "3"
+    template values must be strings; coerced to int on read.
+
+    June 27 2026 -- table-heavy set renumbered for the 11-slide
+    deck: {5, 6, 7, 8, 11}. Slide 3 (Investment Case split
+    panel) carries a table on the right but its left-panel
+    bullets are stat cards, so it stays at the standard cap."""
+    return "2" if slide_number in (5, 6, 7, 8, 11) else "3"
 
 
 def build_default_template(
@@ -263,24 +290,24 @@ def validate_guidance(
             "generated_from must be a non-empty string -- copy "
             "this verbatim from the downloaded template")
 
-    # slides: dict with all 12 keys "1".."12".
+    # slides: dict with all 11 keys "1".."11".
     slides = payload.get("slides")
     if not isinstance(slides, dict):
         return None, (
             "slides must be an object keyed by slide number "
-            "string (\"1\" through \"12\")")
+            "string (\"1\" through \"11\")")
     extra_slides = set(slides.keys()) - set(_SLIDE_NUMBERS)
     if extra_slides:
         return None, (
             "unexpected slide number(s): "
             f"{', '.join(sorted(extra_slides))}. "
-            "Valid keys are \"1\" through \"12\".")
+            "Valid keys are \"1\" through \"11\".")
     missing_slides = set(_SLIDE_NUMBERS) - set(slides.keys())
     if missing_slides:
         return None, (
             "missing slide(s): "
             f"{', '.join(sorted(missing_slides))}. "
-            "All 12 slide numbers must be present -- partial "
+            "All 11 slide numbers must be present -- partial "
             "uploads are not accepted.")
 
     # Per-slide fields: exact key set + types + length limits.
