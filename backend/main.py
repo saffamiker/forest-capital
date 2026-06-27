@@ -352,6 +352,74 @@ async def lifespan(app: FastAPI):
             except Exception as exc:  # noqa: BLE001
                 log.warning("model_availability_check_schedule_failed",
                             error=str(exc))
+
+        # June 27 2026 -- background regime-signals refresh ticker.
+        # The regime_signals_cache has a 15-minute TTL and used to go
+        # stale whenever no user activity triggered the HMM, blocking
+        # deck generation + light refresh via the hard gate at
+        # _refresh_regime_signals_for_deck. This ticker keeps the
+        # cache warm on a fixed 10-minute cadence (5 minutes of
+        # headroom before TTL expiry). Same fire-and-forget shape as
+        # the analytics auto-warm + model-availability tasks above
+        # so the lifespan handler never blocks on it. Per-iteration
+        # failures (FRED outage, detect_current_regime exception,
+        # cache write failure) log a warning and the loop continues
+        # to the next cycle -- the ticker NEVER crashes.
+        if not _is_test_env:
+            try:
+                from tools.cache import set_regime_cache
+                from tools.regime_detector import detect_current_regime
+
+                async def _regime_signals_ticker_task() -> None:
+                    # 10-second initial sleep -- defers past the
+                    # auto-warm (2s) + model-availability (5s) so the
+                    # cold-boot path doesn't pile detect_current_regime
+                    # on top of the heavier startup compute.
+                    await asyncio.sleep(10.0)
+                    while True:
+                        try:
+                            fresh = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    detect_current_regime),
+                                timeout=_REGIME_REFRESH_TIMEOUT_S)
+                            if not isinstance(fresh, dict):
+                                log.warning(
+                                    "regime_signals_background_refresh_failed",
+                                    error=(
+                                        "detect_current_regime "
+                                        "returned non-dict"),
+                                    return_type=type(fresh).__name__)
+                            else:
+                                await set_regime_cache(
+                                    fresh, ttl_minutes=15)
+                                log.info(
+                                    "regime_signals_background_refresh",
+                                    regime=fresh.get("regime"),
+                                    confidence=fresh.get(
+                                        "confidence"))
+                        except asyncio.CancelledError:
+                            # Clean shutdown -- propagate so the task
+                            # exits without logging a spurious failure.
+                            raise
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning(
+                                "regime_signals_background_refresh_failed",
+                                error=str(exc))
+                        # Sleep BETWEEN iterations -- a failed cycle
+                        # waits the full interval before retrying.
+                        # 10 min × 24h = 144 detect calls/day, and
+                        # the in-process TTL inside
+                        # detect_current_regime makes most a no-op.
+                        await asyncio.sleep(
+                            _REGIME_SIGNALS_TICKER_INTERVAL_S)
+
+                asyncio.create_task(_regime_signals_ticker_task())
+                log.info("regime_signals_ticker_scheduled",
+                         interval_s=(
+                             _REGIME_SIGNALS_TICKER_INTERVAL_S))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("regime_signals_ticker_schedule_failed",
+                            error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -6143,6 +6211,16 @@ _REGIME_BLOCKING_ERROR_DETAIL = (
     "Live regime signals unavailable. The deck includes a live CIO "
     "recommendation that requires current data. Please try again in a "
     "few minutes.")
+
+# June 27 2026 -- background refresh cadence for the regime_signals_cache.
+# The cache TTL is 15 minutes (set_regime_cache ttl_minutes=15). Refreshing
+# every 10 minutes leaves 5 minutes of headroom so the cache is always warm
+# when a user (or the deck hard gate) reads it -- the gate never fires
+# due to TTL expiry during normal operation. Scheduled by the lifespan
+# handler as a fire-and-forget task; per-iteration failures (FRED outage,
+# detect_current_regime exception, cache write failure) log a warning and
+# the loop continues to the next cycle.
+_REGIME_SIGNALS_TICKER_INTERVAL_S = 600.0
 
 
 async def _regime_signals_fresh_or_refresh() -> tuple[bool, dict | None]:
