@@ -3514,6 +3514,30 @@ async def post_light_refresh(
             "steps": [],
             "strategy_hash": None,
         }
+
+    # ── June 27 2026: regime_signals pre-flight gate ─────────────
+    # Light refresh is the typical user workflow immediately before
+    # a deck regen ("warm everything, then regenerate"). If the
+    # regime cache can't be refreshed within 10s, fail the entire
+    # light-refresh now -- the user otherwise sees a successful
+    # refresh, kicks off a deck regen, and the deck regen 503s
+    # with the same blocking message a moment later. Cleaner UX
+    # to surface the failure here. Brief / appendix users are
+    # blocked too; they don't NEED fresh regime signals (em-dash
+    # fallback works) but the cost is bounded -- 10s max wait on
+    # a 15-min cache means most calls hit and return instantly.
+    ok, _signals = await _regime_signals_fresh_or_refresh()
+    if not ok:
+        log.warning(
+            "light_refresh_blocked_on_regime_signals",
+            note=("regime_signals_cache miss + refresh "
+                  "failed/timed out within 10s -- blocking "
+                  "light-refresh so the user doesn't waste "
+                  "a deck regen on stale signals"))
+        raise HTTPException(
+            status_code=503,
+            detail=_REGIME_BLOCKING_ERROR_DETAIL)
+
     steps: list[dict] = []
     strategy_hash: str | None = None
 
@@ -6074,6 +6098,116 @@ async def get_current_regime(session: dict = Depends(require_auth)):
     return MOCK_REGIME
 
 
+# ── Regime-signals freshness gate (June 27 2026, deck-tier only) ─────────────
+#
+# The presentation deck includes a live CIO recommendation on slides 7 and
+# 11 that depends on regime_signals_cache being current (15-min TTL). Stale
+# signals at generation time would produce a deck that misleads the live
+# panel. Per the user spec, the deck is held to a stricter standard than
+# the brief / appendix: those keep the existing graceful em-dash fallback
+# (they don't surface a live recommendation); the deck must HARD GATE.
+#
+# Three operations gate on this helper:
+#   * _generate_deck_document       (full generation)
+#   * council_academic_review       (when document_type=presentation_deck)
+#   * post_light_refresh            (the cache-warming workflow that
+#                                    typically immediately precedes deck
+#                                    regen)
+#
+# When the cache is hit, the helper returns (True, signals). When it
+# misses, we attempt detect_current_regime() with a HARD 10-SECOND TIMEOUT
+# (FRED + market-data fetches can hang for minutes; the panel can't wait
+# that long for an error message) and either return (True, signals) on a
+# successful refresh OR (False, None) on timeout / failure. The caller
+# raises a 503 with the user-spec blocking error message in the failure
+# case -- never falls back to em-dashes for the deck.
+
+_REGIME_REFRESH_TIMEOUT_S = 10.0
+_REGIME_BLOCKING_ERROR_DETAIL = (
+    "Live regime signals unavailable. The deck includes a live CIO "
+    "recommendation that requires current data. Please try again in a "
+    "few minutes.")
+
+
+async def _regime_signals_fresh_or_refresh() -> tuple[bool, dict | None]:
+    """Returns (is_fresh, signals).
+
+    1. Check regime_signals_cache via get_regime_cache(). If the cached
+       row is unexpired, returns (True, signals) immediately.
+    2. On miss/expiry, run detect_current_regime() in a worker thread
+       with a 10-second hard timeout. The detector hits live market
+       data APIs (FRED, Yahoo) which can hang under load -- without the
+       timeout the blocking error itself could take minutes to surface,
+       worse UX than the original stale-cache behaviour.
+    3. On successful refresh: write to set_regime_cache(ttl_minutes=15)
+       and return (True, signals).
+    4. On timeout / exception: log + return (False, None). The caller
+       translates to a 503 with the spec blocking message.
+
+    In ENVIRONMENT=test we return (True, None) so the gate is a no-op
+    for the existing test suite -- tests that exercise the gate set
+    up the cache row directly via tools.cache.set_regime_cache.
+    """
+    if ENVIRONMENT == "test":
+        return True, None
+    try:
+        from tools.cache import get_regime_cache, set_regime_cache
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_cache_module_unavailable", error=str(exc))
+        return False, None
+    cached = None
+    try:
+        cached = await get_regime_cache()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_cache_read_failed", error=str(exc))
+    if cached is not None:
+        return True, cached
+    # Cache miss / expired -- attempt a fresh detect with a hard
+    # 10s timeout. detect_current_regime() is synchronous; run it in
+    # a worker thread so the async event loop isn't blocked.
+    import asyncio as _asyncio
+    try:
+        from tools.regime_detector import detect_current_regime
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_detector_import_failed", error=str(exc))
+        return False, None
+    try:
+        fresh = await _asyncio.wait_for(
+            _asyncio.to_thread(detect_current_regime),
+            timeout=_REGIME_REFRESH_TIMEOUT_S)
+    except _asyncio.TimeoutError:
+        log.warning(
+            "regime_gate_refresh_timeout",
+            timeout_s=_REGIME_REFRESH_TIMEOUT_S,
+            note=(
+                "detect_current_regime() did not return within the "
+                "10s hard timeout -- treating as a blocking failure "
+                "for the deck-tier gate"))
+        return False, None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_refresh_failed",
+            error=str(exc),
+            note="detect_current_regime() raised during refresh")
+        return False, None
+    if not isinstance(fresh, dict):
+        log.warning(
+            "regime_gate_refresh_returned_non_dict",
+            type=type(fresh).__name__)
+        return False, None
+    # Best-effort cache write -- a write failure doesn't unwind the
+    # successful detect; the next caller just re-runs detect.
+    try:
+        await set_regime_cache(fresh, ttl_minutes=15)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_cache_write_failed", error=str(exc))
+    return True, fresh
+
+
 # ── Optimize ──────────────────────────────────────────────────────────────────
 
 async def _strategy_portfolio_points() -> list[dict]:
@@ -7094,6 +7228,26 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     brief_review = document_type_q == "executive_brief"
     deck_review = document_type_q == "presentation_deck"
     appendix_review = document_type_q == "analytical_appendix"
+
+    # ── June 27 2026: regime_signals pre-flight gate (deck only) ─
+    # The deck-tier council review references the live CIO
+    # recommendation that the deck surfaces on slides 7 + 11. A
+    # review run against stale regime signals would grade a recom-
+    # mendation the user can no longer trust by the time the panel
+    # sees it. Hard-gate the same way the deck generation does --
+    # 10s refresh, 503 if it fails. Brief / appendix / script
+    # reviews are unaffected (their docs use the em-dash fallback).
+    if deck_review:
+        ok, _signals = await _regime_signals_fresh_or_refresh()
+        if not ok:
+            log.warning(
+                "deck_council_review_blocked_on_regime_signals",
+                note=("regime_signals_cache miss + refresh "
+                      "failed/timed out within 10s -- blocking "
+                      "deck-tier council review"))
+            raise HTTPException(
+                status_code=503,
+                detail=_REGIME_BLOCKING_ERROR_DETAIL)
 
     async def event_stream():
         try:
@@ -17528,8 +17682,31 @@ async def _generate_deck_document(
     from detect_current_regime() (via the CIO live context). Every
     degradation -- a cold cache, an unparseable JSON, a missing chart
     -- falls back to a [DATA PENDING] note rather than failing.
+
+    June 27 2026 -- regime_signals freshness HARD GATE. The deck
+    surfaces a live CIO recommendation on slides 7 + 11 that
+    references {{VIX_CURRENT}}, {{YIELD_CURVE_CURRENT}},
+    {{CREDIT_SPREAD_CURRENT}}, {{EQUITY_TREND_CURRENT}},
+    {{ESS_CURRENT}}, {{CURRENT_REGIME}}, {{REGIME_CONFIDENCE}}.
+    Stale signals at generation time would produce a deck that
+    misleads the live panel. Unlike the brief / appendix (which
+    keep the em-dash fallback), the deck blocks: we attempt an
+    automatic refresh with a 10s hard timeout and 503 if the
+    refresh can't complete.
     """
     import asyncio
+
+    # ── June 27 2026: regime_signals pre-flight gate (deck only) ──
+    ok, _signals = await _regime_signals_fresh_or_refresh()
+    if not ok:
+        log.warning(
+            "deck_generation_blocked_on_regime_signals",
+            note=("regime_signals_cache miss + refresh "
+                  "failed/timed out within 10s -- blocking deck "
+                  "generation to avoid stale live recommendation"))
+        raise HTTPException(
+            status_code=503,
+            detail=_REGIME_BLOCKING_ERROR_DETAIL)
 
     # June 21 2026 -- brief-as-anchor gate. The presentation deck
     # is the THIRD document generated, after the executive brief
