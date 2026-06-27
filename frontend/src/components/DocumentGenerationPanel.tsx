@@ -509,6 +509,12 @@ export default function DocumentGenerationPanel() {
     updated_at:  string | null
     data_hash:   string | null
     owner_email: string | null
+    /** June 27 2026 -- unresolved-finding count from the post-
+     *  generation document audit, surfaced in the Regenerate
+     *  confirm modal as "N unresolved review findings". Read
+     *  from audit_warnings.flag_counts.total on the draft row
+     *  (0 when audit_warnings is null / absent). */
+    audit_findings_total: number
   }
   const [
     currentDraftByType, setCurrentDraftByType,
@@ -532,6 +538,9 @@ export default function DocumentGenerationPanel() {
         updated_at?: string | null
         data_hash?:  string | null
         owner_email?: string | null
+        audit_warnings?: {
+          flag_counts?: { total?: number } | null
+        } | null
       }>
     }>('/api/v1/documents/drafts')
       .then((res) => {
@@ -545,6 +554,8 @@ export default function DocumentGenerationPanel() {
             updated_at:  d.updated_at ?? null,
             data_hash:   d.data_hash ?? null,
             owner_email: d.owner_email ?? null,
+            audit_findings_total:
+              d.audit_warnings?.flag_counts?.total ?? 0,
           }
         }
         setCurrentDraftByType(map)
@@ -1192,6 +1203,17 @@ export default function DocumentGenerationPanel() {
           regenConfirm.pendingDoc?.title || 'Document'}
         sourceDocumentType={
           regenConfirm.pendingDoc?.documentType ?? undefined}
+        findingsCount={
+          // June 27 2026 -- unresolved-finding count from the
+          // current draft's audit_warnings.flag_counts.total
+          // (sourced via the drafts API). Renders the
+          // "N unresolved review findings will be cleared"
+          // warning line in the modal when > 0.
+          regenConfirm.pendingDoc
+            ? (currentDraftByType[
+                regenConfirm.pendingDoc.documentType]
+                ?.audit_findings_total ?? 0)
+            : 0}
         onCancel={() => setRegenConfirm(
           { open: false, pendingDoc: null })}
         onConfirm={() => {

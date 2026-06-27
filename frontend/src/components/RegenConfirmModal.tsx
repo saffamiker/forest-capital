@@ -32,13 +32,15 @@ export interface RegenConfirmModalProps {
   documentName: string
   onCancel:  () => void
   onConfirm: () => void
-  /** June 25 2026 -- when supplied (and non-empty), the modal
-   *  swaps to 'Regeneration Warning' framing and renders the
-   *  list of unresolved critical audit-finding check names. Max
-   *  5 surfaced; the rest collapse under '… and N more'. Empty
-   *  array or undefined leaves the legacy 'Regenerate <doc>?'
-   *  framing unchanged. */
-  auditFindings?: string[] | undefined
+  /** June 27 2026 -- replaces the legacy auditFindings:string[]
+   *  prop with a simple unresolved-finding count. When > 0 the
+   *  modal renders the spec line:
+   *    "This document has N unresolved review findings.
+   *     Regenerating will clear them."
+   *  When 0 / undefined the warning line is omitted. Source: the
+   *  audit_warnings.flag_counts.total field from the current
+   *  draft row (populated by tools.document_audit). */
+  findingsCount?: number | undefined
   /** June 25 2026 -- the source document_type being regenerated.
    *  Drives the cascade-impact callout that lists which other
    *  current drafts will be marked stale per _REGEN_CASCADE:
@@ -82,10 +84,11 @@ const _DOC_LABELS: Record<string, string> = {
 
 export default function RegenConfirmModal(
   {
-    open, documentName, onCancel, onConfirm, auditFindings,
+    open, documentName, onCancel, onConfirm, findingsCount,
     sourceDocumentType,
   }: RegenConfirmModalProps,
 ) {
+  const findingsN = findingsCount ?? 0
   const cascadeTypes = (
     sourceDocumentType
       ? (_CASCADE_TYPES[sourceDocumentType] ?? [])
@@ -131,40 +134,19 @@ export default function RegenConfirmModal(
             aria-hidden="true" />
           <div className="flex-1 space-y-2">
             <h3 className="text-white font-semibold text-sm">
-              {auditFindings && auditFindings.length > 0
-                ? 'Regeneration Warning'
-                : `Regenerate ${documentName}?`}
+              {`Regenerate ${documentName}?`}
             </h3>
-            {auditFindings && auditFindings.length > 0 && (
-              <div
-                data-testid="regen-confirm-audit-block"
-                className="text-xs text-amber-100/90 leading-relaxed
+            {findingsN > 0 && (
+              <p
+                data-testid="regen-confirm-findings-warning"
+                className="text-xs text-amber-200 leading-relaxed
                            rounded border border-warning/40
-                           bg-warning/5 p-2.5 space-y-1.5">
-                <p>
-                  {auditFindings.length} audit finding
-                  {auditFindings.length === 1 ? ' is' : 's are'}{' '}
-                  unresolved from a previous audit run.
-                  Regenerating will auto-resolve {' '}
-                  {auditFindings.length === 1 ? 'it' : 'them'}{' '}
-                  and create a fresh draft.
-                </p>
-                <ul className="list-disc list-inside text-2xs
-                               text-amber-100/85 space-y-0.5">
-                  {auditFindings.slice(0, 5).map((f, i) => (
-                    <li
-                      key={i}
-                      data-testid={`regen-confirm-audit-finding-${i}`}>
-                      {f}
-                    </li>
-                  ))}
-                  {auditFindings.length > 5 && (
-                    <li className="text-amber-100/60 italic">
-                      … and {auditFindings.length - 5} more
-                    </li>
-                  )}
-                </ul>
-              </div>
+                           bg-warning/10 p-2.5">
+                This document has {findingsN} unresolved review
+                finding{findingsN === 1 ? '' : 's'}.
+                Regenerating will clear {' '}
+                {findingsN === 1 ? 'it' : 'them'}.
+              </p>
             )}
             <p className="text-xs text-slate-300 leading-relaxed">
               This will replace the current draft for the whole
@@ -215,9 +197,7 @@ export default function RegenConfirmModal(
             data-testid="regen-confirm-modal-confirm"
             className="px-3 py-1.5 rounded text-xs font-semibold
                        bg-electric text-white hover:bg-blue-500">
-            {auditFindings && auditFindings.length > 0
-              ? 'Regenerate Anyway'
-              : 'Regenerate'}
+            Regenerate
           </button>
         </div>
       </div>
