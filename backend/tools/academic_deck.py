@@ -189,6 +189,16 @@ SLIDE_TITLES = [
 ]
 DECK_SLIDE_COUNT = len(SLIDE_TITLES)
 
+# Slides that MUST emit at least one interpretive bullet (PR 3,
+# June 27 2026). Slides 4, 7, 9, 12 are intentionally absent --
+# those are table-heavy proof slides where the table fully
+# carries the evidence, so empty bullets is acceptable. The
+# per-slide LLM call retries ONCE when bullets come back empty
+# for any slide in this set; if still empty after retry the
+# bullet block is silently skipped (no [DATA PENDING] text).
+SLIDES_REQUIRING_BULLETS: frozenset[int] = frozenset(
+    {1, 3, 5, 6, 8, 10, 11})
+
 # slide_number → chart role. The role string is resolved to a chart_render
 # renderer + arguments in main._render_deck_slide_charts. Slides not listed
 # carry no chart -- the slide body renders bullets + optional table only.
@@ -300,12 +310,20 @@ SLIDE SPECIFICATIONS
 SLIDE FORMAT CONSTRAINTS (non-negotiable, apply to every slide):
 - BULLET DISCIPLINE: Target 2-3 bullets per slide. Hard ceiling 3
   (2 for slides 4, 6, 7, 8, 9, 12 where a table carries the
-  evidence). Floor is zero -- if you cannot write a bullet that
-  adds meaning beyond what the title and table already state, do
-  not write it. One strong bullet beats two weak ones. Silence
-  beats padding. The slide_plan's max_bullets field is a CEILING,
-  not a target -- max_bullets=2 means "no more than 2", never
+  evidence). One strong bullet beats two weak ones. Silence beats
+  padding. The slide_plan's max_bullets field is a CEILING, not a
+  target -- max_bullets=2 means "no more than 2", never
   "write exactly 2".
+- NON-EMPTY BULLETS REQUIREMENT (slides 1, 3, 5, 6, 8, 10, 11 --
+  June 27 2026 PR 3): These slides MUST emit at least one
+  interpretive bullet, even when the slide content is primarily
+  structured (split-panel cards, card grid, feature rows). The
+  panel reader's eye flow depends on the bullet narrative even
+  when the card or table carries the headline number. Floor for
+  these specific slides is 1; ceiling still 2-3. Slides 4, 7, 9,
+  12 (table-heavy proof slides where the table fully carries the
+  evidence) may emit an empty bullets array -- floor stays zero
+  for those four slides only.
 - Each bullet must be a "because" or "which means", never a
   "what". The title and the table state the WHAT. Bullets
   interpret. Wrong: "OOS Sharpe of the blend: 0.86" (the title
@@ -1268,11 +1286,15 @@ def _image(slide, png: bytes | None, *, left, top, width, fallback="chart"):
     if png:
         slide.shapes.add_picture(io.BytesIO(png), left, top, width=width)
         return
-    log.warning("deck_chart_slot_unavailable", chart=str(fallback))
-    _textbox(slide, left, top, width, Inches(1.0),
-             f"[Chart unavailable: {fallback} -- ensure caches are warm "
-             "before generating the deck]",
-             size=14, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
+    # June 27 2026 -- spec: NO placeholder text in exported PPTX.
+    # Log + return without rendering anything in the chart slot.
+    # The slide's other elements still render around the empty area.
+    log.warning(
+        "deck_chart_slot_unavailable",
+        chart=str(fallback),
+        note=("chart PNG missing; skipping render per spec (no "
+              "[Chart unavailable] placeholder). Operator: warm "
+              "analytics caches + regenerate."))
 
 
 def _callout(slide, left, top, width, height, heading, value, *,
@@ -1333,10 +1355,15 @@ def _table(slide, headers: list[str], rows: list[list[str]], *,
     The hook signature is keyword-friendly: the caller's hook can
     accept **kwargs to ignore fields it doesn't need."""
     if not rows:
-        _textbox(slide, left, top, width, Inches(1.0),
-                 "[DATA PENDING] — table data unavailable. Warm the "
-                 "analytics caches, then regenerate the deck.",
-                 size=16, color=_AMBER)
+        # June 27 2026 -- spec: [DATA PENDING] must never appear
+        # in an exported PPTX. Log + return without rendering;
+        # the slide's other elements (bullets / chart / title)
+        # still render around the missing table area.
+        log.warning(
+            "deck_table_rows_empty_skipping",
+            note=("table_data missing or empty; skipping the table "
+                  "render per spec (no [DATA PENDING] placeholder). "
+                  "Operator: warm analytics caches + regenerate."))
         return
     rows = rows[:max_rows]
     n_rows, n_cols = len(rows) + 1, len(headers)
@@ -1443,7 +1470,11 @@ def _normalize_slides(raw_slides: Any) -> list[dict[str, Any]]:
             s["title"] = SLIDE_TITLES[n - 1]
         bullets = [str(b).strip() for b in (s.get("bullets") or [])
                    if str(b).strip()]
-        s["bullets"] = bullets or [_DATA_PENDING_BULLET]
+        # June 27 2026 -- the legacy [_DATA_PENDING_BULLET] fallback
+        # is gone (per spec: [DATA PENDING] must NEVER appear in an
+        # exported PPTX). Leave bullets empty when the LLM didn't
+        # emit any; the renderer logs + skips the bullet block.
+        s["bullets"] = bullets
         out.append(s)
     return out
 
@@ -1841,13 +1872,22 @@ def _render_split_panel_slide(
         cards_top = Inches(1.4)
         card_h = Inches(1.7)
         card_gap = Inches(0.15)
-        bullets = (sl.get("bullets")
-                   or [_DATA_PENDING_BULLET] * 3)
-        # Strip bullet markers + chart-describing lines.
-        bullets = [_strip_bullet_marker(b) for b in bullets]
+        # June 27 2026 -- spec: NEVER emit [DATA PENDING].
+        # When the LLM returned no bullets, log + skip the
+        # stat-card panel entirely; the right-panel OOS table
+        # still renders. Bullets that exist get rendered; we no
+        # longer pad to 3 with placeholders.
+        raw_bullets = sl.get("bullets") or []
+        bullets = [_strip_bullet_marker(b) for b in raw_bullets]
         bullets = [b for b in bullets if b.strip()][:3]
-        while len(bullets) < 3:
-            bullets.append(_DATA_PENDING_BULLET)
+        if not bullets:
+            log.warning(
+                "deck_split_panel_bullets_empty_skipping",
+                slide=idx,
+                note=("LLM emitted no bullets for the slide 3 "
+                      "stat-card panel; skipping the panel + "
+                      "rendering only the OOS table per spec "
+                      "(no [DATA PENDING] placeholder)"))
         for i, raw in enumerate(bullets):
             # Card header / body split on '|'; fall back to a
             # heuristic when the bullet is a single sentence
@@ -1900,11 +1940,14 @@ def _render_split_panel_slide(
                    width=right_w, max_rows=8,
                    cell_style_hook=_row_hook)
         else:
-            _textbox(s, right_x, table_top,
-                     right_w, Inches(1.0),
-                     "[DATA PENDING] -- OOS verdict table "
-                     "unavailable. Warm caches + regenerate.",
-                     size=14, color=_AMBER)
+            # June 27 2026 -- spec: [DATA PENDING] must never
+            # appear. Log + render only the left panel + callout.
+            log.warning(
+                "deck_split_panel_table_empty_skipping",
+                slide=idx,
+                note=("OOS verdict table_data missing; rendering "
+                      "left panel + callout only per spec (no "
+                      "[DATA PENDING] placeholder)"))
 
         # "+98% vs benchmark" callout below the table.
         callout_top = Inches(5.5)
@@ -1951,13 +1994,29 @@ def _render_card_grid_slide(
     title = sl.get("title") or SLIDE_TITLES[idx - 1]
     try:
         _title_bar(s, title)
-        bullets = sl.get("bullets") or [_DATA_PENDING_BULLET]
-        bullets = [_strip_bullet_marker(b) for b in bullets]
-        bullets = [b for b in bullets if b.strip()]
+        # June 27 2026 -- spec: NEVER emit [DATA PENDING].
+        # When the LLM returned no bullets, log + skip the card
+        # area; the title bar + chart placeholder (if any) still
+        # render. No placeholder text under any circumstances.
+        raw_bullets = sl.get("bullets") or []
+        bullets = [_strip_bullet_marker(b) for b in raw_bullets]
+        bullets = [b for b in bullets if b.strip()][:3]
         if not bullets:
-            bullets = [_DATA_PENDING_BULLET]
-        # Clamp to a max of 3 cards (fits comfortably side-by-side).
-        bullets = bullets[:3]
+            log.warning(
+                "deck_card_grid_bullets_empty_skipping",
+                slide=idx,
+                note=("LLM emitted no bullets for card-grid slide; "
+                      "skipping the card area + rendering the chart "
+                      "placeholder only per spec (no [DATA PENDING] "
+                      "placeholder)"))
+            # Render the chart slot then return -- no cards to draw.
+            if idx in SLIDE_CHARTS:
+                _image(s, chart_png,
+                       left=Inches(0.6), top=Inches(1.5),
+                       width=Inches(12.1),
+                       fallback=SLIDE_CHARTS.get(idx, "chart"))
+            _footer(s, idx, total)
+            return
 
         # A slide carries a chart slot when SLIDE_CHARTS pins one,
         # whether or not the PNG actually arrived. _image still
@@ -2100,11 +2159,14 @@ def _render_scorecard_slide(
                    width=Inches(12.33), max_rows=9,
                    cell_style_hook=_scorecard_hook)
         else:
-            _textbox(s, Inches(0.5), table_top,
-                     Inches(12.33), Inches(1.0),
-                     "[DATA PENDING] -- scorecard table "
-                     "unavailable. Warm caches + regenerate.",
-                     size=14, color=_AMBER)
+            # June 27 2026 -- spec: [DATA PENDING] must never
+            # appear. Log + render bullets-above-table area only.
+            log.warning(
+                "deck_scorecard_table_empty_skipping",
+                slide=idx,
+                note=("scorecard table_data missing; rendering "
+                      "orientation bullets only per spec (no "
+                      "[DATA PENDING] placeholder)"))
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "deck_scorecard_slide_failed", error=str(exc))
@@ -2129,11 +2191,22 @@ def _render_feature_rows_slide(
     title = sl.get("title") or SLIDE_TITLES[idx - 1]
     try:
         _title_bar(s, title)
-        bullets = sl.get("bullets") or [_DATA_PENDING_BULLET]
-        bullets = [_strip_bullet_marker(b) for b in bullets]
+        # June 27 2026 -- spec: NEVER emit [DATA PENDING].
+        # When the LLM returned no bullets, log + skip the feature
+        # rows entirely; the title bar still renders. No padding
+        # to 3 with placeholders.
+        raw_bullets = sl.get("bullets") or []
+        bullets = [_strip_bullet_marker(b) for b in raw_bullets]
         bullets = [b for b in bullets if b.strip()][:3]
-        while len(bullets) < 3:
-            bullets.append(_DATA_PENDING_BULLET)
+        if not bullets:
+            log.warning(
+                "deck_feature_rows_bullets_empty_skipping",
+                slide=idx,
+                note=("LLM emitted no bullets for slide 10 feature "
+                      "rows; skipping rows + rendering title only "
+                      "per spec (no [DATA PENDING] placeholder)"))
+            _footer(s, idx, total)
+            return
 
         row_colors = (_TEAL_LIGHT, _NAVY_LIGHT, _GOLD_LIGHT)
         rows_top = Inches(1.3)
@@ -2230,59 +2303,64 @@ def _render_content_slide(prs, sl, chart_png, idx, total) -> None:
     title = sl.get("title") or SLIDE_TITLES[idx - 1]
     try:
         _title_bar(s, title)
-        bullets = sl.get("bullets") or [_DATA_PENDING_BULLET]
-        # June 25 2026 -- strip chart-describing bullets on slides
-        # that already have an embedded chart image (SLIDE_CHARTS).
-        # Defence-in-depth alongside _chart_bullet_discipline_for_
-        # slide in the prompt; the chart speaks for itself, the
-        # bullet would be a visual duplicate. Non-chart slides
-        # pass through unchanged.
+        # June 27 2026 -- spec: NEVER emit [DATA PENDING] in the
+        # exported PPTX. Empty bullets now log + skip the bullet
+        # block rather than emit a placeholder string. Same
+        # treatment for post-strip empty + post-table-lift empty.
+        bullets = list(sl.get("bullets") or [])
+        # Strip chart-describing bullets on slides that already
+        # have an embedded chart image (SLIDE_CHARTS).
         bullets = _strip_chart_bullets(bullets, idx)
-        if not bullets:
-            bullets = [_DATA_PENDING_BULLET]
-        # June 25 2026 -- _slide_table can lift a pipe-table out
-        # of the bullets array (the 'LLM dumped the table into
-        # bullets' fallback). When it does, the third return
-        # value is the bullets list MINUS the lifted rows so the
-        # text frame doesn't ALSO render those rows as prose
-        # garbage. None means 'no edit needed'.
+        # _slide_table can lift a pipe-table out of the bullets
+        # array (the 'LLM dumped the table into bullets' fallback).
+        # When it does, the third return value is the bullets list
+        # MINUS the lifted rows; None means 'no edit needed'.
         headers, rows, surviving = _slide_table(sl, slide_idx=idx)
         if surviving is not None:
-            bullets = surviving or [_DATA_PENDING_BULLET]
-        # June 25 2026 -- strip leading bullet-marker characters
-        # ('- ', '* ', '•', etc.) from each bullet before writing
-        # to the text frame. Defence-in-depth alongside the BULLET
-        # STRING DISCIPLINE prompt instruction. The PPTX renderer
-        # adds the bullet glyph automatically; a leading '- '
-        # would otherwise render as '• - Foo' on the slide.
+            bullets = list(surviving)
+        # Strip leading bullet-marker characters then drop empty.
         bullets = [_strip_bullet_marker(b) for b in bullets]
         bullets = [b for b in bullets if b.strip()]
-        if not bullets:
-            bullets = [_DATA_PENDING_BULLET]
         has_table = bool(headers and rows)
         has_chart = idx in SLIDE_CHARTS
         role = SLIDE_CHARTS.get(idx, "chart")
+        if not bullets:
+            log.warning(
+                "deck_content_slide_bullets_empty_skipping",
+                slide=idx, has_table=has_table, has_chart=has_chart,
+                note=("LLM emitted no bullets for legacy content "
+                      "slide; skipping bullet block + rendering "
+                      "remaining elements (chart/table/title) per "
+                      "spec (no [DATA PENDING] placeholder)"))
 
+        # Layout dispatch -- when bullets is empty we DON'T call
+        # _bullets at all (no placeholder text). Chart + table
+        # still render at their sizes; the bullets-area space
+        # becomes whitespace on slides 2 and 5.
         if has_chart and has_table:
-            _bullets(s, bullets, left=Inches(0.6), top=Inches(1.15),
-                     width=Inches(12.1), height=Inches(1.55), size=13)
+            if bullets:
+                _bullets(s, bullets, left=Inches(0.6), top=Inches(1.15),
+                         width=Inches(12.1), height=Inches(1.55), size=13)
             _table(s, headers, rows, left=Inches(0.6), top=Inches(2.85),
                    width=Inches(6.1), max_rows=11)
             _image(s, chart_png, left=Inches(7.0), top=Inches(2.85),
                    width=Inches(5.8), fallback=role)
         elif has_chart:
-            _bullets(s, bullets, left=Inches(0.6), top=Inches(1.4),
-                     width=Inches(4.9), height=Inches(5.2), size=15)
+            if bullets:
+                _bullets(s, bullets, left=Inches(0.6), top=Inches(1.4),
+                         width=Inches(4.9), height=Inches(5.2), size=15)
             _image(s, chart_png, left=Inches(5.7), top=Inches(1.5),
                    width=Inches(7.1), fallback=role)
         elif has_table:
-            _bullets(s, bullets, left=Inches(0.6), top=Inches(1.25),
-                     width=Inches(12.1), height=Inches(1.95), size=14)
+            if bullets:
+                _bullets(s, bullets, left=Inches(0.6), top=Inches(1.25),
+                         width=Inches(12.1), height=Inches(1.95), size=14)
             _table(s, headers, rows, left=Inches(0.6), top=Inches(3.35),
                    width=Inches(12.1), max_rows=12)
         else:
-            _bullets(s, bullets, left=Inches(0.7), top=Inches(1.7),
-                     width=Inches(11.9), height=Inches(5.0), size=18)
+            if bullets:
+                _bullets(s, bullets, left=Inches(0.7), top=Inches(1.7),
+                         width=Inches(11.9), height=Inches(5.0), size=18)
     except Exception as exc:  # noqa: BLE001 — one bad slide never fails the deck
         log.warning("deck_slide_body_failed", slide=idx, error=str(exc))
 
@@ -2369,9 +2447,103 @@ def _dedupe_chart_assignments(
     return cleaned
 
 
+def _substitute_pptx_text(
+    prs: Any, substitution_table: dict[str, str] | None,
+) -> int:
+    """June 27 2026 -- post-build belt-and-suspenders pass.
+
+    Walks every text frame on every slide (plus speaker notes) and
+    replaces any remaining {{TOKEN}} placeholder with its value from
+    substitution_table. Returns the number of token replacements
+    performed.
+
+    Why this exists:
+      * The substitution table is normally applied at prompt-
+        assembly time so Sonnet's slide JSON already carries
+        substituted values. But when a renderer falls back to
+        SLIDE_TITLES[idx-1] for a missing slide title (e.g. on a
+        per-slide LLM failure), the un-substituted literal
+        `{{REGIME_CONFIDENCE}}` placeholder leaks through.
+      * This pass catches every remaining `{{...}}` placeholder
+        and substitutes from the table.
+      * Unknown tokens (not in the table) are LEFT INTACT --
+        downstream operator-facing audit (a future addition)
+        would flag those; for now they remain visible so the
+        operator notices a typo'd token rather than silently
+        rendering it as em-dash.
+
+    No-ops when substitution_table is None / empty -- the deck
+    renders the raw text as-is."""
+    if not substitution_table:
+        return 0
+    import re as _re
+    n_replacements = 0
+    # Build a single combined regex of every token in the table for
+    # one-pass replacement per text frame.
+    tokens = [t for t in substitution_table if t.startswith("{{")
+              and t.endswith("}}")]
+    if not tokens:
+        return 0
+    token_pattern = _re.compile(
+        "|".join(_re.escape(t) for t in tokens))
+
+    def _sub(match: _re.Match) -> str:
+        nonlocal n_replacements
+        n_replacements += 1
+        return substitution_table.get(match.group(0), match.group(0))
+
+    for slide in prs.slides:
+        # Body text frames + tables.
+        for shape in slide.shapes:
+            try:
+                if shape.has_text_frame:
+                    tf = shape.text_frame
+                    for paragraph in tf.paragraphs:
+                        for run in paragraph.runs:
+                            if "{{" in run.text:
+                                run.text = token_pattern.sub(
+                                    _sub, run.text)
+                if getattr(shape, "has_table", False):
+                    tbl = shape.table
+                    for row in tbl.rows:
+                        for cell in row.cells:
+                            for paragraph in (
+                                    cell.text_frame.paragraphs):
+                                for run in paragraph.runs:
+                                    if "{{" in run.text:
+                                        run.text = token_pattern.sub(
+                                            _sub, run.text)
+            except Exception as exc:  # noqa: BLE001
+                # A single shape's substitution failure must not
+                # abort the whole pass. Log + continue.
+                log.warning(
+                    "substitute_pptx_text_shape_failed",
+                    error=str(exc))
+        # Speaker notes -- same treatment.
+        try:
+            notes = slide.notes_slide
+            if notes is not None:
+                tf = notes.notes_text_frame
+                for paragraph in tf.paragraphs:
+                    for run in paragraph.runs:
+                        if "{{" in run.text:
+                            run.text = token_pattern.sub(
+                                _sub, run.text)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "substitute_pptx_text_notes_failed",
+                error=str(exc))
+    if n_replacements:
+        log.info(
+            "substitute_pptx_text_complete",
+            replacements=n_replacements)
+    return n_replacements
+
+
 def build_presentation_deck(
     slides: Any,
     charts: dict[int, bytes | None] | None = None,
+    substitution_table: dict[str, str] | None = None,
 ) -> bytes:
     """
     Lays out the 10-slide final presentation deck and returns the .pptx bytes.
@@ -2417,6 +2589,14 @@ def build_presentation_deck(
             slide.notes_slide.notes_text_frame.text = text
         except Exception:  # noqa: BLE001 — a notes failure never fails the deck
             pass
+
+    # June 27 2026 -- post-build {{...}} cleanup pass. Catches any
+    # un-substituted placeholder that leaked through (e.g. when a
+    # specialized renderer falls back to SLIDE_TITLES[idx-1] for a
+    # missing slide title, the literal `{{REGIME_CONFIDENCE}}`
+    # would otherwise render verbatim). No-op when substitution_
+    # table is None (legacy callers).
+    _substitute_pptx_text(prs, substitution_table)
 
     buf = io.BytesIO()
     prs.save(buf)
@@ -2710,10 +2890,18 @@ def build_editor_pptx(
                     s.shapes.add_picture(io.BytesIO(png), left, top,
                                          width=width, height=height)
                 else:
-                    _textbox(s, left, top, width, height,
-                             "[DATA PENDING] — chart unavailable. Warm the "
-                             "analytics caches, then re-export.",
-                             size=12, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
+                    # June 27 2026 -- spec: [DATA PENDING] must
+                    # never appear in exported PPTX. Log + skip
+                    # the chart element rather than emit a
+                    # placeholder; the slide's other elements
+                    # still render around the empty chart area.
+                    log.warning(
+                        "editor_pptx_chart_png_missing_skipping",
+                        element_id=str(el.get("id") or ""),
+                        note=("chart PNG missing; skipping element "
+                              "per spec (no [DATA PENDING] "
+                              "placeholder). Operator: warm "
+                              "analytics caches + re-export."))
             elif el.get("type") == "table":
                 # June 26 2026 -- first-class type='table' canvas
                 # element. Renders as a real PPTX <a:tbl> via
@@ -2741,10 +2929,16 @@ def build_editor_pptx(
                     _canvas_table(
                         s, headers, rows, left, top, width, height)
                 else:
-                    _textbox(s, left, top, width, height,
-                             "[DATA PENDING] — table data unavailable. "
-                             "Configure rows + columns in the slide editor.",
-                             size=12, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
+                    # June 27 2026 -- spec: [DATA PENDING] must
+                    # never appear. Log + skip the table element.
+                    log.warning(
+                        "editor_pptx_table_data_missing_skipping",
+                        element_id=str(el.get("id") or ""),
+                        note=("table_config rows/columns missing; "
+                              "skipping element per spec (no "
+                              "[DATA PENDING] placeholder). "
+                              "Configure rows + columns in the "
+                              "slide editor."))
 
         # Speaker notes — the verify reminder, then the presenter's notes.
         try:

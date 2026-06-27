@@ -328,6 +328,12 @@ class TestDocumentGenerationContract:
         # into one split-panel slide to match Molly's reference
         # deck. (Was 12 between 2026-06-22 agenda insert and
         # the 2026-06-27 collapse.)
+        #
+        # PR 3 (June 27 2026): [DATA PENDING] is now NEVER emitted
+        # under any circumstances. Renderers log + skip missing
+        # elements silently. The cold-cache deck still builds with
+        # 11 slides + canonical titles (verified by the next test)
+        # -- it just carries empty bullet blocks for missing data.
         import main
         from tools.academic_deck import DECK_SLIDE_COUNT
         pptx_bytes, filename, media, _draft = _run(
@@ -337,8 +343,9 @@ class TestDocumentGenerationContract:
         prs = Presentation(io.BytesIO(pptx_bytes))
         assert len(prs.slides) == DECK_SLIDE_COUNT
         assert DECK_SLIDE_COUNT == 11  # June 27 2026 Molly-aligned collapse
-        # Cold caches / no matplotlib in the test env must not fail the deck.
-        assert "[DATA PENDING]" in _pptx_text(pptx_bytes)
+        # PR 3 -- [DATA PENDING] string must NEVER appear in the
+        # exported PPTX, even in the cold-cache test path.
+        assert "[DATA PENDING]" not in _pptx_text(pptx_bytes)
 
     def test_presentation_deck_has_canonical_titles_and_notes(self):
         import main
@@ -346,10 +353,24 @@ class TestDocumentGenerationContract:
         pptx_bytes, *_ = _run(main._generate_deck_document(TEAM_EMAIL))
         prs = Presentation(io.BytesIO(pptx_bytes))
         text = _pptx_text(pptx_bytes)
-        # The six canonical slide titles are always present (the builder
-        # falls back to them when the AI JSON is absent — the test env case).
+        # The canonical slide titles are present (the builder falls
+        # back to them when the AI JSON is absent -- the test env
+        # case). PR 3 (June 27 2026) -- slide titles that carry
+        # {{TOKEN}} placeholders get post-build substitution, so
+        # the rendered title is the value-substituted form (e.g.
+        # 'Live Regime Signal: TRANSITION at 95.4% Confidence' for
+        # slide 7). Test against the STATIC PREFIX before the
+        # first {{...}} token for those titles.
+        import re as _re
         for title in SLIDE_TITLES:
-            assert title in text, f"missing slide title: {title}"
+            # Static prefix is everything up to the first '{{'. A
+            # title with no tokens is unchanged.
+            static_prefix = _re.split(r"\{\{", title, maxsplit=1)[0]
+            # An empty prefix would mean the title starts with a
+            # token (none currently do) -- defensively fall back
+            # to the full title in that case.
+            needle = static_prefix.strip() or title
+            assert needle in text, f"missing slide title prefix: {needle}"
         # Every slide carries non-empty speaker notes (the verify caveat at
         # minimum); slide 1 additionally carries the submission checklist.
         for s in prs.slides:

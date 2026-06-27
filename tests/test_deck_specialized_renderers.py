@@ -320,13 +320,18 @@ class TestCardGridSlide:
     the slide (slide 4 today), cards stack vertically in the left
     50%; otherwise they spread horizontally."""
 
-    def test_slide_4_has_chart_placeholder(self):
+    def test_slide_4_chart_slot_empty_when_png_missing(self):
+        # June 27 2026 -- spec: NO placeholder text in exported PPTX.
         # SLIDE_CHARTS[4] = rolling_correlation; with no chart png
-        # supplied the renderer drops a [Chart unavailable: ...]
-        # placeholder textbox.
+        # supplied the renderer now logs + skips the chart slot
+        # rather than emitting a [Chart unavailable] placeholder
+        # textbox. Pin the absence of the placeholder text.
         prs = _build_deck()
         text = _slide_text(prs.slides[3])
-        assert "Chart unavailable: rolling_correlation" in text
+        assert "Chart unavailable" not in text
+        assert "[DATA PENDING]" not in text
+        # The card content still renders even when chart is missing.
+        assert "Correlation Break" in text
 
     def test_slide_6_three_horizontal_cards_no_chart(self):
         """No chart for slide 6 -> three side-by-side cards. Each

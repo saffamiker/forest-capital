@@ -18483,8 +18483,14 @@ async def _finalize_deck(
 
     charts = await asyncio.to_thread(
         _render_deck_slide_charts, data, blend_weights, blend_series)
+    # June 27 2026 -- thread substitution_table into the post-build
+    # pass so any un-substituted {{...}} placeholder that leaked
+    # through (e.g. via a SLIDE_TITLES[idx-1] fallback when a
+    # specialized renderer had no slide.title) gets caught + replaced
+    # before the PPTX bytes ship.
     pptx_bytes = await asyncio.to_thread(
-        build_presentation_deck, slides, charts)
+        build_presentation_deck, slides, charts,
+        substitution_table)
 
     draft_id: int | None = None
     try:
@@ -18873,6 +18879,35 @@ async def _generate_deck_document(
                 slide_plan_entry=entry,
                 substitution_table=substitution_table,
                 brief_excerpt=slide_brief_excerpts.get(n, ""))
+            # PR 3 (June 27 2026) -- single-retry on empty bullets
+            # for slides that REQUIRE non-empty bullets per
+            # SLIDE_SPECIFICATIONS (slides 1, 3, 5, 6, 8, 10, 11).
+            # Slides 4, 7, 9, 12 are table-heavy proof slides where
+            # empty bullets is acceptable. If the retry also comes
+            # back empty, log a structured warning + accept the
+            # slide as-is -- the renderer log+skips the bullet
+            # block. [DATA PENDING] is NEVER emitted.
+            from tools.academic_deck import SLIDES_REQUIRING_BULLETS
+            if (slide is not None
+                    and n in SLIDES_REQUIRING_BULLETS
+                    and not (slide.get("bullets") or [])):
+                log.warning(
+                    "deck_slide_bullets_empty_retrying",
+                    slide_number=n)
+                slide_retry = await asyncio.to_thread(
+                    _generate_one_deck_slide,
+                    n, per_slide_ctx, n_strategies,
+                    slide_plan_entry=entry,
+                    substitution_table=substitution_table,
+                    brief_excerpt=slide_brief_excerpts.get(n, ""))
+                if (slide_retry is not None
+                        and (slide_retry.get("bullets") or [])):
+                    slide = slide_retry
+                else:
+                    log.warning(
+                        "deck_slide_bullets_empty_after_retry",
+                        slide_number=n,
+                        retry_returned_none=(slide_retry is None))
             if slide is not None:
                 slides.append(slide)
             # A None slide is left out -- _normalize_slides inside
