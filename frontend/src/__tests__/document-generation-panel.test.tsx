@@ -222,13 +222,14 @@ describe('DocumentGenerationPanel — async generation', () => {
     })
 
   it('Brief Regenerate is a no-op when the user dismisses the '
-    + 'BriefRegenConfirmModal (June 23 2026 -- replaces the old '
-    + 'window.confirm path for the brief specifically)', async () => {
-      // The brief regen path now branches differently from other
-      // doc types: it runs a pre-flight GET to /api/v1/story-plans/exists
-      // and, when downstream plans exist, opens BriefRegenConfirmModal
-      // instead of window.confirm. Pinning the cancel branch guards
-      // against the modal being silently removed.
+    + 'unified RegenConfirmModal (June 27 2026 -- brief '
+    + 'consolidated onto RegenConfirmModal)', async () => {
+      // The brief regen path runs a pre-flight GET to
+      // /api/v1/story-plans/exists and, when downstream plans
+      // exist, opens the unified RegenConfirmModal (brief used
+      // to have a dedicated BriefRegenConfirmModal -- retired).
+      // Pinning the cancel branch guards against the modal
+      // being silently removed.
       mockedAxios.get.mockImplementation((url: string) => {
         if (url === '/api/v1/story-plans/exists') {
           return Promise.resolve({
@@ -256,7 +257,7 @@ describe('DocumentGenerationPanel — async generation', () => {
       fireEvent.click(button)
       // Modal opens on the pre-flight result.
       const cancel = await screen.findByTestId(
-        'brief-regen-confirm-modal-cancel')
+        'regen-confirm-modal-cancel')
       fireEvent.click(cancel)
       // Cancel suppresses the POST.
       expect(mockedAxios.post).not.toHaveBeenCalled()

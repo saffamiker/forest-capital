@@ -18,7 +18,9 @@ import {
   CheckCircle, PenLine, RefreshCw, X, Info, Mic, ShieldCheck, ShieldAlert,
   ShieldX,
 } from 'lucide-react'
-import BriefRegenConfirmModal from './BriefRegenConfirmModal'
+// June 27 2026 -- BriefRegenConfirmModal retired; brief now uses
+// the same RegenConfirmModal as deck / appendix / script so the
+// modal contract is unified across all four document types.
 import RegenConfirmModal from './RegenConfirmModal'
 import SlideGuidancePanel from './SlideGuidancePanel'
 import TeamGate from './TeamGate'
@@ -470,22 +472,13 @@ export default function DocumentGenerationPanel() {
     open: boolean; blockers: string[]; message?: string;
     coldCaches?: string[]
   }>({ open: false, blockers: [] })
-  // June 23 2026 -- brief regen confirmation gate. The modal opens
-  // BEFORE the POST when /api/v1/story-plans/exists reports any of
-  // (deck | appendix | script) story plans currently exist. On
-  // Cancel, the POST is suppressed. On Confirm, the POST fires and
-  // the backend clears those plans at the top of
-  // _generate_brief_document. Pending: the DocSpec captured at
-  // click time so Confirm can resume the same generation flow
-  // (regenerate=true) the user originally chose.
-  const [briefRegenConfirm, setBriefRegenConfirm] = useState<{
-    open: boolean
-    pendingDoc: DocSpec | null
-  }>({ open: false, pendingDoc: null })
-  // June 24 2026 -- team-replacement regen warning for non-brief
-  // doc types (deck / appendix / script). Brief gets its own modal
-  // (BriefRegenConfirmModal) above that merges the downstream
-  // story-plan clear language into the same dialog.
+  // June 24 2026 (consolidated June 27 2026) -- team-replacement
+  // regen warning shared by every document type. Brief used to
+  // have its own dedicated BriefRegenConfirmModal (with the
+  // downstream story-plan-clear language merged inline); that
+  // was retired so the modal contract is unified -- brief now
+  // routes through the same dynamic-cascade RegenConfirmModal as
+  // deck / appendix / script.
   const [regenConfirm, setRegenConfirm] = useState<{
     open: boolean
     pendingDoc: DocSpec | null
@@ -614,13 +607,9 @@ export default function DocumentGenerationPanel() {
     doc: DocSpec,
     opts?: {
       regenerate?: boolean
-      // Internal flag set by the brief-regen confirm modal's
-      // onConfirm so we skip the pre-flight + modal loop. Not part
-      // of the public API of this function.
-      _fromBriefRegenConfirm?: boolean
-      // Concern (June 24 2026) -- internal flag set by the
-      // RegenConfirmModal's onConfirm for deck / appendix /
-      // script regens so we skip the modal on the resumed call.
+      // Internal flag set by RegenConfirmModal's onConfirm so we
+      // skip the modal on the resumed call. Not part of the
+      // public API of this function.
       _fromRegenConfirm?: boolean
     },
   ) => {
@@ -629,18 +618,23 @@ export default function DocumentGenerationPanel() {
     // editor draft will be superseded -- the backend creates a NEW
     // editor_drafts row and flips the previous one's is_current to
     // false, so any unsaved edits in the editor are no longer the
-    // canonical "current" draft. The frontend has no explicit
-    // dirty-flag for the editor, so always-confirm on Regenerate
-    // is the safe default.
-    if (opts?.regenerate) {
-      // June 23 2026 -- the brief gets a dedicated modal (NOT
-      // window.confirm) that warns about the downstream story
-      // plan clear. The modal is gated on a pre-flight check:
-      // if no downstream plans exist, skip the modal entirely
-      // and proceed to Generate. Other doc types keep the
-      // generic draft-overwrite confirm via window.confirm.
-      if (doc.documentType === 'executive_brief'
-        && !opts?._fromBriefRegenConfirm) {
+    // canonical "current" draft. always-confirm on Regenerate is
+    // the safe default.
+    //
+    // June 27 2026 -- consolidated brief onto the same
+    // RegenConfirmModal flow as deck / appendix / script. The
+    // dedicated BriefRegenConfirmModal was retired so all four
+    // document types share one modal contract.
+    //
+    // For the executive brief specifically, a pre-flight check
+    // against /api/v1/story-plans/exists is still performed so
+    // brief regens that touch no downstream plans skip the modal
+    // entirely. This pre-flight is removed in the next commit
+    // (modal becomes unconditional per spec); kept here so the
+    // consolidation lands as a focused refactor without changing
+    // the trigger conditions in the same diff.
+    if (opts?.regenerate && !opts?._fromRegenConfirm) {
+      if (doc.documentType === 'executive_brief') {
         try {
           const res = await axios.get<{
             exists: boolean
@@ -654,7 +648,7 @@ export default function DocumentGenerationPanel() {
             },
           })
           if (res.data.exists) {
-            setBriefRegenConfirm({ open: true, pendingDoc: doc })
+            setRegenConfirm({ open: true, pendingDoc: doc })
             return
           }
         } catch {
@@ -663,13 +657,7 @@ export default function DocumentGenerationPanel() {
           // the DELETE, the brief still generates. The modal is
           // a courtesy warning, not a hard gate.
         }
-      } else if (!opts?._fromRegenConfirm) {
-        // June 24 2026 -- deck / appendix / script regens open the
-        // RegenConfirmModal (team-replacement language). The brief
-        // path above merges this warning with the downstream
-        // story-plan clear warning into a single modal. window.
-        // confirm is retired so the regen flow is consistent
-        // across doc types -- no stacking dialogs.
+      } else {
         setRegenConfirm({ open: true, pendingDoc: doc })
         return
       }
@@ -1226,20 +1214,8 @@ export default function DocumentGenerationPanel() {
       <AppendixWorkflowModal
         open={appendixGuideOpen}
         onClose={() => setAppendixGuideOpen(false)} />
-      <BriefRegenConfirmModal
-        open={briefRegenConfirm.open}
-        onCancel={() => setBriefRegenConfirm(
-          { open: false, pendingDoc: null })}
-        onConfirm={() => {
-          const pending = briefRegenConfirm.pendingDoc
-          setBriefRegenConfirm({ open: false, pendingDoc: null })
-          if (pending) {
-            void handleGenerate(pending,
-              { regenerate: true, _fromBriefRegenConfirm: true })
-          }
-        }} />
-      {/* June 24 2026 -- deck / appendix / script regens. The
-          brief uses the dedicated BriefRegenConfirmModal above. */}
+      {/* June 27 2026 -- single modal for all four doc types.
+          The dedicated BriefRegenConfirmModal was retired. */}
       <RegenConfirmModal
         open={regenConfirm.open}
         documentName={
