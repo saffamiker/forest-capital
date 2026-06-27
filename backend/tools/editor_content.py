@@ -339,6 +339,106 @@ def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join([header_row, separator, *body_rows])
 
 
+def _deck_slide_title_only(
+    slide_id: int, title: str,
+) -> dict[str, Any]:
+    """June 27 2026 (PR B canvas mirror) -- title-chrome slide for
+    slide 1. The PPTX export draws a navy header band + teal accent
+    rule + subtitle + presenter line. The canvas can't paint shape
+    backgrounds at the element level, so this produces three
+    structurally-faithful text elements (title large + subtitle +
+    presenter) on the standard white slide background. The exported
+    PPTX gets the full title chrome via _render_title_slide."""
+    elements: list[dict[str, Any]] = [
+        {"id": f"s{slide_id}_title", "type": "text",
+         "x": 60, "y": 180, "width": 840, "height": 140,
+         "content": title,
+         "fontSize": 36, "fontWeight": "bold",
+         "fontStyle": "normal", "color": "#1E2761",
+         "locked": False},
+        {"id": f"s{slide_id}_subtitle", "type": "text",
+         "x": 60, "y": 340, "width": 840, "height": 60,
+         "content": "Forest Capital  /  McColl School of Business",
+         "fontSize": 20, "fontWeight": "normal",
+         "fontStyle": "normal", "color": "#1E2761",
+         "locked": False},
+        {"id": f"s{slide_id}_presenters", "type": "text",
+         "x": 60, "y": 420, "width": 840, "height": 60,
+         "content": "Group 1: Bob Thao, Michael Ruurds, Molly Murdock",
+         "fontSize": 16, "fontWeight": "normal",
+         "fontStyle": "normal", "color": "#1A1A2E",
+         "locked": False},
+    ]
+    return {
+        "id": slide_id,
+        "title": title,
+        "background": "#FFFFFF",
+        "speaker_notes": "",
+        "elements": elements,
+    }
+
+
+def _deck_slide_split_panel(
+    slide_id: int, title: str, body: str,
+    *, strategy_names: list[str] | None = None,
+    table_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """June 27 2026 (PR B canvas mirror) -- split-panel slide for
+    slide 3. The PPTX export draws three stat callout cards on the
+    left + an OOS results table on the right. The canvas produces a
+    structurally-equivalent layout: left text element with the
+    strategy bullets + right table element with the OOS verdict
+    table.
+
+    When table_spec is missing, falls back to the default chartless
+    body-only layout so a draft without an OOS verdict table still
+    renders cleanly (the right half just stays empty)."""
+    from tools.chart_config_defaults import build_table_config
+
+    elements: list[dict[str, Any]] = [
+        {"id": f"s{slide_id}_title", "type": "text",
+         "x": 60, "y": 40, "width": 840, "height": 80,
+         "content": title, "fontSize": 36, "fontWeight": "bold",
+         "fontStyle": "normal", "color": "#1B2A4A", "locked": False},
+        {"id": f"s{slide_id}_body", "type": "text",
+         "x": 60, "y": 150,
+         "width": 420 if table_spec else 840,
+         "height": 380,
+         "content": body, "fontSize": 16, "fontWeight": "normal",
+         "fontStyle": "normal", "color": "#333333", "locked": False},
+    ]
+    if table_spec:
+        table_type = str(
+            table_spec.get("table_type", "performance"))
+        rows = (
+            table_spec.get("rows")
+            or list(strategy_names or []))
+        table_el: dict[str, Any] = {
+            "id":     f"s{slide_id}_table",
+            "type":   "table",
+            "x":      500,
+            "y":      150,
+            "width":  400,
+            "height": 30,  # placeholder; renderer auto-grows
+            "locked": False,
+            "table_config": build_table_config(
+                table_type=table_type,
+                strategy_names=rows,
+                title=table_spec.get("title")),
+        }
+        if table_spec.get("columns"):
+            table_el["table_config"]["columns"] = list(
+                table_spec["columns"])
+        elements.append(table_el)
+    return {
+        "id": slide_id,
+        "title": title,
+        "background": "#FFFFFF",
+        "speaker_notes": "",
+        "elements": elements,
+    }
+
+
 def _deck_slide_with_chart(
     slide_id: int, title: str, body: str, chart_key: str | None,
     *, strategy_names: list[str] | None = None,
@@ -523,10 +623,28 @@ def deck_slides_to_editor(
                         sl.get("table_type") or "performance"),
                 }
         chart_key = DECK_SLIDE_CHART_KEYS.get(i)
-        cs = _deck_slide_with_chart(
-            i, title, body, chart_key,
-            strategy_names=strategy_names,
-            table_spec=table_spec)
+        # June 27 2026 (PR B canvas mirror) -- dispatch slides 1
+        # and 3 to specialized canvas layouts that match the new
+        # PPTX renderers (title chrome + split panel respectively).
+        # Slides 4 / 6 / 7 / 8 / 9 / 10 / 11 continue through the
+        # generic _deck_slide_with_chart path because the existing
+        # text + optional chart + optional table element shape
+        # already produces a structurally-equivalent canvas layout
+        # for those slide types; the PPTX export gets the extra
+        # styling (cards, badges, feature rows) via the dispatch
+        # in academic_deck._render_content_slide.
+        if i == 1:
+            cs = _deck_slide_title_only(i, title)
+        elif i == 3:
+            cs = _deck_slide_split_panel(
+                i, title, body,
+                strategy_names=strategy_names,
+                table_spec=table_spec)
+        else:
+            cs = _deck_slide_with_chart(
+                i, title, body, chart_key,
+                strategy_names=strategy_names,
+                table_spec=table_spec)
         notes = str(sl.get("speaker_notes") or "").strip()
         if notes:
             cs["speaker_notes"] = notes
