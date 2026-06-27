@@ -1214,6 +1214,25 @@ export default function DocumentGenerationPanel() {
                 regenConfirm.pendingDoc.documentType]
                 ?.audit_findings_total ?? 0)
             : 0}
+        hasManualEdits={(() => {
+          // June 27 2026 -- detect manual edits by comparing
+          // updated_at vs created_at on the current draft (the
+          // same 60s tolerance TileMetadataBlock uses). When the
+          // draft has been touched in-editor since generation,
+          // surface the spec's destructive-loss warning. False
+          // when no current draft, no timestamps, or within
+          // tolerance.
+          if (!regenConfirm.pendingDoc) return false
+          const draft = currentDraftByType[
+            regenConfirm.pendingDoc.documentType]
+          if (!draft?.created_at || !draft?.updated_at) {
+            return false
+          }
+          const c = new Date(draft.created_at).getTime()
+          const u = new Date(draft.updated_at).getTime()
+          if (Number.isNaN(c) || Number.isNaN(u)) return false
+          return (u - c) > 60_000
+        })()}
         onCancel={() => setRegenConfirm(
           { open: false, pendingDoc: null })}
         onConfirm={() => {

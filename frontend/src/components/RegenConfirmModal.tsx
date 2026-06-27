@@ -41,6 +41,13 @@ export interface RegenConfirmModalProps {
    *  audit_warnings.flag_counts.total field from the current
    *  draft row (populated by tools.document_audit). */
   findingsCount?: number | undefined
+  /** June 27 2026 -- true when the current draft's updated_at
+   *  diverges from created_at by more than 60s (the same
+   *  threshold TileMetadataBlock uses). Surfaces the spec line:
+   *    "Your manual edits to this document will be lost."
+   *  False / undefined omits the warning. Source: derived at
+   *  the call site from the drafts API timestamps. */
+  hasManualEdits?: boolean | undefined
   /** June 25 2026 -- the source document_type being regenerated.
    *  Drives the cascade-impact callout that lists which other
    *  current drafts will be marked stale per _REGEN_CASCADE:
@@ -85,10 +92,11 @@ const _DOC_LABELS: Record<string, string> = {
 export default function RegenConfirmModal(
   {
     open, documentName, onCancel, onConfirm, findingsCount,
-    sourceDocumentType,
+    hasManualEdits, sourceDocumentType,
   }: RegenConfirmModalProps,
 ) {
   const findingsN = findingsCount ?? 0
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
   const cascadeTypes = (
     sourceDocumentType
       ? (_CASCADE_TYPES[sourceDocumentType] ?? [])
@@ -97,12 +105,28 @@ export default function RegenConfirmModal(
     (t) => _DOC_LABELS[t] ?? t)
   const overlayRef = useRef<HTMLDivElement | null>(null)
 
+  // June 27 2026 -- Cancel-as-default keyboard contract:
+  //   * Escape cancels (unchanged).
+  //   * Enter ALSO cancels (was a no-op; the spec wants Enter
+  //     and Esc to both back out so a stray Enter never fires
+  //     the destructive action). Confirmation requires an
+  //     explicit click / tab + Space on the Regenerate button.
+  // The Cancel button also gets autoFocus on open so the
+  // default focus target is Cancel, not Confirm.
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onCancel()
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        // Block Enter from triggering whichever button has focus
+        // (in case the user tabbed to Regenerate); cancel always.
+        e.preventDefault()
+        onCancel()
+      }
     }
     document.addEventListener('keydown', onKey)
+    // autoFocus on the Cancel button so Tab order starts on the
+    // safe action and a no-op keystroke can't confirm.
+    cancelRef.current?.focus()
     return () => document.removeEventListener('keydown', onKey)
   }, [open, onCancel])
 
@@ -148,6 +172,21 @@ export default function RegenConfirmModal(
                 {findingsN === 1 ? 'it' : 'them'}.
               </p>
             )}
+            {hasManualEdits && (
+              // June 27 2026 -- per spec: warn the user that any
+              // manual edits to the draft (made via the in-platform
+              // editor since generation) will be lost on regen.
+              // Detected at the call site via updated_at > created_at
+              // + 60s tolerance (the same threshold TileMetadataBlock
+              // uses).
+              <p
+                data-testid="regen-confirm-manual-edits-warning"
+                className="text-xs text-red-200 leading-relaxed
+                           rounded border border-red-500/50
+                           bg-red-500/10 p-2.5 font-semibold">
+                Your manual edits to this document will be lost.
+              </p>
+            )}
             <p className="text-xs text-slate-300 leading-relaxed">
               This will replace the current draft for the whole
               team. The existing draft will be archived in version
@@ -182,13 +221,26 @@ export default function RegenConfirmModal(
             )}
           </div>
         </div>
+        {/* June 27 2026 button contract per spec:
+              * Cancel is leftmost, autoFocused on open so the
+                default keyboard target is the safe action.
+              * Regenerate is styled DESTRUCTIVE (red) to signal
+                that confirming destroys the current draft.
+              * Enter / Escape both cancel (handled by the
+                keydown listener above) -- pressing Enter while
+                Cancel has focus also cancels via the button's
+                native click semantics. */}
         <div className="flex items-center justify-end gap-2 mt-5">
           <button
             type="button"
+            ref={cancelRef}
             onClick={onCancel}
+            autoFocus
             data-testid="regen-confirm-modal-cancel"
             className="px-3 py-1.5 rounded text-xs border border-border
-                       text-muted hover:text-white hover:bg-navy-700">
+                       text-white bg-navy-700 hover:bg-navy-600
+                       focus:outline-none focus:ring-2
+                       focus:ring-electric/60 font-semibold">
             Cancel
           </button>
           <button
@@ -196,7 +248,9 @@ export default function RegenConfirmModal(
             onClick={onConfirm}
             data-testid="regen-confirm-modal-confirm"
             className="px-3 py-1.5 rounded text-xs font-semibold
-                       bg-electric text-white hover:bg-blue-500">
+                       bg-red-600 text-white hover:bg-red-500
+                       focus:outline-none focus:ring-2
+                       focus:ring-red-400/70">
             Regenerate
           </button>
         </div>
