@@ -268,7 +268,12 @@ class TestImagePlaceholder:
     """The chart slot is filled by the matplotlib render when the
     cache is warm. A None return from the renderer used to silently
     insert a generic [DATA PENDING] placeholder; the hardening logs
-    the slot name + emits a more diagnostic placeholder."""
+    the slot name + emits a more diagnostic placeholder.
+
+    PR 3 (June 27 2026) -- spec changed: NO placeholder text in
+    exported PPTX under any circumstances. _image now log+skips
+    silently when png is None -- no textbox, no chart unavailable
+    text, just the structured warning event for operator triage."""
 
     def test_image_logs_warning_with_chart_slot(self, monkeypatch):
         from tools import academic_deck
@@ -350,10 +355,15 @@ class TestImagePlaceholder:
             left=Inches(1.0), top=Inches(1.0), width=Inches(5.0),
             fallback="rolling_correlation")
 
-        # No image was added; one placeholder textbox was added; a
-        # WARNING was emitted naming the chart slot.
+        # PR 3 (June 27 2026): No image added; ZERO placeholder
+        # textboxes added (the silent-skip contract); WARNING
+        # still emitted naming the chart slot so the operator can
+        # triage from logs alone.
         assert captured["add_picture"] == 0
-        assert len(captured["textboxes"]) == 1
+        assert len(captured["textboxes"]) == 0, (
+            "PR 3 spec violation: _image must NOT add a "
+            "placeholder textbox when png is None -- silent skip "
+            "is the contract")
         events = [e for e, _ in log_calls
                   if e == "deck_chart_slot_unavailable"]
         assert events, "expected deck_chart_slot_unavailable warning"
