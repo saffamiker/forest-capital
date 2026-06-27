@@ -394,13 +394,16 @@ class TestDeckSlideCount:
     all rely on this constant; pin it so a future change touches every
     helper at once."""
 
-    def test_twelve_slides_post_agenda_insert(self):
-        """June 22 2026 -- 12-slide deck after agenda insert at
-        position 2 + AI methodology / live demo flip to slides
-        10/11. Previous 11-slide structure was the June 7 2026
-        rebuild."""
+    def test_eleven_slides_post_investment_case_merge(self):
+        """June 27 2026 -- collapsed from 12 to 11 slides. The
+        old slide 3 'Three Strategies' setup + old slide 4
+        'The Numbers' OOS verdict merged into the combined
+        Investment Case split-panel slide to match Molly's
+        reference deck. Previous 11-slide structure was the
+        June 7 2026 rebuild; current 11-slide structure is the
+        June 27 2026 Molly-aligned collapse."""
         from tools.academic_deck import DECK_SLIDE_COUNT
-        assert DECK_SLIDE_COUNT == 12
+        assert DECK_SLIDE_COUNT == 11
 
     def test_every_slide_number_has_a_spec(self):
         """The per-slide loop iterates 1..DECK_SLIDE_COUNT. Each must
@@ -418,19 +421,21 @@ class TestStoryArcSeed:
     re-reading every other slide's content."""
 
     def test_seed_substitutes_slide_number_and_title(self):
+        """June 27 2026 -- updated for the 11-slide collapse."""
         from tools.academic_deck import (
             slide_generation_prompt, SLIDE_TITLES,
         )
         prompt = slide_generation_prompt(7)
-        assert "slide 7 of 12" in prompt
+        assert "slide 7 of 11" in prompt
         assert SLIDE_TITLES[6] in prompt   # slide 7's title
 
-    def test_seed_lists_the_twelve_arc_stops(self):
+    def test_seed_lists_the_eleven_arc_stops(self):
+        """June 27 2026 -- arc seed now lists 11 narrative beats
+        after the Investment Case merge collapsed slides 3 + 4
+        into one."""
         from tools.academic_deck import slide_generation_prompt
         prompt = slide_generation_prompt(1)
-        # The arc seed lists all 12 narrative beats so the slide-1
-        # generator knows where the deck is heading.
-        for n in range(1, 13):
+        for n in range(1, 12):
             assert f"{n}." in prompt
 
 

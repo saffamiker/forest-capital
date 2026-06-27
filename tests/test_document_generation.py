@@ -323,10 +323,11 @@ class TestDocumentGenerationContract:
         assert "[DATA PENDING]" in text
 
     def test_presentation_deck_document_is_a_valid_11_slide_pptx(self):
-        # June 7 2026 (bridges #98 / #100) -- deck rebuilt from 6 to
-        # 11 slides covering the investment question, evidence,
-        # regime story, OOS validation, live demo setup, AI
-        # methodology, and the final recommendation.
+        # June 27 2026 -- back to 11 slides after the Investment
+        # Case merge collapsed the old slide 3+4 setup + verdict
+        # into one split-panel slide to match Molly's reference
+        # deck. (Was 12 between 2026-06-22 agenda insert and
+        # the 2026-06-27 collapse.)
         import main
         from tools.academic_deck import DECK_SLIDE_COUNT
         pptx_bytes, filename, media, _draft = _run(
@@ -335,7 +336,7 @@ class TestDocumentGenerationContract:
         assert filename.endswith(".pptx")
         prs = Presentation(io.BytesIO(pptx_bytes))
         assert len(prs.slides) == DECK_SLIDE_COUNT
-        assert DECK_SLIDE_COUNT == 12  # June 22 2026 agenda + AI/demo flip
+        assert DECK_SLIDE_COUNT == 11  # June 27 2026 Molly-aligned collapse
         # Cold caches / no matplotlib in the test env must not fail the deck.
         assert "[DATA PENDING]" in _pptx_text(pptx_bytes)
 

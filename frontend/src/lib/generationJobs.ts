@@ -154,7 +154,15 @@ export function isDismissed(jobId: string): boolean {
 }
 
 /** Fetches the user's recent jobs on page load — resumes polling any
- *  still running, and keeps recently completed ones visible. */
+ *  still running, and keeps recently completed ones visible.
+ *
+ *  June 27 2026 (BUG 1 follow-up) -- after the hydrate, dismiss any
+ *  FAILED job for a doc_type that ALSO has a non-terminal (pending /
+ *  running) job in the hydrated set. Without this, the server's
+ *  /api/v1/jobs list (which returns the last 10 jobs in any state)
+ *  re-introduces stale failed rows the panel previously dismissed
+ *  on a retry. _autoDismissStaleFailed only fires at trackJob-time,
+ *  so loadExistingJobs needs to mirror the housekeeping. */
 export async function loadExistingJobs(): Promise<void> {
   try {
     const res = await axios.get<{ jobs: GenJob[] }>('/api/v1/jobs')
@@ -162,6 +170,33 @@ export async function loadExistingJobs(): Promise<void> {
       if (jobs.has(j.job_id)) continue
       jobs.set(j.job_id, j)
       if (!isTerminal(j.status)) schedulePoll(j.job_id)
+    }
+    // Per-doc_type stale-failed housekeeping. For each doc_type
+    // that has a non-terminal job in the store, dismiss every
+    // older FAILED job for the same doc_type. Mirrors
+    // _autoDismissStaleFailed which only runs on trackJob.
+    const nonTerminalByDocType = new Set<string>()
+    for (const j of jobs.values()) {
+      if (!isTerminal(j.status)) {
+        nonTerminalByDocType.add(j.document_type)
+      }
+    }
+    for (const dt of nonTerminalByDocType) {
+      // Find the newest non-terminal job for this doc_type so we
+      // know which job_id to PRESERVE -- mass-dismiss every other
+      // failed job for the same doc_type.
+      let keepJobId: string | undefined
+      for (const j of jobs.values()) {
+        if (j.document_type !== dt) continue
+        if (isTerminal(j.status)) continue
+        if (!keepJobId
+            || (j.created_at ?? '') > (jobs.get(keepJobId)?.created_at ?? '')) {
+          keepJobId = j.job_id
+        }
+      }
+      if (keepJobId) {
+        _autoDismissStaleFailed(dt, keepJobId)
+      }
     }
     emit()
   } catch { /* best-effort — a fresh panel simply shows no history */ }

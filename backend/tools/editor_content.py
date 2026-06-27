@@ -237,18 +237,29 @@ def deck_to_editor(
 # chart slide bumped by +1 due to the agenda; the closing-slide chart
 # bumped by +1 for the same reason.
 DECK_SLIDE_CHART_KEYS: dict[int, str] = {
-    # 1: stat card only -- the OOS proof answer up front, no chart.
-    # 2: agenda -- structural roadmap, no chart.
-    # 3: three-column comparison card -- table-style, no chart.
-    4: "rolling_sharpe",            # risk-adjusted comparison (was slide 3)
-    5: "rolling_correlation",       # the 2022 break          (was slide 4)
-    6: "cumulative_returns",        # capital preservation     (was slide 5)
-    7: "oos_performance",           # walk-forward / OOS       (was slide 6)
-    8: "regime_signals",            # live regime read         (was slide 7)
-    # 9: play-by-play scorecard -- table, no chart.
-    # 10: AI methodology two-column bullets -- no chart.
-    # 11: live demo (analyticsdesk.app) -- no chart.
-    12: "risk_return",              # efficient-frontier (was slide 11)
+    # June 27 2026 -- collapsed to 11 slides + remapped to match
+    # Molly's reference deck. Slides 3 + 4 of the old 12-slide
+    # deck (Three Strategies setup + The Numbers OOS verdict)
+    # merged into one Investment Case split-panel slide; chart
+    # slots downstream all shifted up by -1. After the collapse
+    # only slide 4 (Why Static Allocation Failed in 2022)
+    # carries a chart; the other slides become tables / cards /
+    # verdict panels rendered via the specialized layouts that
+    # land in PR B.
+    #
+    # Slide map below mirrors Molly's deck 1:1:
+    #   1  Title                       -- title chrome (PR B)
+    #   2  Agenda                      -- structural, no chart
+    #   3  Investment Case             -- split panel (PR B)
+    #   4  Why Static Failed 2022      -- cards left, chart right
+    #   5  Capital Preservation        -- strategy table (PR B)
+    #   6  Does It Hold Up OOS         -- window cards + IS/OOS
+    #   7  Live Regime Signal          -- context cards + table
+    #   8  What Model Gets Wrong       -- scorecard table (PR B)
+    #   9  How We Used AI              -- card grid (PR B)
+    #  10  Live Demo                   -- feature rows (PR B)
+    #  11  The Answer                  -- verdict cards + alloc
+    4: "rolling_correlation",
 }
 
 

@@ -535,7 +535,9 @@ export default function FixProposalCard(
                     the patch text via cheap Sonnet calls against
                     /apply-fix/refine; the document is NEVER
                     touched until Apply This Fix in the modal
-                    POSTs /apply-fix with refined_proposal_text. */}
+                    POSTs /propose-fix-text with
+                    refined_proposal_text -- the mandatory diff
+                    preview always renders before any write. */}
                 {!inlineApplied && (
                   <button
                     type="button"

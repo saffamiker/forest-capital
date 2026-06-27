@@ -40,14 +40,16 @@ class TestBuildDefaultTemplate:
         assert t["generated_from"]
         assert isinstance(t["slides"], dict)
 
-    def test_all_12_slides_present(self):
+    def test_all_11_slides_present(self):
+        """June 27 2026 -- deck collapsed from 12 to 11 slides;
+        template now keys 1..11."""
         t = build_default_template()
         keys = set(t["slides"].keys())
-        assert keys == {str(i) for i in range(1, 13)}
+        assert keys == {str(i) for i in range(1, 12)}
 
     def test_each_slide_has_all_5_overridable_fields(self):
         t = build_default_template()
-        for n in range(1, 13):
+        for n in range(1, 12):
             slide = t["slides"][str(n)]
             for field_name in (
                     "title", "so_what", "max_bullets",
@@ -59,13 +61,21 @@ class TestBuildDefaultTemplate:
                     f"slide {n}: {field_name} must be string")
 
     def test_table_heavy_slides_default_max_bullets_2(self):
+        """June 27 2026 -- table-heavy slides shifted down by one
+        after the Investment Case merge. New table-heavy set:
+        5 (Capital Preservation), 6 (Does It Hold Up), 7 (Live
+        Regime), 8 (What Wrong), 11 (The Answer)."""
         t = build_default_template()
-        for n in (4, 6, 7, 8, 9, 12):
+        for n in (5, 6, 7, 8, 11):
             assert t["slides"][str(n)]["max_bullets"] == "2"
 
     def test_non_table_slides_default_max_bullets_3(self):
+        """Non-table slides after the collapse: 1 (OOS proof),
+        2 (Agenda), 3 (Investment Case left-panel stat cards),
+        4 (Why Static Failed), 9 (How We Used AI), 10 (Live
+        Demo)."""
         t = build_default_template()
-        for n in (1, 2, 3, 5, 10, 11):
+        for n in (1, 2, 3, 4, 9, 10):
             assert t["slides"][str(n)]["max_bullets"] == "3"
 
     def test_template_round_trips_through_validator(self):
@@ -149,15 +159,17 @@ class TestValidatorSlidesDict:
         return build_default_template()
 
     def test_extra_slide_number_rejected(self):
+        """June 27 2026 -- valid keys are now '1' through '11'
+        after the 12-to-11 collapse."""
         payload = self._good()
-        payload["slides"]["13"] = payload["slides"]["1"]
+        payload["slides"]["12"] = payload["slides"]["1"]
         _, err = validate_guidance(payload)
         assert err is not None
-        assert "13" in err
-        assert "1" in err and "12" in err
+        assert "12" in err
+        assert "1" in err and "11" in err
 
     def test_partial_upload_rejected(self):
-        """No partial uploads -- all 12 slides must be
+        """No partial uploads -- all 11 slides must be
         present."""
         payload = self._good()
         del payload["slides"]["7"]
@@ -369,19 +381,18 @@ class TestCountOverriddenSlides:
         assert count_overridden_slides(None) == 0
 
     def test_default_template_has_overrides_seeded(self):
-        """The default template seeds every slide with a so_what
-        + bullet_guidance + speaker_note_directive + max_bullets
-        + title -- so count_overridden_slides returns 12 even
-        on an unmodified upload. The operator log surfaces the
-        count so a zero-count log is the signal of an unwarranted
-        upload."""
+        """June 27 2026 -- the default template now seeds 11
+        slides (was 12) after the Investment Case merge collapsed
+        the deck. count_overridden_slides returns 11 on an
+        unmodified upload; a zero-count log is the signal of an
+        unwarranted upload."""
         t = build_default_template()
-        assert count_overridden_slides(t) == 12
+        assert count_overridden_slides(t) == 11
 
     def test_empty_string_fields_do_not_count(self):
+        """June 27 2026 -- 11-slide deck; wiping slide 3 leaves
+        10 others with content."""
         t = build_default_template()
-        # Wipe every field on slide 3 to empty string.
         for f in t["slides"]["3"]:
             t["slides"]["3"][f] = ""
-        # Slide 3 has no field with content; still 11 others.
-        assert count_overridden_slides(t) == 11
+        assert count_overridden_slides(t) == 10
