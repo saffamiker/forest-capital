@@ -625,14 +625,19 @@ class TestGetSubstitutionTableCacheKey:
 
     def test_cache_key_helper_includes_version_and_fingerprint(self):
         """_cache_key returns a tuple whose first element is the
-        version constant and whose tail is the bool fingerprints
-        for each metric-source kwarg.
+        version constant, middle elements are bool fingerprints for
+        each metric-source kwarg, and the 7th (last) element is the
+        CIO row identity slot (PR 1 v2, June 27 2026 -- closes the
+        slide-7 'TRANSITION at 62.7% vs token-pipeline 95.4%' bug
+        where the cached table held a stale CIO confidence value).
 
         Cache version history (bump invalidates stale entries):
           v2: original key + cost_sensitivity bool
           v3 (June 22 2026): + crisis_performance bool fingerprint
           v4 (June 25 2026): provenance tokens added to the table
             output. Key shape unchanged; only the constant moved.
+          v6 (June 27 2026, PR 1 v2): added CIO identity slot (7th
+            element). Default empty string when no CIO row passed.
 
         The test reads the live _CACHE_VERSION constant rather than
         pinning a literal so each bump just needs the module
@@ -640,7 +645,7 @@ class TestGetSubstitutionTableCacheKey:
         from tools.numeric_substitution import _cache_key, _CACHE_VERSION
         key_empty = _cache_key("hash-A", {})
         assert key_empty == (
-            _CACHE_VERSION, "hash-A", False, False, False, False)
+            _CACHE_VERSION, "hash-A", False, False, False, False, "")
         key_all = _cache_key("hash-A", {
             "regime_conditional": [{"strategy": "BENCHMARK"}],
             "factor_loadings": [{"strategy": "BENCHMARK"}],
@@ -648,7 +653,7 @@ class TestGetSubstitutionTableCacheKey:
             "crisis_performance": {"rows": {"BENCHMARK": {}}},
         })
         assert key_all == (
-            _CACHE_VERSION, "hash-A", True, True, True, True)
+            _CACHE_VERSION, "hash-A", True, True, True, True, "")
         # An empty list / empty dict counts as falsy -- that's
         # intentional, the data wasn't really there.
         key_empty_lists = _cache_key("hash-A", {
@@ -658,7 +663,7 @@ class TestGetSubstitutionTableCacheKey:
             "crisis_performance": {},
         })
         assert key_empty_lists == (
-            _CACHE_VERSION, "hash-A", False, False, False, False)
+            _CACHE_VERSION, "hash-A", False, False, False, False, "")
 
 
 class TestCrisisPerformanceTokens:
