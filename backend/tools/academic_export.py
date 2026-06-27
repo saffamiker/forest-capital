@@ -45,7 +45,9 @@ log = structlog.get_logger(__name__)
 DATA_PENDING = "[DATA PENDING]"
 
 
-async def load_substitution_metric_sources() -> tuple[
+async def load_substitution_metric_sources(
+    data_hash: str | None = None,
+) -> tuple[
     list[dict], list[dict], dict | None, dict | None,
 ]:
     """Read the analytics_metrics_cache metric_kinds that feed
@@ -53,11 +55,19 @@ async def load_substitution_metric_sources() -> tuple[
     factor loadings, net-of-cost Sharpe, and crisis-window
     drawdown tokens.
 
+    data_hash -- June 27 2026. When supplied, routes through
+    get_metric(data_hash, metric_kind) so the deck / brief /
+    appendix under submission freeze read the metrics row that
+    matches the freeze hash, NOT the latest row. Without this,
+    a freeze-keyed substitution table was being populated with
+    LIVE metric values (same architectural bug class as
+    get_latest_recommendation vs get_cached_for_hash for the
+    CIO row). When None (legacy callers, live platform reads),
+    falls through to get_latest_metric and returns the most
+    recent row per metric_kind regardless of hash.
+
     Returns (regime_conditional, factor_loadings,
-    cost_sensitivity, crisis_performance) -- all four from the
-    LATEST cached row per metric_kind, regardless of hash
-    match. The brief / appendix / deck / data-reference-sheet
-    callsites pass these as kwargs to get_substitution_table.
+    cost_sensitivity, crisis_performance).
 
     Single read for both academic_analytics fields -- the payload
     bundles regime_conditional + factor_loadings together at
@@ -69,10 +79,6 @@ async def load_substitution_metric_sources() -> tuple[
     and feeds the per-strategy GFC / Rate Shock 2022 drawdown
     tokens.
 
-    June 22 2026 -- crisis_performance added as 4th return slot
-    so slides 4 and 6 stop rendering [DATA PENDING] for the
-    crisis-window cells.
-
     Fail-open: missing fields return empty lists / None so the
     substitution table degrades to em-dashes rather than raising.
     """
@@ -81,8 +87,16 @@ async def load_substitution_metric_sources() -> tuple[
     cost_sensitivity: dict | None = None
     crisis_performance: dict | None = None
     try:
-        from tools.precomputed_analytics import get_latest_metric
-        aa = await get_latest_metric("academic_analytics")
+        from tools.precomputed_analytics import (
+            get_latest_metric, get_metric,
+        )
+
+        async def _read(kind: str) -> Any:
+            if data_hash:
+                return await get_metric(data_hash, kind)
+            return await get_latest_metric(kind)
+
+        aa = await _read("academic_analytics")
         if isinstance(aa, dict):
             rc = aa.get("regime_conditional")
             if isinstance(rc, list):
@@ -90,10 +104,10 @@ async def load_substitution_metric_sources() -> tuple[
             fl = aa.get("factor_loadings")
             if isinstance(fl, list):
                 factor_loadings = fl
-        cs = await get_latest_metric("oos_cost_sensitivity")
+        cs = await _read("oos_cost_sensitivity")
         if isinstance(cs, dict):
             cost_sensitivity = cs
-        cp = await get_latest_metric("crisis_performance")
+        cp = await _read("crisis_performance")
         if isinstance(cp, dict):
             crisis_performance = cp
     except Exception as exc:  # noqa: BLE001

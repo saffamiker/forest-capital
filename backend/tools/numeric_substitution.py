@@ -52,8 +52,15 @@ the output dictionary.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+try:
+    import structlog
+    log = structlog.get_logger(__name__)
+except ImportError:  # pragma: no cover
+    log = logging.getLogger(__name__)  # type: ignore[assignment]
 
 
 # Approximate trading days per month -- used to convert the
@@ -92,7 +99,16 @@ _TRADING_DAYS_PER_MONTH = 21
 #         version bump invalidates v3 entries on first post-
 #         deploy request so the new tokens land in the cached
 #         tables that the editor + audit + receipt all read from.
-_CACHE_VERSION = 4
+# June 27 2026 -- bumped 4 -> 5 alongside the freeze-hash-aware
+# document generator refactor (PR adding hash-aware CIO row + regime
+# snapshot reads in _generate_deck_document / brief / appendix). The
+# previous cached substitution tables held LIVE CIO values under
+# freeze-keyed entries (the cache key included data_hash but the
+# CIO row that populated the table was the live row regardless of
+# hash). Bumping the version invalidates every stale entry on first
+# post-deploy read so the new hash-aware load path repopulates the
+# cache with freeze-correct values.
+_CACHE_VERSION = 5
 
 
 def format_sharpe(v: Any) -> str:
@@ -232,6 +248,7 @@ def build_substitution_table(
     factor_loadings: list[dict] | None = None,
     cost_sensitivity: dict | None = None,
     crisis_performance: dict | None = None,
+    hash_verified: bool = False,
 ) -> dict[str, str]:
     """Build the deterministic {token -> value} substitution table
     from verified cache values.
@@ -271,7 +288,31 @@ def build_substitution_table(
     apply_substitutions is a single replace pass. Adding a new
     token is a one-line change here + a one-line addition to the
     NUMERIC_PLACEHOLDER_GUIDE prompt block in main.py.
+
+    hash_verified -- June 27 2026. Defensive flag the caller MUST
+    set when supplying a data_hash alongside a cio_recommendation
+    + live_signals that were loaded HASH-AWARELY (i.e. via
+    cio_recommendation.get_cached_for_hash and
+    tools.cache.get_regime_snapshot_for_hash, not via the live
+    get_latest_recommendation / get_regime_cache). When data_hash
+    is non-empty but hash_verified=False, this function logs
+    'build_substitution_table_hash_unverified' so a regression that
+    re-introduces the freeze-hash-vs-live-CIO mismatch (the
+    'slide 7 shows 62.7% instead of 95.4%' bug) surfaces in the
+    operator log instead of silently producing a corrupt table.
+    Does not raise -- legacy callers that pass data_hash without
+    the flag continue to work; the log is the audit signal.
     """
+    if data_hash and not hash_verified:
+        log.warning(
+            "build_substitution_table_hash_unverified",
+            data_hash=str(data_hash)[:8],
+            note=(
+                "data_hash supplied without hash_verified=True -- "
+                "the cio_recommendation + live_signals arguments "
+                "must be loaded via the hash-aware path "
+                "(get_cached_for_hash + get_regime_snapshot_for_hash) "
+                "for freeze-correct substitution. See PR fix(freeze)."))
     benchmark = _get_strategy(strategy_cache, "BENCHMARK")
     classic = _get_strategy(strategy_cache, "CLASSIC_60_40")
     regime = _get_strategy(strategy_cache, "REGIME_SWITCHING")
