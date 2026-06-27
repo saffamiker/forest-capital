@@ -49,6 +49,7 @@ import {
 import { useAcademicReviewStore } from '../stores/academicReviewStore'
 import CrossDocumentReviewConfirmModal
   from './CrossDocumentReviewConfirmModal'
+import FocusBriefModal from './FocusBriefModal'
 
 
 // Peer agent id → display name for the accordion. Mirrors the
@@ -231,7 +232,15 @@ export default function AcademicReviewSection() {
   // document pass kicks off. onRun opens the modal; onConfirmRun
   // is the modal's onConfirm callback that actually fires the SSE
   // POST.
+  //
+  // June 27 2026 -- per the user spec, the focus-brief modal
+  // CHAINS AFTER the existing confirm modal (does NOT replace it).
+  // Flow: button -> CrossDocumentReviewConfirmModal -> user
+  // confirms -> FocusBriefModal -> Skip / Run Review -> SSE
+  // fires. focusBriefOpen tracks the second modal independently;
+  // both close on the actual SSE kickoff.
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [focusBriefOpen, setFocusBriefOpen] = useState(false)
 
   const running = phase === 'consulting' || phase === 'streaming'
   const hasResult = result !== null
@@ -246,14 +255,22 @@ export default function AcademicReviewSection() {
   }
 
   const onConfirmRun = () => {
+    // June 27 2026 -- confirm closes, focus-brief opens. SSE does
+    // NOT fire here -- it fires on Skip / Submit from the focus-
+    // brief modal so the chain is: confirm -> brief -> review.
     setConfirmOpen(false)
+    setFocusBriefOpen(true)
+  }
+
+  // June 27 2026 -- shared kickoff used by both Skip (null brief)
+  // and Submit (typed brief). Centralises the trackFeature +
+  // clearStore + token-read so the two paths can't drift.
+  const _kickoffReview = (focusBrief: string | null) => {
+    setFocusBriefOpen(false)
     trackFeature('academic_review_trigger')
-    // Re-run path: clear first, then kick a fresh run. The store's
-    // runReview also clears its own internal result, so this clear
-    // is redundant in steady state but explicit for readability.
     clearStore()
     const token = localStorage.getItem('fc_session_token') ?? ''
-    void runReview(dataHash, token)
+    void runReview(dataHash, token, focusBrief)
   }
 
   // Auto-restore from cache on mount — purely a read; the
@@ -282,6 +299,10 @@ export default function AcademicReviewSection() {
         open={confirmOpen}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={onConfirmRun} />
+      <FocusBriefModal
+        open={focusBriefOpen}
+        onSkip={() => _kickoffReview(null)}
+        onSubmit={(brief) => _kickoffReview(brief)} />
       {/* Trigger card — prominent border so the action is visible.
           Read content (verdict + peers) renders below; this card is
           the only team-gated surface. */}

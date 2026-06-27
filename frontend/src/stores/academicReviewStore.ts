@@ -196,8 +196,20 @@ interface AcademicReviewStore {
   /** Starts a fresh review. Clears prior result + peerResponses
    *  before kicking the request. Idempotent — a call while a run is
    *  already in flight is a no-op. Resolves when the SSE stream
-   *  terminates (or the cancel button fires). */
-  runReview: (dataHash: string | null, sessionToken: string) => Promise<void>
+   *  terminates (or the cancel button fires).
+   *
+   *  June 27 2026 -- optional focusBrief (max 1000 chars) is sent
+   *  as JSON body {focus_brief: "..."} on the POST. The backend
+   *  injects the brief at the top of every agent's context block
+   *  with a 'Prioritize these areas / Do not limit your review'
+   *  instruction so the council reads the directive WITHOUT
+   *  narrowing the scope. null / undefined / empty omits the
+   *  body field entirely (legacy behaviour). */
+  runReview: (
+    dataHash: string | null,
+    sessionToken: string,
+    focusBrief?: string | null,
+  ) => Promise<void>
 
   /** Aborts the in-flight SSE reader. Sets phase to idle; the
    *  result + dataHash state is preserved (a cancelled run keeps
@@ -229,6 +241,10 @@ interface AcademicReviewStore {
     docType:      EditorDocumentType,
     dataHash:     string | null,
     sessionToken: string,
+    /** June 27 2026 -- optional focus brief, same shape +
+     *  semantics as runReview's focusBrief. Posted as JSON body
+     *  alongside the document_type query param. */
+    focusBrief?:  string | null,
   ) => Promise<void>
 
   /** Aborts the in-flight per-doc stream for the given doc type.
@@ -362,7 +378,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
       return s.dataHash === dataHash
     },
 
-    runReview: async (dataHash, sessionToken) => {
+    runReview: async (dataHash, sessionToken, focusBrief) => {
       // Re-entrancy guard — never kick a second SSE stream while
       // one is already running. The UI also disables the button,
       // but defence in depth.
@@ -386,11 +402,24 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
       })
 
       try {
-        const res = await fetch('/api/council/academic-review', {
+        // June 27 2026 -- optional focus brief on the POST body.
+        // Omit the body entirely when the brief is null / empty
+        // so legacy behaviour is byte-for-byte preserved.
+        const brief = (focusBrief ?? '').trim()
+        const init: RequestInit = {
           method: 'POST',
           headers: { 'X-API-Key': sessionToken },
           signal: controller.signal,
-        })
+        }
+        if (brief) {
+          init.headers = {
+            ...init.headers,
+            'Content-Type': 'application/json',
+          }
+          init.body = JSON.stringify({ focus_brief: brief })
+        }
+        const res = await fetch(
+          '/api/council/academic-review', init)
         if (!res.ok || !res.body) {
           throw new Error(`Request failed (${res.status})`)
         }
@@ -670,7 +699,9 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
       return get().perDocument[docType] ?? EMPTY_PER_DOC_SLICE
     },
 
-    runPerDocReview: async (docType, dataHash, sessionToken) => {
+    runPerDocReview: async (
+      docType, dataHash, sessionToken, focusBrief,
+    ) => {
       // Re-entrancy guard for THIS doc type only.
       const slice = get().perDocument[docType]
       if (slice && (slice.phase === 'consulting'
@@ -701,14 +732,26 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
       let timedOut = false
 
       try {
+        // June 27 2026 -- optional focus brief on the POST body.
+        // Omit the body entirely when the brief is null / empty
+        // so legacy behaviour is byte-for-byte preserved.
+        const brief = (focusBrief ?? '').trim()
+        const init: RequestInit = {
+          method: 'POST',
+          headers: { 'X-API-Key': sessionToken },
+          signal: controller.signal,
+        }
+        if (brief) {
+          init.headers = {
+            ...init.headers,
+            'Content-Type': 'application/json',
+          }
+          init.body = JSON.stringify({ focus_brief: brief })
+        }
         const res = await fetch(
           `/api/council/academic-review?document_type=${
             encodeURIComponent(docType)}`,
-          {
-            method: 'POST',
-            headers: { 'X-API-Key': sessionToken },
-            signal: controller.signal,
-          })
+          init)
         if (!res.ok || !res.body) {
           throw new Error(`Request failed (${res.status})`)
         }
