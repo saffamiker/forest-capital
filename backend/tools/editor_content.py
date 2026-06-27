@@ -252,6 +252,58 @@ DECK_SLIDE_CHART_KEYS: dict[int, str] = {
 }
 
 
+def _assert_chart_maps_match() -> None:
+    """June 27 2026 -- guards the SLIDE_CHARTS (academic_deck.py,
+    generation-time PPTX export) vs DECK_SLIDE_CHART_KEYS
+    (editor canvas) invariant.
+
+    Both maps must reference the SAME chart role on the SAME slide
+    number; if they drift, the editor canvas would show one chart
+    while the exported PPTX rendered a different one -- the symptom
+    that prompted this reconciliation (slide 6 had two different
+    chart roles before June 27 2026: 'strategy_comparison_oos_sharpe'
+    in SLIDE_CHARTS vs 'cumulative_returns' in
+    DECK_SLIDE_CHART_KEYS).
+
+    Fires at module load; raises RuntimeError with a precise
+    diff when the maps disagree so the regression is caught by
+    every test that imports this module + by application boot.
+
+    Both maps must agree on:
+      * the SET of slide numbers carrying a chart
+      * the chart role assigned to each slide
+    """
+    from tools.academic_deck import SLIDE_CHARTS  # local-import to
+    # avoid the editor_content -> academic_deck circular at import-
+    # time top-of-module load.
+
+    canvas_keys = {
+        k: v for k, v in DECK_SLIDE_CHART_KEYS.items()
+        if v is not None
+    }
+    gen_keys = dict(SLIDE_CHARTS)
+    if canvas_keys != gen_keys:
+        only_in_canvas = sorted(
+            set(canvas_keys) - set(gen_keys))
+        only_in_gen = sorted(
+            set(gen_keys) - set(canvas_keys))
+        role_mismatches = sorted(
+            (k, canvas_keys[k], gen_keys[k])
+            for k in set(canvas_keys) & set(gen_keys)
+            if canvas_keys[k] != gen_keys[k])
+        raise RuntimeError(
+            "Deck chart map drift detected -- SLIDE_CHARTS "
+            "(generation-time PPTX export) and "
+            "DECK_SLIDE_CHART_KEYS (editor canvas) must agree on "
+            "every slide. Only-in-canvas: "
+            f"{only_in_canvas}. Only-in-generation: "
+            f"{only_in_gen}. Role mismatches "
+            f"[(slide, canvas, generation)]: {role_mismatches}.")
+
+
+_assert_chart_maps_match()
+
+
 def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
     """Bridge (June 8 2026) -- render a slide's table_data as a proper
     markdown table (with the `|---|` separator row) so PresentationPreview

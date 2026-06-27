@@ -188,16 +188,31 @@ DECK_SLIDE_COUNT = len(SLIDE_TITLES)
 # renderer + arguments in main._render_deck_slide_charts. Slides not listed
 # carry no chart -- the slide body renders bullets + optional table only.
 #
-# June 22 2026 -- 12-slide structure (agenda insert + AI/demo flip):
-#   slide 5  -- rolling correlation (the 2022 break)
-#   slide 6  -- strategy comparison bars (cumulative returns proxy)
-#   slide 12 -- efficient frontier with the live blend marker
-# Other slides carry stat cards, tables, or pure prose -- the builder
-# renders those from the slide body without a matplotlib pass.
+# June 22 2026 -- 12-slide structure (agenda insert + AI/demo flip).
+#
+# June 27 2026 -- reconciled with editor_content.DECK_SLIDE_CHART_KEYS
+# so the generation-time PPTX export and the editor canvas show the
+# SAME chart on each slide. Before reconciliation the two maps
+# disagreed on four slides (4, 6, 7, 8): main only had 5 / 6 / 12,
+# and slide 6 was 'strategy_comparison_oos_sharpe' here vs
+# 'cumulative_returns' in the canvas. The editor canvas is the
+# source of truth for what Molly sees + presents, so generation
+# follows it. The assertion at the bottom of editor_content.py
+# (where both maps are visible together) fires at module load to
+# keep the invariant honest.
 SLIDE_CHARTS: dict[int, str] = {
-    5: "rolling_correlation",
-    6: "strategy_comparison_oos_sharpe",
-    12: "efficient_frontier",
+    4:  "rolling_sharpe",
+    5:  "rolling_correlation",
+    6:  "cumulative_returns",
+    7:  "oos_performance",
+    8:  "regime_signals",
+    # June 27 2026 -- slide 12 also reconciled. Previously
+    # 'efficient_frontier' here, 'risk_return' in the canvas; the
+    # renderer's canonical role name (in chart_render._DECK_KEYS)
+    # is 'risk_return', so the canvas is correct and generation
+    # follows. render_efficient_frontier remains the underlying
+    # matplotlib function -- only the dispatch key changed.
+    12: "risk_return",
 }
 
 
