@@ -14186,15 +14186,41 @@ def _find_deck_slide_idx(
     slides: list, section_name: str,
 ) -> int | None:
     """Find a slide by title match. Returns the index or None.
-    Case-insensitive, whitespace-collapsed."""
+
+    Match algorithm (case-insensitive, whitespace-collapsed):
+      1. Exact match  -- target == slide title
+      2. Substring    -- target appears in slide title OR
+                         slide title appears in target
+      3. Slide-number prefix -- 'Slide N' / 'Slide N:' in the
+         target matches the slide at index N-1 (defensive: works
+         even when the title in the finding has drifted)
+
+    June 27 2026 -- relaxed from exact-only to fuzzy substring.
+    The fix-proposal's section_name comes from an LLM's free-text
+    description of the finding (e.g. 'Slide 4: Why Static Failed
+    in 2022') and frequently drifts from the slide's actual title
+    (e.g. 'Why Static Allocation Failed in 2022') by a word or
+    two. The exact-match version 422'd those clicks; this fuzzy
+    matcher recovers them."""
+    import re as _re
     target = _norm_title(section_name)
     if not target:
         return None
+    # 1. + 2. Exact and substring matches.
     for i, sl in enumerate(slides):
         if not isinstance(sl, dict):
             continue
-        if _norm_title(sl.get("title")) == target:
+        title = _norm_title(sl.get("title"))
+        if not title:
+            continue
+        if target == title or target in title or title in target:
             return i
+    # 3. 'Slide N' prefix fallback.
+    m = _re.search(r"slide\s+(\d+)", target)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= len(slides) and isinstance(slides[n - 1], dict):
+            return n - 1
     return None
 
 
@@ -14215,27 +14241,131 @@ def _find_tiptap_section_range(
     """Returns (start_idx, end_idx_exclusive) of the matching
     section -- from its heading node up to (but not including) the
     next heading. None when no heading matches or the section is
-    empty. Matches against the heading's flattened text content
-    using _norm_title for resilience to whitespace + casing drift."""
+    empty.
+
+    Match algorithm (case-insensitive, whitespace-collapsed):
+      1. Exact match.
+      2. Substring (either direction).
+      3. 'Slide N' / 'Slide N:' prefix match -- when the target
+         carries a slide-number prefix and any heading text starts
+         with the same 'Slide N' / 'Slide N:' / 'Slide N -' token,
+         that heading wins. Defensive against LLM drift on the
+         script's per-slide H2 markers.
+      4. Word-set overlap fallback -- when no direct match, accept
+         a heading whose normalised word set shares >= 60% of the
+         target's words (rounded down, minimum 2 shared words).
+         Catches the 'Why Static Failed' vs 'Why Static Allocation
+         Failed in 2022' drift that fuzzy substring alone would
+         miss when neither string is a substring of the other.
+
+    June 27 2026 -- expanded from exact + substring to a 4-tier
+    fuzzy match. Heading-text drift from the fix-proposal LLM is
+    the leading cause of apply-fix 422s in production; this matcher
+    closes the gap so Bob's evening editing pass doesn't die on a
+    section-name comma."""
+    import re as _re
     target = _norm_title(section_name)
     if not target:
         return None
-    start = None
+    target_slide_n: int | None = None
+    sm = _re.search(r"slide\s+(\d+)", target)
+    if sm:
+        target_slide_n = int(sm.group(1))
+    # Bare 'Section X' / 'Section 4' identifier (letter or digit)
+    # so we can match a heading prefixed with the same ID when no
+    # body text was provided alongside the label -- analytical
+    # appendix headings are 'A. Strategy Universe', 'B. Performance
+    # & Risk Metrics' and a finding may name them as 'Section B'.
+    target_section_id: str | None = None
+    bare_m = _re.match(
+        r"^section\s+([a-z\d]+)\s*[:.\-]?\s*$", target)
+    if bare_m:
+        target_section_id = bare_m.group(1)
+    target_words = set(_re.findall(r"\w+", target))
+
+    # First pass: collect every heading + its index for fuzzy
+    # comparison, then pick the best match per the tiers above.
+    headings: list[tuple[int, str]] = []
     for i, n in enumerate(nodes):
         if not isinstance(n, dict) or n.get("type") != "heading":
             continue
         title = _norm_title(_node_text_for_match(n))
-        if start is None:
-            if (title == target
-                    or target in title
-                    or title in target):
-                start = i
-            continue
-        # Already in section; next heading bounds it.
-        return start, i
-    if start is None:
+        if title:
+            headings.append((i, title))
+
+    if not headings:
         return None
-    return start, len(nodes)
+
+    chosen_start: int | None = None
+
+    # 1. Exact match.
+    for i, title in headings:
+        if title == target:
+            chosen_start = i
+            break
+
+    # 2. Substring match.
+    if chosen_start is None:
+        for i, title in headings:
+            if target in title or title in target:
+                chosen_start = i
+                break
+
+    # 3. Slide-number prefix match.
+    if chosen_start is None and target_slide_n is not None:
+        slide_token_re = _re.compile(
+            rf"^slide\s+{target_slide_n}\b")
+        for i, title in headings:
+            if slide_token_re.search(title):
+                chosen_start = i
+                break
+
+    # 3b. Bare 'Section X' identifier prefix match. Catches
+    # 'Section B' -> 'B. Strategy Universe' even when neither
+    # substring nor word-overlap matches.
+    if chosen_start is None and target_section_id is not None:
+        id_prefix_re = _re.compile(
+            rf"^{_re.escape(target_section_id)}[.)]\s+\S")
+        for i, title in headings:
+            if id_prefix_re.match(title):
+                chosen_start = i
+                break
+
+    # 4. Word-set overlap fallback. The needle's coverage of the
+    # heading's words (or vice versa) must be >= 60% AND at least
+    # 2 words must be shared (avoids false positives on single
+    # common words like 'the'). Coverage is computed as
+    #   shared / len(target_words)
+    # so 'Why Static Failed' (3 words) vs 'Why Static Allocation
+    # Failed in 2022' (6 words) gives 3/3 = 1.0 -- the needle is
+    # fully contained in the heading. This is the canonical Bob-
+    # tonight tripwire case.
+    if chosen_start is None and len(target_words) >= 2:
+        best_idx: int | None = None
+        best_share = 0.0
+        for i, title in headings:
+            tw = set(_re.findall(r"\w+", title))
+            if not tw:
+                continue
+            shared = target_words & tw
+            if len(shared) < 2:
+                continue
+            share = len(shared) / len(target_words)
+            if share >= 0.6 and share > best_share:
+                best_idx = i
+                best_share = share
+        if best_idx is not None:
+            chosen_start = best_idx
+
+    if chosen_start is None:
+        return None
+
+    # Determine the section's exclusive end: index of the next
+    # heading after chosen_start, or len(nodes).
+    for i, _title in headings:
+        if i > chosen_start:
+            return chosen_start, i
+    return chosen_start, len(nodes)
 
 
 async def _patch_deck_slide_via_sonnet(
@@ -14375,31 +14505,112 @@ async def _mark_council_debate_fix_applied(
             "apply_fix_mark_debate_failed", error=str(exc))
 
 
+_APPLY_FIX_DOC_LABEL = {
+    "presentation_deck": "Presentation Deck",
+    "executive_brief": "Executive Brief",
+    "analytical_appendix": "Analytical Appendix",
+    "presentation_script": "Presentation Script",
+}
+
+
+class _ApplyFixSkip(Exception):
+    """Raised by _try_direct_section_patch when the inline path can
+    NOT apply the fix and the user should be told to edit directly.
+
+    June 27 2026 -- replaces the previous None-return + fall-through
+    to a legacy regenerate-the-whole-document path. The legacy path
+    was removed (apply-fix no longer triggers a full regen under
+    any circumstance); a clean failure surfaces as a 422 to the
+    frontend with detail / hint / section_name so the UI can show a
+    \"Open in editor\" deep link to the right section.
+
+    Attributes
+        detail:        Plain-English reason -- 'Section \"X\" not
+                       found in the current draft.'
+        hint:          Actionable next step -- 'Open the editor and
+                       edit the section directly.'
+        section_name:  Best-known section identifier so the frontend
+                       can deep-link to the editor section header.
+                       None when the failure precedes any section
+                       match (no current draft, wrong target).
+    """
+
+    def __init__(
+        self, detail: str, *, hint: str | None = None,
+        section_name: str | None = None,
+    ):
+        super().__init__(detail)
+        self.detail = detail
+        self.hint = hint or (
+            "Open the document in the editor and apply the change "
+            "directly. The Apply Fix workflow only handles "
+            "section-level edits the AI can locate; structural "
+            "edits (story-arc anchors, numeric_anchors) must be "
+            "applied manually.")
+        self.section_name = section_name
+
+
 async def _try_direct_section_patch(
     *, document_type: str, target: str | None,
     section_name: str | None, patch_instruction: str,
     debate_id: int | None,
 ) -> dict | None:
-    """Attempts to apply the fix as a direct in-place patch to the
-    current draft's content_json. Returns the response dict on
-    success; returns None when the direct path can't handle this
-    case (so the caller falls back to legacy story-plan + regen).
+    """Apply the fix as a direct in-place patch to the current
+    draft's content_json. Returns the response dict on success.
 
-    Conditions that return None (= fall through to legacy):
-      * target == 'document' (no specific section to patch)
-      * No section_name on the fix proposal
-      * No current draft for the document type
-      * Section / slide title can't be matched in the draft
-      * Sonnet response is unparseable or violates the shape
-      * presentation_script (no first-class section concept here)
+    June 27 2026 -- legacy regenerate-the-whole-document fallback
+    removed. This path is now the ONLY apply-fix execution path; a
+    clean failure raises _ApplyFixSkip which the caller turns into
+    a 422 telling the user to edit in the editor directly.
+
+    Coverage post-refactor:
+      target='section' + section_name set:
+        deck                 -> _find_deck_slide_idx + Sonnet-patch
+                                that slide's elements
+        brief / appendix     -> _find_tiptap_section_range (H1
+                                heading match) + Sonnet-patch that
+                                section's nodes
+        script               -> _find_tiptap_section_range (H2
+                                'Slide N' heading match) + Sonnet-
+                                patch that slide's prose nodes
+      target='document':
+        deck                 -> per-slide walk; Sonnet-patch every
+                                slide in parallel; reassemble
+        brief / appendix /
+        script               -> per-section walk over the heading
+                                ranges; Sonnet-patch each;
+                                reassemble nodes preserving
+                                ordering
+
+    Raises _ApplyFixSkip when:
+      * No current draft exists for the document type
+      * target='section' but section_name is empty
+      * target is neither 'section' nor 'document'
+      * Section / slide title doesn't match any heading in the
+        draft (target='section')
+      * Sonnet patch is unparseable / shape-invalid AND it's the
+        only call (target='section'). target='document' tolerates
+        per-section Sonnet failures by skipping that section and
+        continuing -- a complete failure (every section failed)
+        raises.
+      * update_draft persists fails
+
+    No silent fall-through. The legacy regen path has been deleted.
     """
-    if target != "section" or not section_name:
-        return None
+    if target not in ("section", "document"):
+        raise _ApplyFixSkip(
+            f"Unknown fix target '{target}'.")
+    if target == "section" and not section_name:
+        raise _ApplyFixSkip(
+            "Section-scoped fix requires a section_name.")
+
     if document_type not in (
         "presentation_deck", "executive_brief",
-        "analytical_appendix",
+        "analytical_appendix", "presentation_script",
     ):
-        return None
+        raise _ApplyFixSkip(
+            f"Apply Fix does not support document_type "
+            f"'{document_type}'.")
 
     from tools.editor_drafts import (
         get_current_draft_by_type, update_draft,
@@ -14407,44 +14618,91 @@ async def _try_direct_section_patch(
 
     draft = await get_current_draft_by_type(document_type)
     if draft is None:
-        return None
+        raise _ApplyFixSkip(
+            f"No current draft found for "
+            f"{_APPLY_FIX_DOC_LABEL.get(document_type, document_type)}. "
+            "Generate the document before applying a fix.")
     content = draft.get("content_json")
     if not isinstance(content, dict):
-        return None
+        raise _ApplyFixSkip(
+            f"Current draft for "
+            f"{_APPLY_FIX_DOC_LABEL.get(document_type, document_type)} "
+            "has no content to patch.")
 
-    if document_type == "presentation_deck":
-        slides = content.get("slides")
-        if not isinstance(slides, list):
-            return None
-        idx = _find_deck_slide_idx(slides, section_name)
-        if idx is None:
-            return None
-        new_elements = await _patch_deck_slide_via_sonnet(
-            slides[idx], patch_instruction)
-        if new_elements is None:
-            return None
-        new_slides = list(slides)
-        new_slides[idx] = {
-            **slides[idx], "elements": new_elements}
-        new_content = {**content, "slides": new_slides}
-        new_text = _derive_content_text_from_deck(new_content)
+    is_deck = document_type == "presentation_deck"
+    is_tiptap = document_type in (
+        "executive_brief", "analytical_appendix",
+        "presentation_script")
+
+    # ── Section-scoped patch ──────────────────────────────────────
+    if target == "section":
+        if is_deck:
+            slides = content.get("slides")
+            if not isinstance(slides, list):
+                raise _ApplyFixSkip(
+                    "Deck draft has no slides to patch.")
+            idx = _find_deck_slide_idx(slides, section_name)
+            if idx is None:
+                raise _ApplyFixSkip(
+                    f"Slide '{section_name}' not found in the "
+                    "current deck draft.",
+                    section_name=section_name)
+            new_elements = await _patch_deck_slide_via_sonnet(
+                slides[idx], patch_instruction)
+            if new_elements is None:
+                raise _ApplyFixSkip(
+                    f"AI could not produce a valid patch for "
+                    f"slide '{section_name}'. Try editing in "
+                    "the editor directly.",
+                    section_name=section_name)
+            new_slides = list(slides)
+            new_slides[idx] = {
+                **slides[idx], "elements": new_elements}
+            new_content = {**content, "slides": new_slides}
+            new_text = _derive_content_text_from_deck(new_content)
+        elif is_tiptap:
+            nodes = content.get("content")
+            if not isinstance(nodes, list):
+                raise _ApplyFixSkip(
+                    "Current draft has no TipTap content to "
+                    "patch.")
+            rng = _find_tiptap_section_range(nodes, section_name)
+            if rng is None:
+                raise _ApplyFixSkip(
+                    f"Section '{section_name}' not found in the "
+                    "current draft. Confirm the section heading "
+                    "matches.",
+                    section_name=section_name)
+            start, end = rng
+            section_nodes = nodes[start:end]
+            new_section = await _patch_tiptap_section_via_sonnet(
+                section_nodes, section_name, patch_instruction)
+            if new_section is None:
+                raise _ApplyFixSkip(
+                    f"AI could not produce a valid patch for "
+                    f"section '{section_name}'. Try editing in "
+                    "the editor directly.",
+                    section_name=section_name)
+            new_nodes = nodes[:start] + new_section + nodes[end:]
+            new_content = {**content, "content": new_nodes}
+            new_text = _derive_content_text_from_tiptap(new_content)
+        else:  # pragma: no cover - guarded above
+            raise _ApplyFixSkip(
+                f"Unhandled document_type '{document_type}'.")
+
+    # ── Document-scoped patch (target='document') ────────────────
     else:
-        # executive_brief or analytical_appendix -- TipTap shape
-        nodes = content.get("content")
-        if not isinstance(nodes, list):
-            return None
-        rng = _find_tiptap_section_range(nodes, section_name)
-        if rng is None:
-            return None
-        start, end = rng
-        section_nodes = nodes[start:end]
-        new_section = await _patch_tiptap_section_via_sonnet(
-            section_nodes, section_name, patch_instruction)
-        if new_section is None:
-            return None
-        new_nodes = nodes[:start] + new_section + nodes[end:]
-        new_content = {**content, "content": new_nodes}
-        new_text = _derive_content_text_from_tiptap(new_content)
+        new_content, new_text, sections_patched, sections_skipped = (
+            await _patch_entire_document_via_sonnet(
+                document_type=document_type,
+                content=content,
+                patch_instruction=patch_instruction))
+        if sections_patched == 0:
+            raise _ApplyFixSkip(
+                "AI could not apply the patch to any section of "
+                f"{_APPLY_FIX_DOC_LABEL.get(document_type, document_type)}. "
+                "Try editing in the editor directly, or scope the "
+                "fix to a single section.")
 
     ok = await update_draft(
         int(draft["id"]), new_content, new_text)
@@ -14453,7 +14711,9 @@ async def _try_direct_section_patch(
             "apply_fix_update_draft_failed",
             document_type=document_type,
             draft_id=draft.get("id"))
-        return None
+        raise _ApplyFixSkip(
+            "Patch was generated but could not be written to the "
+            "draft. Reload and try again, or edit in the editor.")
 
     if debate_id is not None:
         await _mark_council_debate_fix_applied(
@@ -14462,18 +14722,277 @@ async def _try_direct_section_patch(
     log.info(
         "apply_fix_direct_patch_applied",
         document_type=document_type,
+        target=target,
         section_name=section_name,
         draft_id=draft.get("id"))
+
+    if target == "document":
+        label = (
+            f"Document-wide fix applied "
+            f"({sections_patched} sections updated, "
+            f"{sections_skipped} skipped)")
+    else:
+        label = f"Direct fix applied to '{section_name}'"
 
     return {
         "ok": True,
         "new_draft_id": int(draft["id"]),
-        "draft_label": (
-            f"Direct fix applied to '{section_name}'"),
-        "scope": "section",
-        "section_regenerated": section_name,
+        "draft_label": label,
+        "scope": target,
+        "section_regenerated": (
+            section_name if target == "section" else None),
         "in_place": True,
     }
+
+
+# ── June 27 2026 -- shared content_json splice helpers ────────────
+#
+# Both Apply Fix (apply-fix endpoint) and Preview Inline Edit
+# (propose-fix-text + accept-fix-text endpoints) operate on the
+# current draft's content_json with surgical splice semantics:
+#
+#   1. Locate the section in content_json (slide for decks; node
+#      range for TipTap docs).
+#   2. Render the section as plain text for diff display.
+#   3. Sonnet-patch the JSON section (not the rendered text).
+#   4. Render the patched section as plain text for diff display.
+#   5. Splice the patched JSON section back into the full
+#      content_json at the same anchor; everything else verbatim.
+#
+# The helpers below are pure-data (no DB, no LLM) so the two
+# endpoints share the same locate / render / splice logic. The
+# Sonnet call lives in _patch_section_via_sonnet -- a thin
+# dispatcher around the deck- and TipTap-specific patch helpers
+# already in this file.
+
+
+def _locate_section_in_content(
+    document_type: str, content_json: dict, section_name: str,
+) -> tuple[Any, list | dict] | None:
+    """Locate a section in a draft's content_json. Returns
+    (anchor, original_section_json) on a successful match, None
+    otherwise.
+
+    Anchor shape per document type:
+      deck   -> int (slide index in content_json['slides'])
+      brief / appendix / script -> tuple[int, int] (start, end
+                                   exclusive) into content_json
+                                   ['content'] node list
+
+    The anchor is what _splice_section_into_content uses to write
+    the patched section back into the right position.
+    """
+    if document_type == "presentation_deck":
+        slides = content_json.get("slides")
+        if not isinstance(slides, list):
+            return None
+        idx = _find_deck_slide_idx(slides, section_name)
+        if idx is None:
+            return None
+        slide = slides[idx]
+        if not isinstance(slide, dict):
+            return None
+        return idx, slide
+    # TipTap (brief / appendix / script)
+    nodes = content_json.get("content")
+    if not isinstance(nodes, list):
+        return None
+    rng = _find_tiptap_section_range(nodes, section_name)
+    if rng is None:
+        return None
+    start, end = rng
+    return (start, end), nodes[start:end]
+
+
+def _render_section_as_text(
+    document_type: str, section_json: list | dict,
+) -> str:
+    """Render a section as plain text for diff display.
+
+    Deck slide -> title + each text-element's content, one per line.
+    TipTap nodes -> _node_text_for_match flattened, one node per
+                    paragraph break.
+    """
+    if document_type == "presentation_deck":
+        # section_json is a single slide dict.
+        if not isinstance(section_json, dict):
+            return ""
+        out: list[str] = []
+        title = str(section_json.get("title") or "").strip()
+        if title:
+            out.append(title)
+        for el in (section_json.get("elements") or []):
+            if (isinstance(el, dict)
+                    and el.get("type") == "text"):
+                content = str(el.get("content") or "").strip()
+                if content:
+                    out.append(content)
+        return "\n".join(out)
+    # TipTap nodes
+    if not isinstance(section_json, list):
+        return ""
+    out2: list[str] = []
+    for n in section_json:
+        text = _node_text_for_match(n).strip()
+        if text:
+            out2.append(text)
+    return "\n\n".join(out2)
+
+
+async def _patch_section_via_sonnet(
+    document_type: str, section_json: list | dict,
+    section_name: str, patch_instruction: str,
+) -> list | dict | None:
+    """Dispatcher around the deck- and TipTap-specific patch
+    helpers. Returns the patched section JSON in the same shape as
+    section_json, or None on Sonnet failure / shape violation.
+
+    Deck slide: returns a dict {...slide, elements: <patched
+                elements array>} (the slide envelope is preserved
+                so id / title / background / speaker_notes ride
+                through unchanged).
+    TipTap nodes: returns the patched node array.
+    """
+    if document_type == "presentation_deck":
+        if not isinstance(section_json, dict):
+            return None
+        new_elements = await _patch_deck_slide_via_sonnet(
+            section_json, patch_instruction)
+        if new_elements is None:
+            return None
+        return {**section_json, "elements": new_elements}
+    # TipTap
+    if not isinstance(section_json, list):
+        return None
+    return await _patch_tiptap_section_via_sonnet(
+        section_json, section_name, patch_instruction)
+
+
+def _splice_section_into_content(
+    document_type: str, content_json: dict, anchor: Any,
+    patched_section_json: list | dict,
+) -> dict:
+    """Splice the patched section back into the full content_json
+    at the supplied anchor. Returns the new content_json -- every
+    other section is preserved verbatim.
+
+    Per spec (June 27 2026): the write-back must always splice,
+    never overwrite. A wrong-shape patch is rejected upstream
+    (_patch_section_via_sonnet returns None); by the time we reach
+    splice the JSON is shape-valid for the document type.
+    """
+    if document_type == "presentation_deck":
+        slides = list(content_json.get("slides") or [])
+        idx = int(anchor)
+        if not (0 <= idx < len(slides)):
+            return content_json
+        if not isinstance(patched_section_json, dict):
+            return content_json
+        slides[idx] = patched_section_json
+        return {**content_json, "slides": slides}
+    # TipTap
+    nodes = list(content_json.get("content") or [])
+    start, end = anchor
+    if not isinstance(patched_section_json, list):
+        return content_json
+    new_nodes = nodes[:start] + patched_section_json + nodes[end:]
+    return {**content_json, "content": new_nodes}
+
+
+async def _patch_entire_document_via_sonnet(
+    *, document_type: str, content: dict,
+    patch_instruction: str,
+) -> tuple[dict, str, int, int]:
+    """Walk every section / slide in the content and Sonnet-patch
+    each one with the same patch_instruction. Returns
+    (new_content, new_text, sections_patched, sections_skipped).
+
+    Per-section failures are tolerated (the section keeps its
+    original content and skipped is incremented) so a single
+    Sonnet hiccup doesn't drop the entire document. The caller
+    raises _ApplyFixSkip when sections_patched == 0.
+
+    Parallelism: each section's Sonnet call goes through
+    asyncio.gather so wall-clock stays bounded by the slowest
+    single section rather than summing every section."""
+    import asyncio as _asyncio
+
+    is_deck = document_type == "presentation_deck"
+    if is_deck:
+        slides = content.get("slides")
+        if not isinstance(slides, list):
+            return content, _derive_content_text_from_deck(content), 0, 0
+        tasks = [
+            _patch_deck_slide_via_sonnet(sl, patch_instruction)
+            for sl in slides if isinstance(sl, dict)
+        ]
+        results = await _asyncio.gather(
+            *tasks, return_exceptions=True)
+        new_slides: list = []
+        sections_patched = 0
+        sections_skipped = 0
+        for sl, res in zip(slides, results):
+            if (isinstance(res, list)
+                    and not isinstance(res, BaseException)):
+                new_slides.append({**sl, "elements": res})
+                sections_patched += 1
+            else:
+                new_slides.append(sl)
+                sections_skipped += 1
+        new_content = {**content, "slides": new_slides}
+        return (
+            new_content,
+            _derive_content_text_from_deck(new_content),
+            sections_patched, sections_skipped)
+
+    # TipTap path (brief / appendix / script)
+    nodes = content.get("content")
+    if not isinstance(nodes, list):
+        return (
+            content,
+            _derive_content_text_from_tiptap(content), 0, 0)
+    # Build the section ranges from heading-to-heading. For each
+    # heading-bounded range, Sonnet-patch the nodes; reassemble.
+    ranges: list[tuple[int, int, str]] = []
+    last_start: int | None = None
+    last_title: str = ""
+    for i, n in enumerate(nodes):
+        if isinstance(n, dict) and n.get("type") == "heading":
+            if last_start is not None:
+                ranges.append((last_start, i, last_title))
+            last_start = i
+            last_title = _node_text_for_match(n).strip() or (
+                f"section_{len(ranges) + 1}")
+    if last_start is not None:
+        ranges.append((last_start, len(nodes), last_title))
+    if not ranges:
+        # No headings at all -- patch the entire node list as a
+        # single section.
+        ranges = [(0, len(nodes), "document")]
+
+    tasks = [
+        _patch_tiptap_section_via_sonnet(
+            nodes[s:e], title, patch_instruction)
+        for s, e, title in ranges
+    ]
+    results = await _asyncio.gather(
+        *tasks, return_exceptions=True)
+    new_nodes: list = []
+    sections_patched = 0
+    sections_skipped = 0
+    for (s, e, _title), res in zip(ranges, results):
+        if (isinstance(res, list)
+                and not isinstance(res, BaseException)):
+            new_nodes.extend(res)
+            sections_patched += 1
+        else:
+            new_nodes.extend(nodes[s:e])
+            sections_skipped += 1
+    new_content = {**content, "content": new_nodes}
+    return (
+        new_content,
+        _derive_content_text_from_tiptap(new_content),
+        sections_patched, sections_skipped)
 
 
 @app.post("/api/v1/documents/apply-fix")
@@ -14554,278 +15073,58 @@ async def post_apply_fix(
                 section_name if target == "section" else None),
         }
 
-    # June 26 2026 -- direct section-patch path. Tried FIRST.
-    # Applies the fix in place to the current draft's content_json
-    # without requiring a story plan or a full document regen. Falls
-    # through to the legacy story-plan + regen block when:
-    #   * target='document' (no specific section to patch)
-    #   * no section_name on the fix proposal
-    #   * the document_type doesn't carry a first-class section
-    #     concept here (presentation_script)
-    #   * the section / slide title doesn't match anything in the
-    #     current draft
-    #   * the Sonnet response is unparseable or violates the shape
-    #     contract
-    # The fall-through preserves the existing regen-the-whole-doc
-    # behaviour as the safety net while the direct path covers the
-    # common case (one slide's numbers are wrong / one section's
-    # claim needs softening).
+    # June 27 2026 -- inline-only apply-fix flow.
+    #
+    # The endpoint now ALWAYS routes through _try_direct_section_patch
+    # which applies the fix as a surgical section-level splice on the
+    # current draft's content_json. No story_plans lookup. No full-
+    # document regeneration. No fall-through safety net.
+    #
+    # If the patch can't be applied (no current draft, section can't
+    # be matched, Sonnet output unusable, write failed) the helper
+    # raises _ApplyFixSkip which we translate into a 422 carrying:
+    #   detail        -- plain-English reason
+    #   hint          -- "open the editor and edit directly"
+    #   section_name  -- best-known section identifier so the
+    #                    frontend can deep-link to that section
+    # The frontend's FixProposalCard catches the 422 and surfaces an
+    # inline "Open in editor" link instead of regenerating.
+    #
+    # Removed in this revision: the entire legacy story-plan SELECT/
+    # UPDATE/_start_generation_job block (was here -> now gone). It
+    # paired a buggy hash join (PR #443 patched the deck case but
+    # appendix/script never had a story_plans row to find) with a
+    # full-document regen that discarded manual edits in the current
+    # draft. Both were footguns; both are gone.
     try:
-        direct = await _try_direct_section_patch(
+        result = await _try_direct_section_patch(
             document_type=document_type, target=target,
             section_name=str(section_name) if section_name else None,
             patch_instruction=patch_instruction,
             debate_id=int(debate_id) if debate_id else None)
+    except _ApplyFixSkip as skip:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detail": skip.detail,
+                "hint": skip.hint,
+                "section_name": skip.section_name,
+                "document_type": document_type,
+            })
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "apply_fix_direct_patch_unexpected_error",
+            "apply_fix_unexpected_error",
             error=str(exc), document_type=document_type)
-        direct = None
-    if direct is not None:
-        return direct
-
-    # 1. Patch the story_plans row. Best-effort -- if the patch
-    # write fails we surface a 500 so the caller knows nothing was
-    # applied and the existing draft is unchanged.
-    #
-    # June 26 2026 -- deck-row lookup hash-join fix. The previous
-    # implementation queried
-    #   SELECT ... WHERE data_hash = current_data_hash() AND
-    #               document_type = :t
-    # but story_plans.data_hash for deck rows is the COMPOUND
-    # storage hash that refresh_story_plan persists via
-    # cache_key_with_brief_and_appendix
-    # ("<data_hash>|<brief_hash>|<appendix_hash>"), while
-    # current_data_hash() returns just the 16-char bare market-data
-    # hash. The exact-match join never hit a deck row, so apply-fix
-    # always 409'd "No story plan to patch" for the deck even when
-    # a fresh plan was sitting in the table.
-    #
-    # The same diagnosis + fix already shipped at two other sites
-    # (main.py:_deck_story_plan_status @ ~9301 and the script DOCX
-    # endpoint @ ~16116) -- both switched to
-    # get_latest_story_plan(document_type, exclude_fallback=True)
-    # which queries by document_type only + filters fallback rows
-    # at the SQL layer. This brings apply-fix in line for the deck.
-    #
-    # Scope: presentation_deck only. Brief's cache_key_with_brief
-    # has a bare-data_hash fallback when brief_hash is empty
-    # (see tools/brief_grounding.py:193), so the legacy join often
-    # still hits the brief row. Extending the fix to brief is a
-    # future tightening if real-world drift surfaces; the deck is
-    # the confirmed-broken case + the only one in scope here.
-    try:
-        from tools.audit_assembler import current_data_hash
-        from tools.story_plan import get_latest_story_plan
-        from sqlalchemy import text as _text
-        from database import (
-            AsyncSessionLocal,  # type: ignore[attr-defined]
-        )
-        if AsyncSessionLocal is None:
-            raise RuntimeError("database unavailable")
-
-        # The story_plans table uses short document_type values
-        # ('deck', 'brief'); the apply-fix endpoint takes the long
-        # names. Translate once at the lookup boundary.
-        _SHORT_TYPE = {
-            "presentation_deck": "deck",
-            "executive_brief":   "brief",
-        }
-        sp_doc_type = _SHORT_TYPE.get(document_type, document_type)
-
-        async with AsyncSessionLocal() as s:
-            plan_json: dict[str, Any] = {}
-            central: str = ""
-            update_hash: str = ""
-            if document_type == "presentation_deck":
-                # Deck-row hash-join fix path: query by
-                # document_type only (excluding fallback rows),
-                # then route the UPDATE via the row's actual
-                # storage hash surfaced as _storage_hash.
-                plan = await get_latest_story_plan(
-                    "deck", exclude_fallback=True)
-                if not plan:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "No story plan to patch -- regenerate "
-                            "the document first to seed a plan, "
-                            "then re-run apply-fix."))
-                # Reconstruct the plan_json dict in the same shape
-                # the legacy SELECT returned: strip the synthetic
-                # / column-only fields that get_latest_story_plan
-                # merges in. The plan_json column stores everything
-                # except the indexed columns broken out for query.
-                _SYNTHESIZED = {
-                    "full_script", "anticipated_questions",
-                    "dissenting_view", "limitations_surfaced",
-                    "computed_at",
-                }
-                plan_json = {
-                    k: v for k, v in plan.items()
-                    if not k.startswith("_")
-                    and k not in _SYNTHESIZED
-                }
-                central = str(
-                    plan_json.pop("central_argument", "") or "")
-                update_hash = str(plan.get("_storage_hash") or "")
-                if not update_hash:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "Story plan found but its storage "
-                            "hash is unavailable; cannot route "
-                            "the patch."))
-            else:
-                # Legacy bare-hash path for brief / appendix /
-                # script. Brief works because cache_key_with_brief
-                # falls back to data_hash alone when brief_hash is
-                # empty; appendix + script don't carry their own
-                # story_plans rows, so the SELECT 409s as before.
-                dh = await current_data_hash() or ""
-                r = await s.execute(_text(
-                    "SELECT plan_json, central_argument FROM story_plans "
-                    "WHERE data_hash = :h AND document_type = :t "
-                    "ORDER BY computed_at DESC LIMIT 1"),
-                    {"h": dh, "t": sp_doc_type})
-                row = r.fetchone()
-                if not row:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "No story plan to patch -- regenerate the "
-                            "document first to seed a plan, then re-run "
-                            "apply-fix."))
-                plan_json = row[0] or {}
-                central = row[1] or ""
-                update_hash = dh
-            # Apply the patch.
-            if target == "document":
-                central = (
-                    (central + "\n\n[Critic fix] "
-                     + patch_instruction).strip())
-            else:
-                # Section-level: append to the matching section's
-                # guidance field. The plan_json shape differs
-                # between brief (section_plan list) and deck
-                # (slide_plan list); cover both.
-                sections = (
-                    plan_json.get("section_plan")
-                    or plan_json.get("slide_plan") or [])
-                patched = False
-                for s_entry in sections:
-                    if not isinstance(s_entry, dict):
-                        continue
-                    sn = (
-                        s_entry.get("name")
-                        or s_entry.get("title")
-                        or s_entry.get("section")
-                        or str(s_entry.get("slide_number") or ""))
-                    if sn == section_name:
-                        existing = (
-                            s_entry.get("guidance") or "")
-                        s_entry["guidance"] = (
-                            (existing + "\n[Critic fix] "
-                             + patch_instruction).strip())
-                        patched = True
-                        break
-                if not patched:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            f"Section '{section_name}' not found "
-                            f"in the {document_type} story plan."))
-            # Persist the patched plan. UPDATE routes via
-            # update_hash + sp_doc_type so the deck path hits the
-            # composite-keyed row (update_hash = _storage_hash) and
-            # the brief / legacy path hits the bare-hash row
-            # (update_hash = current_data_hash()). Same unique
-            # (data_hash, document_type) constraint from migration
-            # 056 guarantees a single matching row in both cases.
-            await s.execute(_text(
-                "UPDATE story_plans SET "
-                "plan_json = CAST(:p AS JSONB), "
-                "central_argument = :c "
-                "WHERE data_hash = :h AND document_type = :t"),
-                {
-                    "p": json.dumps(plan_json),
-                    "c": central,
-                    "h": update_hash, "t": sp_doc_type,
-                })
-            await s.commit()
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        log.warning("apply_fix_patch_failed", error=str(exc))
         raise HTTPException(
             status_code=500,
-            detail=f"Could not patch story plan: {exc}")
+            detail=(
+                "Unexpected error applying the fix. Reload and "
+                "try again, or edit the document in the editor "
+                "directly."))
+    return result
 
-    # 2 + 3. Re-run the generator. The full doc generators run
-    # asynchronously via _start_generation_job and write a new
-    # editor_drafts row themselves (with label "Post-critic
-    # revision v<n>"). For section-level scope we still trigger
-    # the full document generator -- a per-section regen path is
-    # a future optimisation; the current generators are atomic.
-    try:
-        from tools.editor_drafts import list_drafts
-        all_drafts = await list_drafts(email)
-        prior_count = sum(
-            1 for d in all_drafts
-            if d.get("document_type") == document_type)
-        revision_n = max(prior_count, 1)
-        # Stash the desired draft label so the generator labels
-        # the new row appropriately. The generators don't currently
-        # accept a label override; we record the intended label in
-        # the response so the UI can update its own version
-        # selector immediately and the actual draft label is
-        # backfilled by the next list-drafts fetch.
-        draft_label = (
-            f"Post-critic revision v{revision_n}"
-            f"{' (section: ' + str(section_name) + ')' if section_name else ''}")
-        # The generator endpoints return 202 with a job_id; we
-        # mirror that contract here. The frontend polls the job
-        # and shows the new draft once it lands.
-        job_response = _start_generation_job(
-            document_type, session, request)
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        log.warning("apply_fix_regen_kickoff_failed", error=str(exc))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not kick off regeneration: {exc}")
-
-    # 4. Mark fix_applied on council_debates (best-effort -- the
-    # apply did succeed even if the marker write fails).
-    if debate_id is not None:
-        try:
-            from sqlalchemy import text as _text2
-            from database import (
-                AsyncSessionLocal as _ASL,  # type: ignore
-            )
-            if _ASL is not None:
-                async with _ASL() as s2:
-                    await s2.execute(_text2(
-                        "UPDATE council_debates SET "
-                        "fix_applied = TRUE, "
-                        "fix_applied_at = NOW() "
-                        "WHERE id = :id"),
-                        {"id": int(debate_id)})
-                    await s2.commit()
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "apply_fix_mark_debate_failed", error=str(exc))
-
-    return {
-        "ok": True,
-        "new_draft_id": None,    # filled by the generator job
-        "job_response": job_response,
-        "draft_label": draft_label,
-        "scope": target,
-        "section_regenerated": (
-            section_name if target == "section" else None),
-    }
 
 
 # ── June 25 2026: Copilot-style inline fix-text flow ─────────────
@@ -14864,43 +15163,110 @@ def _extract_section_text(
     from that line up to (but not including) the next heading-like
     line OR end of document.
 
-    Returns None when the section cannot be located; the caller
-    falls back to the full document text (less ideal but safe)."""
+    Returns None when the section cannot be located.
+
+    June 27 2026 (URGENT) -- behavioural change. The previous
+    contract said the caller "falls back to the full document text
+    (less ideal but safe)". That fallback was NOT safe: when the
+    section couldn't be located the caller wired the WHOLE document
+    as the 'CURRENT SECTION TEXT' to Sonnet, which returned just the
+    patched section, and the frontend then performed
+      content_text.replace(WHOLE_DOC, PATCHED_SECTION)
+    -- silently overwriting the entire document with only the
+    patched section. The caller has been updated to return a 409
+    on a None response instead. This docstring is updated to
+    reflect the new contract.
+
+    Letter-label sections ('Section A', 'Section B', ...) are now
+    also normalised by the same prefix-stripper so the analytical
+    appendix's letter-keyed headings match. Substring fallback
+    (case-insensitive) catches headings that drift from the
+    finding's section_name by a word or two."""
     if not section_name or not content_text:
         return None
     import re as _re
-    needle = section_name.strip().lower()
-    # Strip leading 'Section N: ', '# ', '## ', '1. ', etc. from
-    # both the needle and each candidate line so 'Section 4:
-    # Limitations' matches a draft heading like '## Limitations'.
-    needle = _re.sub(r"^(section\s+\d+[:.]?\s*|#+\s*|\d+\.\s+)",
-                     "", needle).strip()
+    needle_raw = section_name.strip().lower()
+    # Capture a bare 'Section X' / 'Section 4' identifier so we can
+    # still match a heading prefixed with that letter / digit when
+    # the needle carries no body text after the label.
+    bare_id_m = _re.match(
+        r"^section\s+([a-z\d]+)\s*[:.\-]?\s*$", needle_raw)
+    section_id: str | None = (
+        bare_id_m.group(1) if bare_id_m else None)
+    # Strip leading 'Section N[:.] ', 'Section X[:.] ' (letter),
+    # '# ', '## ', '1. ', '1) ', 'A. ', 'a) ' etc. from both the
+    # needle and each candidate line so 'Section B: Strategy
+    # Universe' matches a draft heading like 'B. Strategy Universe'
+    # or 'Strategy Universe'.
+    _PREFIX_RE = _re.compile(
+        r"^(section\s+[a-z\d]+[:.\-]?\s*|#+\s*|"
+        r"[a-z\d]+[.)]\s+)")
+    needle = _PREFIX_RE.sub("", needle_raw).strip()
+    # Bare 'Section X' with no body falls through to the section-id
+    # prefix matcher below.
+    if not needle and not section_id:
+        return None
     lines = content_text.splitlines()
     start_idx: int | None = None
-    for i, line in enumerate(lines):
-        clean = _re.sub(
-            r"^(section\s+\d+[:.]?\s*|#+\s*|\d+\.\s+)",
-            "", line.strip().lower()).strip()
-        if clean == needle and len(line.strip()) < 200:
-            start_idx = i
-            break
+    # Pass 1: exact-after-strip match.
+    if needle:
+        for i, line in enumerate(lines):
+            clean = _PREFIX_RE.sub(
+                "", line.strip().lower()).strip()
+            if clean == needle and len(line.strip()) < 200:
+                start_idx = i
+                break
+    # Pass 2: case-insensitive substring fallback (either
+    # direction) -- catches mild heading drift like 'Limitations'
+    # vs 'Honest Limitations' that exact match misses.
+    if start_idx is None and needle:
+        for i, line in enumerate(lines):
+            clean = _PREFIX_RE.sub(
+                "", line.strip().lower()).strip()
+            if not clean or len(line.strip()) >= 200:
+                continue
+            if (needle in clean or clean in needle) and len(clean) >= 3:
+                start_idx = i
+                break
+    # Pass 3: 'Section X' bare-ID prefix match -- find a heading
+    # line that STARTS with the same letter/digit followed by
+    # '.' / ')' / whitespace. Catches 'Section B' -> 'B. Strategy
+    # Universe' even when no body text was provided.
+    if start_idx is None and section_id is not None:
+        id_prefix_re = _re.compile(
+            rf"^{_re.escape(section_id)}[.)]\s+\S")
+        for i, line in enumerate(lines):
+            if (id_prefix_re.match(line.strip().lower())
+                    and len(line.strip()) < 200):
+                start_idx = i
+                break
     if start_idx is None:
         return None
     # Walk forward to the next heading-like line (markdown # / ##
-    # / 'Section N' / a bold-only line). The slice is from
+    # / 'Section N' / 'A. ' / a bold-only line). The slice is from
     # start_idx to end_idx exclusive.
     end_idx = len(lines)
     for j in range(start_idx + 1, len(lines)):
         ln = lines[j].strip()
         if not ln:
             continue
-        if (ln.startswith("#") or ln.lower().startswith("section ")
-                or _re.match(r"^\d+\.\s+\S", ln)
+        if (ln.startswith("#")
+                or _re.match(r"^section\s+[a-z\d]+\b", ln,
+                             flags=_re.IGNORECASE)
+                or _re.match(r"^[a-z\d]+[.)]\s+\S", ln,
+                             flags=_re.IGNORECASE)
                 or (ln.startswith("**") and ln.endswith("**")
                     and len(ln) < 120)):
             end_idx = j
             break
-    return "\n".join(lines[start_idx:end_idx]).strip()
+    extracted = "\n".join(lines[start_idx:end_idx]).strip()
+    # Guard: if the extracted span covers more than ~80% of the
+    # document, the section bounds collapsed and the caller would
+    # effectively be patching the whole doc. Refuse instead of
+    # returning an unsafe span.
+    if len(extracted) >= 0.8 * len(content_text):
+        return None
+    return extracted
 
 
 @app.post(
@@ -14910,26 +15276,44 @@ async def post_propose_fix_text(
     debate_id: int, request: Request, body: dict,
     session: dict = Depends(require_team_member),
 ):
-    """Generates a section-scoped text diff for one fix proposal.
+    """Generate a section-scoped JSON splice preview for one fix
+    proposal. Operates on content_json (NOT content_text). The
+    write-back to the draft happens on accept-fix-text -- this
+    endpoint just produces the preview.
 
     Body: {finding_id: int}
 
-    Returns: {finding_id, original_text, suggested_text,
-              section_name, proposal_id}
+    Returns: {finding_id, section_name, original_text,
+              suggested_text, proposal_id, cached, document_type}
 
-    Idempotent: the suggested_text is cached on
-    council_debates.fix_proposals[i].suggested_text so a second
-    call returns the same payload. Cache hit logged for telemetry.
+    The original_text / suggested_text fields are PLAIN-TEXT
+    renderings of the located section (before and after the
+    patch) -- intended only for the diff display. The actual
+    splice that accept-fix-text writes back uses the JSON cached
+    here on council_debates.fix_proposals[i] (alongside the legacy
+    text fields kept for backward compatibility).
 
-    422 when the debate has no fix_proposals or the finding_id
-    doesn't match. 404 when the debate row doesn't exist. 409 when
-    no current draft exists for the debate's document_type."""
+    Idempotent: the cached suggested_section_json + suggested_text
+    are returned on a second call without re-running Sonnet.
+
+    Errors:
+      404 -- debate row not found
+      422 -- no fix proposal for the finding_id / empty patch
+             instruction
+      409 -- no current draft / no content_json / section name
+             could not be located in the current content_json /
+             Sonnet shape violation
+      502 -- Sonnet call failed
+
+    A 409 carries a structured detail with section_name + hint so
+    the frontend can show an editor deep-link instead of silently
+    falling back to a full-document overwrite (the June 27 2026
+    bug that prompted this rewrite)."""
     from sqlalchemy import text as _text
     from database import (
         AsyncSessionLocal,  # type: ignore[attr-defined]
     )
     from tools.editor_drafts import get_current_draft_by_type
-    from agents.base import call_claude, SONNET_MODEL
 
     finding_id = body.get("finding_id")
     if finding_id is None:
@@ -14952,26 +15336,10 @@ async def post_propose_fix_text(
                 status_code=404, detail="Debate row not found.")
         document_type = row[0] or ""
         fix_proposals = row[1] or {}
-        # source_draft_id captured for the response payload but
-        # not used in lookup -- we read the current draft.
         _ = row[2]
 
-    # fix_proposals is either a dict keyed by str(finding_id) or
-    # a list of FixProposal dicts. Handle both shapes.
-    proposal: dict | None = None
-    proposal_key: str | int | None = None
-    if isinstance(fix_proposals, dict):
-        key = str(finding_id)
-        if key in fix_proposals:
-            proposal = fix_proposals[key]
-            proposal_key = key
-    elif isinstance(fix_proposals, list):
-        for p in fix_proposals:
-            if isinstance(p, dict) and (
-                    int(p.get("finding_id", -1)) == finding_id):
-                proposal = p
-                proposal_key = fix_proposals.index(p)
-                break
+    proposal, proposal_key = _lookup_fix_proposal(
+        fix_proposals, finding_id)
     if proposal is None:
         raise HTTPException(
             status_code=422,
@@ -14981,35 +15349,32 @@ async def post_propose_fix_text(
     patch_instruction = str(
         proposal.get("patch_instruction") or "").strip()
     section_name = proposal.get("section_name")
-
-    # Idempotency cache -- if suggested_text was previously
-    # generated for this proposal, return it verbatim.
-    cached_suggested = (
-        proposal.get("suggested_text")
-        if isinstance(proposal, dict) else None)
-    cached_original = (
-        proposal.get("original_text")
-        if isinstance(proposal, dict) else None)
-
-    # Fetch the current draft (team-shared per PR #410).
-    draft = await get_current_draft_by_type(document_type)
-    if draft is None:
+    if not patch_instruction:
+        raise HTTPException(
+            status_code=422,
+            detail="patch_instruction is empty on this proposal.")
+    if not section_name:
         raise HTTPException(
             status_code=409,
-            detail=(
-                "No current draft for this document type to apply "
-                "the fix against."))
-    content_text = (draft.get("content_text") or "").strip()
-    if not content_text:
-        raise HTTPException(
-            status_code=409,
-            detail="Current draft has no content_text to patch.")
+            detail={
+                "detail": (
+                    "Fix proposal has no section_name -- inline "
+                    "preview requires a specific section to splice. "
+                    "Edit the document in the editor directly."),
+                "hint": (
+                    "Open the document in the editor and apply the "
+                    "change manually."),
+                "section_name": None,
+                "document_type": document_type,
+            })
 
-    # Locate the affected section. None falls back to the full
-    # document -- safer than aborting, less surgical than ideal.
-    original_text = _extract_section_text(
-        content_text, section_name) or content_text
-    if cached_suggested and cached_original:
+    # Idempotency cache -- if we previously computed the preview
+    # for this proposal, return it verbatim (no Sonnet call).
+    cached_suggested = proposal.get("suggested_text")
+    cached_original = proposal.get("original_text")
+    cached_suggested_json = proposal.get("suggested_section_json")
+    if (cached_suggested and cached_original
+            and cached_suggested_json is not None):
         log.info(
             "propose_fix_text_cache_hit",
             debate_id=debate_id, finding_id=finding_id)
@@ -15020,35 +15385,79 @@ async def post_propose_fix_text(
             "suggested_text": cached_suggested,
             "proposal_id": debate_id,
             "cached": True,
+            "document_type": document_type,
         }
 
-    if not patch_instruction:
+    # Fetch the current draft (team-shared per PR #410).
+    draft = await get_current_draft_by_type(document_type)
+    if draft is None:
         raise HTTPException(
-            status_code=422,
-            detail="patch_instruction is empty on this proposal.")
+            status_code=409,
+            detail={
+                "detail": (
+                    "No current draft for this document type. "
+                    "Generate the document before previewing a "
+                    "fix."),
+                "hint": (
+                    "Generate the document from the Documents "
+                    "panel, then try Preview Inline Edit again."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    content_json = draft.get("content_json")
+    if not isinstance(content_json, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "Current draft has no content_json to patch."),
+                "hint": (
+                    "Open the document in the editor and apply "
+                    "the change directly."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
 
-    # Single Sonnet call -- low max_tokens since we want a tight
-    # surgical edit, not an open rewrite. 3000 covers a generous
-    # section (~5K chars / ~750 tokens of output).
+    # Locate the section in content_json. June 27 2026 -- this
+    # replaces the previous content_text-based extractor that, when
+    # the section couldn't be located, fell back to the WHOLE
+    # document and silently overwrote everything with only the
+    # patched section. The new helper returns None instead; we 409
+    # with an actionable hint.
+    located = _locate_section_in_content(
+        document_type, content_json, str(section_name))
+    if located is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    f"Section '{section_name}' could not be "
+                    "located in the current draft. Section "
+                    "heading may have drifted from the finding's "
+                    "section name."),
+                "hint": (
+                    "Open the document in the editor and apply "
+                    "the change directly."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    anchor, original_section_json = located
+    original_text = _render_section_as_text(
+        document_type, original_section_json)
+
+    # Sonnet patch -- under test, deterministic stub appends the
+    # instruction so tests can assert the splice happened without
+    # round-tripping a live LLM.
     if ENVIRONMENT == "test":
-        suggested_text = (
-            f"{original_text}\n\n[Inline edit applied: "
-            f"{patch_instruction}]")
+        suggested_section_json = (
+            _apply_test_stub_patch(
+                document_type, original_section_json,
+                patch_instruction))
     else:
-        user_msg = (
-            f"CURRENT SECTION TEXT:\n\n{original_text}\n\n"
-            f"CHANGE TO APPLY:\n\n{patch_instruction}\n\n"
-            "Return the revised section text only, no commentary.")
         try:
-            from agents.harness import HarnessResult  # noqa: F401
-            raw = await asyncio.to_thread(
-                call_claude,
-                SONNET_MODEL, _PROPOSE_FIX_TEXT_SYSTEM,
-                user_msg, max_tokens=3000,
-                trigger="propose_fix_text")
-            suggested_text = (raw or "").strip()
-            if not suggested_text:
-                suggested_text = original_text
+            suggested_section_json = await _patch_section_via_sonnet(
+                document_type, original_section_json,
+                str(section_name), patch_instruction)
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "propose_fix_text_call_failed",
@@ -15057,27 +15466,46 @@ async def post_propose_fix_text(
             raise HTTPException(
                 status_code=502,
                 detail=f"Sonnet call failed: {exc}")
+    if suggested_section_json is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "AI could not produce a valid patch for "
+                    f"section '{section_name}'."),
+                "hint": (
+                    "Open the document in the editor and apply "
+                    "the change directly."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    suggested_text = _render_section_as_text(
+        document_type, suggested_section_json)
 
-    # Cache on council_debates.fix_proposals[i] (best-effort --
-    # idempotency degrades to a fresh LLM call if the write fails).
+    # Cache the JSON + text on council_debates.fix_proposals[i].
+    # The text fields stay populated for backward compatibility
+    # with any frontend code still reading them; the JSON fields
+    # are the source of truth for the splice that accept-fix-text
+    # performs.
     try:
-        if proposal_key is not None and AsyncSessionLocal is not None:
+        if (proposal_key is not None
+                and AsyncSessionLocal is not None):
             updated = (
                 fix_proposals.copy()
                 if isinstance(fix_proposals, dict)
                 else list(fix_proposals))
+            cached_payload = {
+                **proposal,
+                "suggested_text": suggested_text,
+                "original_text": original_text,
+                "suggested_section_json": suggested_section_json,
+                "original_section_json": original_section_json,
+                "section_name": section_name,
+            }
             if isinstance(updated, dict):
-                updated[str(proposal_key)] = {
-                    **proposal,
-                    "suggested_text": suggested_text,
-                    "original_text": original_text,
-                }
+                updated[str(proposal_key)] = cached_payload
             else:
-                updated[int(proposal_key)] = {
-                    **proposal,
-                    "suggested_text": suggested_text,
-                    "original_text": original_text,
-                }
+                updated[int(proposal_key)] = cached_payload
             async with AsyncSessionLocal() as s2:
                 await s2.execute(_text(
                     "UPDATE council_debates "
@@ -15098,7 +15526,63 @@ async def post_propose_fix_text(
         "suggested_text": suggested_text,
         "proposal_id": debate_id,
         "cached": False,
+        "document_type": document_type,
     }
+
+
+def _lookup_fix_proposal(
+    fix_proposals: Any, finding_id: int,
+) -> tuple[dict | None, str | int | None]:
+    """Two-shape lookup: fix_proposals may be a dict keyed by
+    str(finding_id) or a list of FixProposal dicts. Returns
+    (proposal, key) on a successful match, (None, None) otherwise.
+    Used by propose-fix-text + accept-fix-text."""
+    if isinstance(fix_proposals, dict):
+        key = str(finding_id)
+        if key in fix_proposals:
+            p = fix_proposals[key]
+            if isinstance(p, dict):
+                return p, key
+    elif isinstance(fix_proposals, list):
+        for p in fix_proposals:
+            if isinstance(p, dict) and (
+                    int(p.get("finding_id", -1)) == finding_id):
+                return p, fix_proposals.index(p)
+    return None, None
+
+
+def _apply_test_stub_patch(
+    document_type: str, section_json: list | dict,
+    patch_instruction: str,
+) -> list | dict:
+    """In ENVIRONMENT=test, the Sonnet call is replaced with a
+    deterministic stub so tests can assert the splice happened
+    end-to-end without round-tripping a live LLM. The stub
+    appends '[Inline edit applied: <instruction>]' to the section
+    in a shape-preserving way."""
+    marker = f"[Inline edit applied: {patch_instruction}]"
+    if document_type == "presentation_deck":
+        if not isinstance(section_json, dict):
+            return section_json
+        # Append a text element carrying the marker.
+        elements = list(section_json.get("elements") or [])
+        elements.append({
+            "id": f"s{section_json.get('id', 0)}_test_stub",
+            "type": "text",
+            "x": 60, "y": 600, "width": 840, "height": 40,
+            "content": marker,
+            "fontSize": 14, "fontWeight": "normal",
+            "fontStyle": "italic", "color": "#666666",
+            "locked": False,
+        })
+        return {**section_json, "elements": elements}
+    # TipTap: append a paragraph node carrying the marker.
+    if not isinstance(section_json, list):
+        return section_json
+    return list(section_json) + [{
+        "type": "paragraph",
+        "content": [{"type": "text", "text": marker}],
+    }]
 
 
 @app.post(
@@ -15108,37 +15592,157 @@ async def post_accept_fix_text(
     debate_id: int, request: Request, body: dict,
     session: dict = Depends(require_team_member),
 ):
-    """Marks a fix proposal applied after the frontend has PATCHed
-    the draft with the resolved text via /drafts/{id}.
+    """Splice the previously-proposed section patch back into the
+    current draft's content_json + mark the council_debates row
+    applied.
 
-    Body: {finding_id: int, new_draft_id: int | null}
+    Body: {finding_id: int}
 
-    Updates council_debates.fix_applied=true, fix_applied_at=NOW(),
-    new_draft_id (when supplied). Distinct from /api/v1/documents/
-    apply-fix -- the legacy path kicks off a full regen; this path
-    is for the surgical inline-diff flow where the frontend has
-    already saved the change.
+    June 27 2026 -- behavioural change. Previously the frontend
+    PATCHed /drafts/{id} with content_text and this endpoint just
+    flipped fix_applied. That path could overwrite the entire
+    document when the section couldn't be located cleanly. The
+    write-back has moved server-side: this endpoint reads the
+    cached suggested_section_json (computed by propose-fix-text),
+    re-locates the section in the CURRENT content_json (so a
+    manual edit between propose and accept is respected), splices,
+    and writes via update_draft. The frontend no longer touches
+    content_text directly for this flow.
 
-    Returns: {ok: bool, applied_at: ISO timestamp}"""
+    The optional new_draft_id body field is accepted but ignored
+    in this revision -- the new id comes from the splice itself.
+
+    Returns: {ok, new_draft_id, applied_at, section_name,
+              document_type}
+
+    Errors:
+      404 -- debate row not found
+      422 -- no fix proposal for finding_id
+      409 -- proposal hasn't been previewed yet (no cached
+             suggested_section_json) / no current draft / section
+             could not be re-located in current content_json"""
     from sqlalchemy import text as _text
     from database import (
         AsyncSessionLocal,  # type: ignore[attr-defined]
+    )
+    from tools.editor_drafts import (
+        get_current_draft_by_type, update_draft,
     )
 
     finding_id = body.get("finding_id")
     if finding_id is None:
         raise HTTPException(
             status_code=422, detail="finding_id is required")
-    new_draft_id = body.get("new_draft_id")
-    if new_draft_id is not None:
-        try:
-            new_draft_id = int(new_draft_id)
-        except Exception:  # noqa: BLE001
-            new_draft_id = None
+    finding_id = int(finding_id)
 
     if AsyncSessionLocal is None:
         raise HTTPException(
             status_code=503, detail="Database unavailable.")
+
+    # Lookup the debate row + the cached suggested section JSON.
+    async with AsyncSessionLocal() as s_lookup:
+        r = await s_lookup.execute(_text(
+            "SELECT document_type, fix_proposals "
+            "FROM council_debates WHERE id = :id"),
+            {"id": debate_id})
+        row = r.fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail="Debate row not found.")
+        document_type = row[0] or ""
+        fix_proposals = row[1] or {}
+    proposal, _ = _lookup_fix_proposal(fix_proposals, finding_id)
+    if proposal is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No fix proposal for that finding_id. Generate a "
+                "preview via /propose-fix-text first."))
+    suggested_section_json = proposal.get(
+        "suggested_section_json")
+    section_name = proposal.get("section_name")
+    if (suggested_section_json is None
+            or not isinstance(suggested_section_json,
+                              (list, dict))):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "No cached preview for this fix. Run "
+                    "Preview Inline Edit first to generate one."),
+                "hint": (
+                    "Click 'Preview Inline Edit' to generate the "
+                    "patch, then 'Accept' to apply it."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+
+    # Splice into the CURRENT draft's content_json. Re-locating
+    # against the current state means manual edits between propose
+    # and accept don't surprise us -- the section is always written
+    # at its current position, not the position cached at preview
+    # time.
+    draft = await get_current_draft_by_type(document_type)
+    if draft is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "No current draft to write the patch to."),
+                "hint": (
+                    "Re-generate the document and retry."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    content_json = draft.get("content_json")
+    if not isinstance(content_json, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "Current draft has no content_json to splice "
+                    "into."),
+                "hint": (
+                    "Open the document in the editor and apply "
+                    "the change directly."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    located = _locate_section_in_content(
+        document_type, content_json, str(section_name))
+    if located is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    f"Section '{section_name}' was edited in the "
+                    "draft between preview and accept -- the "
+                    "heading no longer matches. Re-preview to "
+                    "refresh the patch."),
+                "hint": (
+                    "Click 'Preview Inline Edit' again to regen "
+                    "the patch against the current draft state."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    anchor, _orig = located
+    new_content_json = _splice_section_into_content(
+        document_type, content_json, anchor,
+        suggested_section_json)
+    if document_type == "presentation_deck":
+        new_text = _derive_content_text_from_deck(new_content_json)
+    else:
+        new_text = _derive_content_text_from_tiptap(
+            new_content_json)
+
+    ok = await update_draft(
+        int(draft["id"]), new_content_json, new_text)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Patch was generated but the draft write failed. "
+                "Reload and retry."))
 
     try:
         async with AsyncSessionLocal() as s:
@@ -15148,20 +15752,30 @@ async def post_accept_fix_text(
                 "fix_applied_at = NOW(), "
                 "new_draft_id = COALESCE(:nd, new_draft_id) "
                 "WHERE id = :id"),
-                {"nd": new_draft_id, "id": debate_id})
+                {"nd": int(draft["id"]), "id": debate_id})
             await s.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "accept_fix_text_failed",
+            "accept_fix_text_mark_failed",
             debate_id=debate_id, finding_id=int(finding_id),
             error=str(exc))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not mark fix applied: {exc}")
+        # Splice was already written successfully -- don't unwind
+        # it on a debate-marker failure. Log + continue.
+
+    log.info(
+        "accept_fix_text_spliced",
+        debate_id=debate_id, finding_id=int(finding_id),
+        document_type=document_type,
+        section_name=section_name,
+        draft_id=int(draft["id"]))
+
     from datetime import datetime as _dt, timezone as _tz
     return {
         "ok": True,
+        "new_draft_id": int(draft["id"]),
         "applied_at": _dt.now(_tz.utc).isoformat(),
+        "section_name": section_name,
+        "document_type": document_type,
     }
 
 
