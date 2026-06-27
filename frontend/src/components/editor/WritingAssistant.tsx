@@ -21,6 +21,7 @@ import {
 
 import AuditExportButton from '../AuditExportButton'
 import CriticFindingsPanel from '../CriticFindingsPanel'
+import FocusBriefModal from '../FocusBriefModal'
 import Markdown from '../Markdown'
 
 import {
@@ -142,10 +143,24 @@ export default function WritingAssistant({
     }
   }, [prefill?.nonce])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  const runReview = async () => {
+  // June 27 2026 -- per-doc Run Review now opens the FocusBriefModal
+  // FIRST. There's no confirm gate for per-doc (only cross-document
+  // carries one), so the brief modal is the only pre-flight. Skip
+  // fires the review with no brief (legacy behaviour); Run Review
+  // fires it with the typed brief.
+  const [focusBriefOpen, setFocusBriefOpen] = useState(false)
+  const _runWithBrief = async (
+    focusBrief: string | null,
+  ): Promise<void> => {
+    setFocusBriefOpen(false)
     if (!documentType) return  // see note above
     const token = localStorage.getItem('fc_session_token') ?? ''
-    await runPerDocReview(documentType, null, token)
+    await runPerDocReview(
+      documentType, null, token, focusBrief)
+  }
+  const runReview = (): void => {
+    if (!documentType) return
+    setFocusBriefOpen(true)
   }
 
   // June 25 2026 -- "Export Review" button. Visible when a completed
@@ -243,6 +258,10 @@ export default function WritingAssistant({
 
   return (
     <div className="h-full overflow-y-auto p-3 space-y-4">
+      <FocusBriefModal
+        open={focusBriefOpen}
+        onSkip={() => { void _runWithBrief(null) }}
+        onSubmit={(brief) => { void _runWithBrief(brief) }} />
       {/* Academic Review */}
       <div>
         {unresolvedMarkers > 0 && (

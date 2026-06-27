@@ -7237,6 +7237,8 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     # sees it. Hard-gate the same way the deck generation does --
     # 10s refresh, 503 if it fails. Brief / appendix / script
     # reviews are unaffected (their docs use the em-dash fallback).
+    # Runs BEFORE the focus-brief body parse below so a deck-tier
+    # 503 short-circuits without consuming the body.
     if deck_review:
         ok, _signals = await _regime_signals_fresh_or_refresh()
         if not ok:
@@ -7249,6 +7251,39 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                 status_code=503,
                 detail=_REGIME_BLOCKING_ERROR_DETAIL)
 
+    # June 27 2026 -- optional pre-review focus brief. The frontend
+    # surfaces a 1000-char textarea after the cross-document confirm
+    # modal (or directly on the per-doc Run Review click); the brief
+    # is sent as JSON {focus_brief: "..."} on the POST body. The
+    # endpoint historically takes no body, so we parse defensively:
+    # any parse / type failure falls back to None (legacy no-brief
+    # behaviour). Strip + truncate at FOCUS_BRIEF_MAX_CHARS so a
+    # client that doesn't enforce the limit still produces a
+    # bounded prompt.
+    from agents.academic_review import FOCUS_BRIEF_MAX_CHARS
+    focus_brief: str | None = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            raw = body.get("focus_brief")
+            if isinstance(raw, str):
+                cleaned = raw.strip()
+                if cleaned:
+                    if len(cleaned) > FOCUS_BRIEF_MAX_CHARS:
+                        cleaned = cleaned[:FOCUS_BRIEF_MAX_CHARS]
+                    focus_brief = cleaned
+    except Exception:  # noqa: BLE001
+        # Empty body / malformed JSON / wrong content-type --
+        # silently treat as no-brief. Legacy callers that POST with
+        # no body land here.
+        focus_brief = None
+    log.info(
+        "academic_review_focus_brief",
+        focus_brief_present=bool(focus_brief),
+        focus_brief_chars=len(focus_brief or ""),
+        document_type=document_type_q,
+    )
+
     async def event_stream():
         try:
             # Capture the peer + arbiter harness runs for Team Activity, and
@@ -7259,7 +7294,8 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             start_usage_capture()
             ctx = await gather_review_context(
                 reviewer_email=session.get("email"),
-                document_type=document_type_q or None)
+                document_type=document_type_q or None,
+                focus_brief=focus_brief)
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)
             # Threaded into the chart-vision scope sentences so all-

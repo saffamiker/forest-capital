@@ -360,12 +360,16 @@ async def _resolve_team_members() -> list[tuple[str, str]]:
         return fallback
 
 
+FOCUS_BRIEF_MAX_CHARS = 1000
+
+
 def build_review_context_block(
     analytics: dict[str, Any], docs_by_type: dict[str, list[dict]],
     team_activity: dict[str, Any] | None = None,
     team_members: list[tuple[str, str]] | None = None,
     target_review_type: str | None = None,
     value_manifest: dict[str, Any] | None = None,
+    focus_brief: str | None = None,
 ) -> str:
     """
     Renders the analytics inventory, the grouped documents and the
@@ -392,8 +396,49 @@ def build_review_context_block(
     target document and therefore a target manifest -- cross-doc
     reviews intentionally skip this section (the cross-deliverable
     consistency check covers that surface).
+
+    focus_brief — June 27 2026. Optional user-supplied directive
+    surfaced to every agent at the top of the context block.
+    Authors use this to point the council at specific sections /
+    tables / known concerns without re-running the whole review
+    when the first pass missed something. Capped at
+    FOCUS_BRIEF_MAX_CHARS (1000); the endpoint validates and
+    truncates upstream. None / empty omits the section entirely so
+    no-brief runs are byte-for-byte identical to legacy behaviour.
+
+    The injected text explicitly tells the council NOT to limit
+    its review to only the flagged areas -- the brief directs
+    attention without blinding the council to other issues. This
+    instruction is critical: without it, agents would treat the
+    brief as a scope reduction and stop scanning the rest of the
+    document.
     """
     lines: list[str] = ["=== PROJECT CONTEXT FOR ACADEMIC REVIEW ===", ""]
+
+    # — Reviewer focus brief (June 27 2026) —
+    # Top of the context block (above analytics / documents) so
+    # every agent reads it before anything else. The 'Do not limit
+    # your review to only these areas' instruction is verbatim from
+    # the user spec and must be preserved to prevent scope drift.
+    if focus_brief:
+        brief_clean = focus_brief.strip()
+        if brief_clean:
+            # Defence in depth -- the endpoint caps the brief upstream
+            # at FOCUS_BRIEF_MAX_CHARS, but truncate here too so a
+            # direct caller of build_review_context_block can't
+            # blow past the limit.
+            if len(brief_clean) > FOCUS_BRIEF_MAX_CHARS:
+                brief_clean = (
+                    brief_clean[:FOCUS_BRIEF_MAX_CHARS] + "…")
+            lines.append(
+                "REVIEWER FOCUS BRIEF (from document author):")
+            lines.append(brief_clean)
+            lines.append("")
+            lines.append(
+                "Prioritize these areas in your review. Do not "
+                "limit your review to only these areas -- surface "
+                "all issues found.")
+            lines.append("")
 
     # — Analytics inventory —
     lines.append("ANALYTICS INVENTORY")
@@ -634,6 +679,7 @@ _EDITOR_TO_REVIEW_TYPE = {
 async def gather_review_context(
     reviewer_email: str | None = None,
     document_type: str | None = None,
+    focus_brief: str | None = None,
 ) -> dict[str, Any]:
     """
     Assembles the full review context: the analytics snapshot, the
@@ -654,6 +700,13 @@ async def gather_review_context(
     of the other deliverables). None (the cross-document default)
     keeps the legacy behaviour: every document type at full content
     under PROJECT DOCUMENTS.
+
+    focus_brief — June 27 2026. Optional user-supplied directive
+    that lands at the top of the assembled context block (above
+    analytics / documents) so every agent reads it before anything
+    else. Capped at FOCUS_BRIEF_MAX_CHARS by the endpoint and
+    truncated defensively in build_review_context_block. None /
+    empty omits the section entirely.
     """
     analytics = await _gather_analytics_snapshot()
     docs: list[dict] = []
@@ -732,7 +785,8 @@ async def gather_review_context(
     block = build_review_context_block(
         analytics, docs_by_type, team_activity, team_members,
         target_review_type=target_review_type,
-        value_manifest=target_value_manifest)
+        value_manifest=target_value_manifest,
+        focus_brief=focus_brief)
     present = [t for t, v in docs_by_type.items() if v]
     missing = [t for t, v in docs_by_type.items() if not v]
     log.info(
