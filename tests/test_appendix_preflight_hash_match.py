@@ -108,7 +108,7 @@ class TestAppendixPreflightHashMatch:
     def _stub_gather(self, monkeypatch):
         # Stub gather_analytical_appendix_data to return a
         # populated bundle so the post-gate path doesn't crash.
-        async def _fake_data():
+        async def _fake_data(data_hash=None):
             return {
                 "available": True,
                 "study_period": {"n_months": 287},

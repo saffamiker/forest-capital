@@ -147,7 +147,7 @@ def _stub_brief_appendix_grounding(monkeypatch):
     # reproducibility line, editor-draft creation) still
     # exercises against the [DATA PENDING] fallbacks where the
     # generators haven't been stubbed.
-    async def _fake_appendix_data():
+    async def _fake_appendix_data(data_hash=None):
         return {
             "available": True,
             "study_period": {"start": "2002-07-31",
