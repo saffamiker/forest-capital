@@ -139,6 +139,31 @@ async def lifespan(app: FastAPI):
             await refresh_academic_context()
         except Exception as exc:  # noqa: BLE001
             log.warning("academic_context_warm_failed", error=str(exc))
+        # June 26 2026 -- auto-recover drafts left in the NULL-
+        # current-draft state by a generation job that landed the
+        # editor_drafts row but crashed before content_json was
+        # written. For each document_type with is_current=true AND
+        # content_json IS NULL, demotes the broken row + restores
+        # the most recent prior good draft as is_current. Fail-
+        # open: a DB error is logged and startup continues
+        # unaffected. Idempotent (a subsequent boot finds zero
+        # broken rows and returns 0).
+        try:
+            from tools.editor_drafts import (
+                recover_null_current_drafts,
+            )
+            recovered = await recover_null_current_drafts()
+            if recovered:
+                log.warning(
+                    "editor_null_current_drafts_recovered_at_startup",
+                    count=recovered)
+            else:
+                log.info(
+                    "editor_null_current_drafts_check_clean")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "editor_null_current_drafts_startup_failed",
+                error=str(exc))
         # Auto-extend the monthly data pipeline beyond the Excel file —
         # fetch any complete calendar months that have closed since the
         # last run. A daemon thread so startup never blocks on yfinance;
@@ -3632,16 +3657,37 @@ async def post_light_refresh(
                 "light_refresh_draft_hash_update_failed",
                 error=str(exc))
 
+    # June 26 2026 -- auto-recover any draft left in the NULL-
+    # current-draft state. Runs on every light-refresh so a botched
+    # generation that raced the refresh recovers without an operator
+    # restart. Same helper used at startup; idempotent.
+    drafts_recovered = 0
+    try:
+        from tools.editor_drafts import (
+            recover_null_current_drafts as _recover,
+        )
+        drafts_recovered = await _recover()
+        if drafts_recovered:
+            log.warning(
+                "light_refresh_null_current_drafts_recovered",
+                count=drafts_recovered)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "light_refresh_null_current_drafts_failed",
+            error=str(exc))
+
     log.info(
         "light_refresh_complete",
         all_ok=all_ok,
         strategy_hash=strategy_hash,
         drafts_updated=drafts_updated,
+        drafts_recovered=drafts_recovered,
         actor=session.get("email"))
     return {
         "ok": all_ok,
         "strategy_hash": strategy_hash,
         "drafts_updated": drafts_updated,
+        "drafts_recovered": drafts_recovered,
         "steps": steps,
     }
 
