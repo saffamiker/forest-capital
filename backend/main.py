@@ -14995,6 +14995,153 @@ async def _patch_entire_document_via_sonnet(
         sections_patched, sections_skipped)
 
 
+# ── /apply-fix/refine -- multi-round proposal refinement ──────────────
+#
+# June 27 2026. The council proposes a fix; the user may want to
+# refine the proposal text across multiple cheap Sonnet calls
+# BEFORE the surgical splice runs against the document. The
+# refinement loop operates purely on the proposal text -- editor_
+# drafts is never touched until the user clicks Apply This Fix in
+# the modal (which then POSTs /apply-fix with refined_proposal_text).
+#
+# Why a separate endpoint: keeps the refine call cheap + fast
+# (target <5s). One Sonnet call with low max_tokens. The endpoint
+# never reads or writes editor_drafts, council_debates, or
+# story_plans -- it's a stateless text-rewrite.
+
+_REFINEMENT_SYSTEM_PROMPT = (
+    "You are refining a fix proposal for a section of an academic "
+    "document. The current proposed fix is:\n"
+    "{current_proposal_text}\n\n"
+    "The author requests this adjustment:\n"
+    "{refinement_note}\n\n"
+    "Return only the revised fix proposal text. Do not apply the "
+    "fix to the document. Do not add commentary.")
+
+REFINEMENT_NOTE_MAX_CHARS = 500
+REFINEMENT_PROPOSAL_MAX_CHARS = 4000
+
+
+@app.post("/api/v1/apply-fix/refine")
+@limiter.limit("30/minute")
+async def post_apply_fix_refine(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Refine a fix proposal's text with a single targeted Sonnet
+    call. The endpoint is stateless -- it accepts the current
+    working proposal text + a refinement note, returns the rewrite,
+    and never touches editor_drafts / council_debates / story_plans.
+
+    Body: {
+      fix_proposal_id:        int,
+      current_proposal_text:  str (the working proposal),
+      refinement_note:        str (max 500 chars),
+      document_type:          str,
+      section_name:           str,
+      refinement_round?:      int (client-supplied; just for logging)
+    }
+
+    Returns: { refined_proposal_text: str }
+
+    Target wall-clock: <5s. Sonnet model claude-sonnet-4-6,
+    max_tokens=1000. The proposal is short; this is a trivial call.
+
+    Validation:
+      422 -- missing fix_proposal_id / refinement_note /
+             current_proposal_text
+      413 -- refinement_note > 500 chars OR
+             current_proposal_text > 4000 chars
+      502 -- Sonnet call failed
+    """
+    import asyncio as _asyncio
+    from agents.base import SONNET_MODEL, call_claude
+
+    fix_proposal_id = body.get("fix_proposal_id")
+    current_proposal_text = body.get("current_proposal_text") or ""
+    refinement_note = body.get("refinement_note") or ""
+    document_type = str(body.get("document_type") or "")
+    section_name = body.get("section_name")
+    refinement_round = body.get("refinement_round")
+
+    if fix_proposal_id is None:
+        raise HTTPException(
+            status_code=422, detail="fix_proposal_id is required")
+    if not isinstance(current_proposal_text, str) or not current_proposal_text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="current_proposal_text is required")
+    if not isinstance(refinement_note, str) or not refinement_note.strip():
+        raise HTTPException(
+            status_code=422, detail="refinement_note is required")
+    current_proposal_text = current_proposal_text.strip()
+    refinement_note = refinement_note.strip()
+
+    if len(refinement_note) > REFINEMENT_NOTE_MAX_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"refinement_note exceeds "
+                f"{REFINEMENT_NOTE_MAX_CHARS} chars"))
+    if len(current_proposal_text) > REFINEMENT_PROPOSAL_MAX_CHARS:
+        # Defence in depth -- the proposal text upstream is
+        # patch_instruction, capped at a few hundred chars in
+        # practice. A 4000-char ceiling is a tight bound that still
+        # tolerates a verbose council proposal.
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"current_proposal_text exceeds "
+                f"{REFINEMENT_PROPOSAL_MAX_CHARS} chars"))
+
+    log.info(
+        "apply_fix_refine_invoked",
+        fix_proposal_id=fix_proposal_id,
+        document_type=document_type,
+        section_name=section_name,
+        refinement_round=refinement_round,
+        refinement_chars=len(refinement_note),
+        proposal_chars=len(current_proposal_text))
+
+    if ENVIRONMENT == "test":
+        # Deterministic stub so tests can exercise the endpoint
+        # without round-tripping a live LLM.
+        return {
+            "refined_proposal_text": (
+                f"{current_proposal_text}\n\n"
+                f"[refined: {refinement_note}]"),
+        }
+
+    user_message = _REFINEMENT_SYSTEM_PROMPT.format(
+        current_proposal_text=current_proposal_text,
+        refinement_note=refinement_note)
+    try:
+        raw = await _asyncio.to_thread(
+            call_claude,
+            SONNET_MODEL,
+            "You are a precise editor of fix-proposal text.",
+            user_message,
+            max_tokens=1000,
+            trigger="apply_fix_refine")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_refine_call_failed",
+            fix_proposal_id=fix_proposal_id, error=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Refinement call failed: {exc}")
+    refined = (raw or "").strip()
+    if not refined:
+        log.warning(
+            "apply_fix_refine_empty_response",
+            fix_proposal_id=fix_proposal_id)
+        raise HTTPException(
+            status_code=502,
+            detail="Refinement produced an empty response.")
+    return {"refined_proposal_text": refined}
+
+
 @app.post("/api/v1/documents/apply-fix")
 @limiter.limit("6/minute")
 async def post_apply_fix(
@@ -15060,6 +15207,22 @@ async def post_apply_fix(
     debate_id = body.get("debate_id")
     section_name = fix.get("section_name")
     email = session.get("email") or ""
+    # June 27 2026 -- the refinement flow does NOT flow through
+    # this endpoint. Refined patch text is sent to
+    # /propose-fix-text via the refined_proposal_text field so the
+    # mandatory diff preview always renders before any write.
+    # Sending refined_proposal_text here is rejected to prevent a
+    # direct-commit path that skips the diff.
+    if isinstance(body.get("refined_proposal_text"), str) and (
+            body["refined_proposal_text"].strip()):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "refined_proposal_text is not accepted on "
+                "apply-fix -- refined patches must flow through "
+                "/propose-fix-text so the diff preview always "
+                "renders before write. Call /propose-fix-text "
+                "with refined_proposal_text instead."))
     if ENVIRONMENT == "test":
         # In test, return a deterministic stub so the apply-fix
         # endpoint shape is exercised without running the live
@@ -15353,6 +15516,31 @@ async def post_propose_fix_text(
         raise HTTPException(
             status_code=422,
             detail="patch_instruction is empty on this proposal.")
+    # June 27 2026 -- multi-round refinement. The frontend
+    # RefinementModal iteratively rewrites the proposal text via
+    # cheap /apply-fix/refine calls, then sends the final working
+    # text here as refined_proposal_text. When present + non-empty,
+    # it OVERRIDES the stored patch_instruction for THIS preview
+    # only -- the council's stored proposal is unchanged. The user
+    # still sees the mandatory diff preview before any write, and
+    # accept-fix-text writes the cached suggested_section_json
+    # against the current draft. This is the ONLY entry point for
+    # the refined patch; apply-fix rejects the field outright.
+    refined_raw = body.get("refined_proposal_text")
+    refined_proposal_text: str | None = None
+    if isinstance(refined_raw, str) and refined_raw.strip():
+        refined_proposal_text = refined_raw.strip()
+        patch_instruction = refined_proposal_text
+    log.info(
+        "propose_fix_text_invoked",
+        debate_id=debate_id,
+        finding_id=finding_id,
+        section_name=section_name,
+        document_type=document_type,
+        refined=bool(refined_proposal_text),
+        refinement_chars=(
+            len(refined_proposal_text)
+            if refined_proposal_text else 0))
     if not section_name:
         raise HTTPException(
             status_code=409,
@@ -15373,8 +15561,16 @@ async def post_propose_fix_text(
     cached_suggested = proposal.get("suggested_text")
     cached_original = proposal.get("original_text")
     cached_suggested_json = proposal.get("suggested_section_json")
+    # June 27 2026 -- refinement bypass. The idempotency cache
+    # holds the preview computed against the ORIGINAL stored
+    # patch_instruction. A refinement round changed the input, so
+    # the cached preview no longer matches -- recompute and DO NOT
+    # write through to the cache (the next non-refined call should
+    # still get the original preview back unless explicitly
+    # invalidated upstream).
     if (cached_suggested and cached_original
-            and cached_suggested_json is not None):
+            and cached_suggested_json is not None
+            and refined_proposal_text is None):
         log.info(
             "propose_fix_text_cache_hit",
             debate_id=debate_id, finding_id=finding_id)

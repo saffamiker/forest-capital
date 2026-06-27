@@ -40,12 +40,13 @@ import { Link } from 'react-router-dom'
 import axios from 'axios'
 import {
   Wrench, Loader2, AlertCircle, CheckCircle, ChevronDown,
-  ChevronRight, Check, X, ExternalLink,
+  ChevronRight, Check, X, ExternalLink, Sparkles,
 } from 'lucide-react'
 
 import type {
   CriticFinding,
 } from '../stores/academicReviewStore'
+import RefinementModal from './RefinementModal'
 
 
 // June 27 2026 -- the suggestion shape returned by POST
@@ -187,6 +188,14 @@ export default function FixProposalCard(
   const [rejected, setRejected] = useState(false)
   const [inlineApplied, setInlineApplied] = useState(false)
 
+  // June 27 2026 -- multi-round refinement state. refinementOpen
+  // gates the RefinementModal; refineApplying covers the final
+  // /apply-fix POST from the modal's Apply This Fix button. The
+  // refined proposal text is in-flight only -- never persisted
+  // alongside the council's stored proposal.
+  const [refinementOpen, setRefinementOpen] = useState(false)
+  const [refineApplying, setRefineApplying] = useState(false)
+
   // Surface a structured 422/409 from the inline-fix endpoints
   // with an actionable editor deep-link. Replaces every previous
   // "regenerate" code path -- the user always edits directly when
@@ -300,6 +309,53 @@ export default function FixProposalCard(
       await _surfaceInlineError(
         err, 'Could not preview inline edit.')
     } finally {
+      setInlineBusy(false)
+    }
+  }
+
+  // June 27 2026 -- Refine flow. The RefinementModal iteratively
+  // rewrites the proposal text via cheap /apply-fix/refine calls
+  // (stateless, no document changes). On Apply This Fix the modal
+  // hands back the (possibly refined) text and we run THE SAME
+  // preview-and-accept flow as the regular Apply Fix button --
+  // refined_proposal_text rides as a body field on
+  // /propose-fix-text. The mandatory diff preview ALWAYS renders;
+  // the document is NEVER touched until the user clicks Accept on
+  // the diff. The direct-commit path is explicitly rejected by
+  // /apply-fix (422) so a frontend regression can't bypass the
+  // diff.
+  const handleRefineApply = async (
+    refinedText: string,
+  ): Promise<void> => {
+    if (!debateId) {
+      setError(
+        'No debate id -- cannot preview the refined patch.')
+      setRefinementOpen(false)
+      return
+    }
+    setRefineApplying(true)
+    setError(null)
+    setErrorDetail(null)
+    setEditorLink(null)
+    // Close the modal first so the diff appears in its place
+    // immediately when the preview lands.
+    setRefinementOpen(false)
+    setInlineBusy(true)
+    try {
+      const res = await axios.post<InlineFixSuggestion>(
+        `/api/v1/council/debates/${debateId}/propose-fix-text`,
+        {
+          finding_id: findingId,
+          refined_proposal_text: refinedText,
+        })
+      setSuggestion(res.data)
+      ACTIVE_SUGGESTION_REGISTRY.findingId = findingId
+      ACTIVE_SUGGESTION_REGISTRY.documentType = documentType
+    } catch (err) {
+      await _surfaceInlineError(
+        err, 'Could not preview the refined patch.')
+    } finally {
+      setRefineApplying(false)
       setInlineBusy(false)
     }
   }
@@ -454,7 +510,8 @@ export default function FixProposalCard(
                   <button
                     type="button"
                     onClick={() => { void handlePreviewInline() }}
-                    disabled={inlineBusy || suggestion !== null}
+                    disabled={inlineBusy || suggestion !== null
+                      || refineApplying}
                     data-testid={`apply-fix-${findingId}`}
                     title="Preview a section-scoped patch you can accept or reject. No full-document regeneration."
                     className="flex items-center gap-1.5 text-2xs
@@ -472,7 +529,45 @@ export default function FixProposalCard(
                               Apply Fix</>)}
                   </button>
                 )}
+                {/* June 27 2026 -- Refine button. Opens the
+                    RefinementModal seeded with the original
+                    proposal text. The user iteratively rewrites
+                    the patch text via cheap Sonnet calls against
+                    /apply-fix/refine; the document is NEVER
+                    touched until Apply This Fix in the modal
+                    POSTs /apply-fix with refined_proposal_text. */}
+                {!inlineApplied && (
+                  <button
+                    type="button"
+                    onClick={() => setRefinementOpen(true)}
+                    disabled={inlineBusy || refineApplying
+                      || suggestion !== null}
+                    data-testid={`refine-fix-${findingId}`}
+                    title="Iteratively refine the fix proposal text before applying. No document changes until Apply This Fix."
+                    className="flex items-center gap-1.5 text-2xs
+                                px-2 py-1 rounded
+                                border border-electric/50
+                                text-electric hover:bg-electric/10
+                                disabled:opacity-50
+                                disabled:cursor-not-allowed">
+                    <Sparkles className="w-3 h-3" />
+                    Refine
+                  </button>
+                )}
               </div>
+              {refinementOpen && localProposal && (
+                <RefinementModal
+                  open={refinementOpen}
+                  originalProposalText={
+                    localProposal.patch_instruction}
+                  fixProposalId={findingId}
+                  documentType={documentType}
+                  sectionName={localProposal.section_name}
+                  onCancel={() => setRefinementOpen(false)}
+                  onApply={(text) => {
+                    void handleRefineApply(text)
+                  }} />
+              )}
 
               {/* Copilot-style diff panel. Shows the affected
                   section's existing prose with a red strikethrough,
