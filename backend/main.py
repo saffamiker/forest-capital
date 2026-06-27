@@ -6208,147 +6208,6 @@ async def _regime_signals_fresh_or_refresh() -> tuple[bool, dict | None]:
     return True, fresh
 
 
-# ── Hash-aware CIO recommendation loader (June 27 2026) ─────────────────────
-#
-# The three document generators (brief, deck, appendix) route through
-# tools.submission_freeze.get_effective_data_hash so they lock to the
-# freeze hash on submission day. But the CIO recommendation row that
-# populates {{REGIME_CONFIDENCE}} / {{CURRENT_REGIME}} / implied-
-# allocation tokens has historically been pulled via the unconditional
-# `get_latest_recommendation()` — which returns the LIVE row regardless
-# of the freeze. Result: under freeze, the deck's substitution table is
-# keyed by the freeze hash but populated with LIVE CIO values. The
-# user-reported regression (slide 7 showed live confidence 62.7%
-# instead of the freeze-time 95.4%) is the canonical symptom.
-#
-# This helper enforces the freeze: when the effective hash differs from
-# the live hash, it MUST find a CIO row matching the freeze hash. A
-# miss raises HTTPException 500 with the spec error message; the
-# operator runs Light Refresh (which now also recomputes the CIO for
-# the active hash) and retries.
-#
-# When freeze is NOT active (effective_hash == live_hash), the helper
-# falls through to get_latest_recommendation() — identical to legacy
-# behaviour. No live-platform impact.
-
-
-_DECK_EXPORT_FAIL_MESSAGE = (
-    "Export failed: slide {slide} data unavailable. "
-    "Run light refresh and try again.")
-
-
-async def _resolve_hash_aware_cio_row(
-    *, data_hash: str, live_hash: str,
-    document_type: str,
-) -> dict | None:
-    """Returns the CIO recommendation row appropriate for the
-    effective data_hash. When freeze is active (data_hash != live_hash)
-    the row MUST match the freeze hash; a miss raises HTTPException 500
-    with the spec 'Run light refresh and try again' message. When
-    freeze is not active, falls through to get_latest_recommendation().
-
-    document_type is used only for the error message + structured log
-    so a deck-vs-brief-vs-appendix failure is distinguishable.
-    """
-    from tools.cio_recommendation import (
-        get_cached_for_hash, get_latest_recommendation,
-    )
-    freeze_active = (
-        bool(data_hash) and bool(live_hash) and data_hash != live_hash)
-    if freeze_active:
-        cio_row = await get_cached_for_hash(data_hash)
-        if cio_row is None:
-            # The freeze hash has no CIO row in cio_recommendations.
-            # Per the user's spec, fail loudly rather than fall back
-            # to the live row (which would silently leak post-freeze
-            # values into the freeze-locked deliverable).
-            log.warning(
-                "doc_export_cio_missing_for_freeze_hash",
-                document_type=document_type,
-                freeze_hash=data_hash[:8],
-                live_hash=live_hash[:8],
-                hint=(
-                    "Run /api/v1/light-refresh to recompute the CIO "
-                    "for the active freeze hash, then retry export."))
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Export failed: CIO recommendation unavailable "
-                    f"for freeze hash {data_hash[:8]}. Run light "
-                    "refresh and try again."))
-        log.info(
-            "doc_export_cio_hash_aware",
-            document_type=document_type,
-            freeze_hash=data_hash[:8],
-            row_hash=str(cio_row.get("data_hash") or "")[:8])
-        return cio_row
-    # Freeze inactive -- legacy behaviour.
-    return await get_latest_recommendation()
-
-
-async def _resolve_hash_aware_live_signals(
-    *, data_hash: str, live_hash: str,
-    document_type: str,
-) -> dict | None:
-    """Returns the regime_signals payload for watchpoint tokens.
-
-    The regime_signals_cache table is a single-row 15-min TTL cache
-    with NO live hash-aware variant -- it's by-design a LIVE-platform
-    construct. Under freeze, returning the live cache would leak post-
-    freeze signals into the freeze-locked deliverable.
-
-    Resolution order under freeze:
-      1. Try get_regime_snapshot_for_hash(data_hash) -- a row written
-         by submission_freeze.set_freeze_config at freeze activation,
-         capturing the live cache as of that moment.
-      2. On snapshot miss, return None + log freeze_regime_unavailable.
-         Watchpoint tokens render em-dash (the explicit 'data
-         unavailable for this hash' character, NOT the deprecated
-         [DATA PENDING] placeholder). NEVER fall back to the live
-         cache -- the freeze deliverable would be misleading.
-
-    When freeze is not active, returns the live cache as before.
-    """
-    freeze_active = (
-        bool(data_hash) and bool(live_hash) and data_hash != live_hash)
-    if freeze_active:
-        try:
-            from tools.cache import get_regime_snapshot_for_hash
-            snapshot = await get_regime_snapshot_for_hash(data_hash)
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "doc_export_regime_snapshot_read_failed",
-                document_type=document_type,
-                freeze_hash=data_hash[:8],
-                error=str(exc))
-            snapshot = None
-        if snapshot is not None:
-            log.info(
-                "doc_export_live_signals_from_freeze_snapshot",
-                document_type=document_type,
-                freeze_hash=data_hash[:8])
-            return snapshot
-        log.warning(
-            "freeze_regime_unavailable",
-            document_type=document_type,
-            freeze_hash=data_hash[:8],
-            note=(
-                "no regime_signals_snapshots row for the active "
-                "freeze hash; watchpoint tokens will render em-dash. "
-                "Re-activate the freeze to capture a fresh snapshot, "
-                "or accept the em-dash rendering for these tokens."))
-        return None
-    # Freeze inactive -- legacy behaviour.
-    try:
-        from tools.cache import get_regime_cache
-        return await get_regime_cache()
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "doc_export_live_signals_read_failed",
-            document_type=document_type, error=str(exc))
-        return None
-
-
 # ── Optimize ──────────────────────────────────────────────────────────────────
 
 async def _strategy_portfolio_points() -> list[dict]:
@@ -16875,11 +16734,7 @@ async def _generate_brief_document(
             # isolates document generation only.
             live_hash = await current_data_hash()
             data_hash = await get_effective_data_hash(live_hash)
-            # June 27 2026 -- hash-aware CIO load (same fix as deck).
-            cio_row = await _resolve_hash_aware_cio_row(
-                data_hash=data_hash or "",
-                live_hash=live_hash or "",
-                document_type="executive_brief")
+            cio_row = await get_latest_recommendation()
             # CURRENT_*_PCT tokens need the implied asset
             # allocation -- compute once from the CIO blend weights.
             implied_alloc: dict | None = None
@@ -16889,13 +16744,24 @@ async def _generate_brief_document(
                         cio_row.get("blend_weights"))
             except Exception as _exc:  # noqa: BLE001
                 log.warning("brief_implied_alloc_failed", error=str(_exc))
-            # June 27 2026 -- live_signals via hash-aware helper.
-            # Under freeze returns None so watchpoint tokens render
-            # em-dash instead of leaking post-freeze signals.
-            live_signals = await _resolve_hash_aware_live_signals(
-                data_hash=data_hash or "",
-                live_hash=live_hash or "",
-                document_type="executive_brief")
+            # June 22 2026 (PR A) -- read regime_signals_cache for the
+            # 5 watchpoint tokens. 15-min TTL; falls back to em-dash
+            # inside build_substitution_table if cold. Same wiring
+            # as the deck callsite; brief sections 1/5/6 reference
+            # current_regime and equity weight.
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "brief_live_signals_stale",
+                        document_type="executive_brief",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("brief_live_signals_read_failed",
+                            error=str(_exc))
             # June 22 2026 (wiring fix) -- read analytics metrics
             # for pre/post 2022 Sharpes, factor loadings, and
             # cost sensitivity tokens. See
@@ -16904,6 +16770,11 @@ async def _generate_brief_document(
             from tools.academic_export import (
                 load_substitution_metric_sources,
             )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
             regime_conditional_rows, factor_loadings_rows, \
                 cost_sensitivity_payload, crisis_payload = (
                     await load_substitution_metric_sources(
@@ -17510,11 +17381,7 @@ async def _generate_appendix_document(
             # locks to the frozen hash on submission day.
             live_hash = await current_data_hash()
             data_hash = await get_effective_data_hash(live_hash)
-            # June 27 2026 -- hash-aware CIO load (same fix as deck + brief).
-            cio_row = await _resolve_hash_aware_cio_row(
-                data_hash=data_hash or "",
-                live_hash=live_hash or "",
-                document_type="analytical_appendix")
+            cio_row = await get_latest_recommendation()
             implied_alloc: dict | None = None
             try:
                 if cio_row and cio_row.get("blend_weights"):
@@ -17522,19 +17389,34 @@ async def _generate_appendix_document(
                         cio_row.get("blend_weights"))
             except Exception as _exc:  # noqa: BLE001
                 log.warning("appendix_implied_alloc_failed", error=str(_exc))
-            # June 27 2026 -- live_signals via hash-aware helper.
-            # Under freeze returns None so watchpoint tokens render
-            # em-dash instead of leaking post-freeze signals.
-            live_signals = await _resolve_hash_aware_live_signals(
-                data_hash=data_hash or "",
-                live_hash=live_hash or "",
-                document_type="analytical_appendix")
+            # June 22 2026 (PR A) -- read regime_signals_cache. Same
+            # wiring as brief + deck callsites; the appendix's
+            # Section G (cost sensitivity + recommendation) cites
+            # the current regime + watchpoint posture.
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "appendix_live_signals_stale",
+                        document_type="analytical_appendix",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("appendix_live_signals_read_failed",
+                            error=str(_exc))
             # June 22 2026 (wiring fix) -- read analytics metrics
             # for pre/post 2022 Sharpes, factor loadings, and
             # cost sensitivity tokens.
             from tools.academic_export import (
                 load_substitution_metric_sources,
             )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
             regime_conditional_rows, factor_loadings_rows, \
                 cost_sensitivity_payload, crisis_payload = (
                     await load_substitution_metric_sources(
@@ -18781,16 +18663,7 @@ async def _generate_deck_document(
             # the frozen hash on submission day.
             live_hash = await current_data_hash()
             data_hash = await get_effective_data_hash(live_hash)
-            # June 27 2026 -- hash-aware CIO load. Under freeze the
-            # row MUST match the freeze hash so {{REGIME_CONFIDENCE}}
-            # + implied-allocation tokens reflect submission-time
-            # values, not post-freeze live drift. Helper raises
-            # HTTPException 500 ('Run light refresh and try again')
-            # when the freeze hash has no cio_recommendations row.
-            cio_row = await _resolve_hash_aware_cio_row(
-                data_hash=data_hash or "",
-                live_hash=live_hash or "",
-                document_type="presentation_deck")
+            cio_row = await get_latest_recommendation()
             implied_alloc: dict | None = None
             try:
                 if cio_row and cio_row.get("blend_weights"):
@@ -18798,17 +18671,27 @@ async def _generate_deck_document(
                         cio_row.get("blend_weights"))
             except Exception as _exc:  # noqa: BLE001
                 log.warning("deck_implied_alloc_failed", error=str(_exc))
-            # June 27 2026 -- live_signals routed through the hash-
-            # aware helper. Under freeze, returns None so the
-            # watchpoint tokens render em-dash (the explicit 'data
-            # unavailable for this hash' character, NOT the
-            # deprecated [DATA PENDING] placeholder). When freeze
-            # is not active, returns the regime_signals_cache row
-            # as before.
-            live_signals = await _resolve_hash_aware_live_signals(
-                data_hash=data_hash or "",
-                live_hash=live_hash or "",
-                document_type="presentation_deck")
+            # June 22 2026 (PR A) -- read regime_signals_cache for the
+            # 5 watchpoint tokens on slide 7 (VIX / yield curve /
+            # credit spread / equity trend). 15-min TTL; falls back
+            # to em-dash inside build_substitution_table if cold.
+            # Staleness check: get_regime_cache returns None when
+            # the cached row is past its expires_at; we log so the
+            # operator can spot a stale render. We do NOT block on
+            # a fresh detect call (would add 30-60s to deck gen).
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "deck_live_signals_stale",
+                        document_type="presentation_deck",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("deck_live_signals_read_failed",
+                            error=str(_exc))
             from tools.academic_deck import OOS_WINDOW_PCT_OF_STUDY
             # June 22 2026 (wiring fix) -- read analytics metrics
             # for pre/post 2022 Sharpes, factor loadings, and cost
@@ -18818,6 +18701,11 @@ async def _generate_deck_document(
             from tools.academic_export import (
                 load_substitution_metric_sources,
             )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
             regime_conditional_rows, factor_loadings_rows, \
                 cost_sensitivity_payload, crisis_payload = (
                     await load_substitution_metric_sources(

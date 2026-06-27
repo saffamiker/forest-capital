@@ -201,33 +201,6 @@ async def set_freeze_config(
         freeze_hash=(freeze_hash or "")[:8] if freeze_hash else None,
         activated_by=activated_by,
     )
-
-    # June 27 2026 -- on freeze activation, snapshot the current
-    # regime_signals_cache row into the hash-keyed snapshot table so
-    # document generators under freeze can pull the SAME live
-    # signals that were current at activation time. Pass the
-    # current signals explicitly (read once, snapshot once) rather
-    # than letting the snapshot helper re-read inside its own
-    # transaction. Without the snapshot, deck/brief/appendix exports
-    # under freeze fall back to live_signals=None (watchpoint tokens
-    # render em-dash). Best-effort -- a snapshot write failure logs
-    # but does not roll back the freeze activation. The snapshot
-    # write is idempotent (ON CONFLICT DO NOTHING) so a re-activate
-    # of the same hash preserves the original capture.
-    if active and freeze_hash:
-        try:
-            from tools.cache import (
-                snapshot_regime_signals_for_hash, get_regime_cache,
-            )
-            current_signals = await get_regime_cache()
-            await snapshot_regime_signals_for_hash(
-                freeze_hash, current_signals)
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "submission_freeze_regime_snapshot_failed",
-                freeze_hash=freeze_hash[:8],
-                error=str(exc))
-
     return payload
 
 

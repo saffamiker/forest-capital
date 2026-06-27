@@ -99,16 +99,22 @@ _TRADING_DAYS_PER_MONTH = 21
 #         version bump invalidates v3 entries on first post-
 #         deploy request so the new tokens land in the cached
 #         tables that the editor + audit + receipt all read from.
-# June 27 2026 -- bumped 4 -> 5 alongside the freeze-hash-aware
-# document generator refactor (PR adding hash-aware CIO row + regime
-# snapshot reads in _generate_deck_document / brief / appendix). The
-# previous cached substitution tables held LIVE CIO values under
-# freeze-keyed entries (the cache key included data_hash but the
-# CIO row that populated the table was the live row regardless of
-# hash). Bumping the version invalidates every stale entry on first
-# post-deploy read so the new hash-aware load path repopulates the
-# cache with freeze-correct values.
-_CACHE_VERSION = 5
+# June 27 2026 -- bumped 4 -> 6. The Bug 2 root cause (slide 7
+# regime confidence 62.7% instead of the freshly-computed 95.4%)
+# was the substitution table being cache-keyed only by data_hash,
+# so a LIVE CIO row update did not invalidate the cached table.
+# Fix: _cache_key now includes the cio_recommendation row's
+# stable identity (id / recommendation_id / computed_at) so a CIO
+# update naturally invalidates the cache. Bumping the cache
+# version invalidates every pre-fix cached entry on first post-
+# deploy read so the new key-shape takes effect immediately.
+#
+# Note: live CIO + regime tokens are intentionally LIVE -- not
+# frozen by submission_freeze. Only historical analytics tokens
+# (regime_conditional / factor_loadings / cost_sensitivity /
+# crisis_performance) are in the freeze scope; that path is
+# handled by load_substitution_metric_sources(data_hash=...).
+_CACHE_VERSION = 6
 
 
 def format_sharpe(v: Any) -> str:
@@ -883,23 +889,46 @@ _substitution_cache: dict[tuple, dict[str, str]] = {}
 
 
 def _cache_key(
-    data_hash: str, kwargs: dict,
-) -> tuple[int, str, bool, bool, bool, bool]:
+    data_hash: str,
+    kwargs: dict,
+    cio_recommendation: dict | None = None,
+) -> tuple[int, str, bool, bool, bool, bool, str]:
     """Compose the composite cache key for get_substitution_table.
 
     Returns (version, data_hash, has_regime_conditional,
     has_factor_loadings, has_cost_sensitivity,
-    has_crisis_performance). bool() is used instead of length so
-    callers passing an empty list still get distinct treatment
-    from callers passing None -- but two callers passing non-empty
-    lists land on the same key (the data_hash plus the
-    analytics_metrics_cache version handle deeper content
-    invalidation).
+    has_crisis_performance, cio_identity). bool() is used instead
+    of length so callers passing an empty list still get distinct
+    treatment from callers passing None -- but two callers passing
+    non-empty lists land on the same key.
 
-    June 22 2026 -- 6th element added for crisis_performance kwarg
-    (PR adding crisis-window drawdown tokens). _CACHE_VERSION
-    bumped to 3 in parallel so pre-fix cached entries miss on
-    the first post-deploy request."""
+    June 22 2026 -- 6th element added for crisis_performance kwarg.
+    _CACHE_VERSION bumped to 3 in parallel.
+
+    June 27 2026 -- 7th element added for cio_recommendation
+    identity. Bug 2 root cause was: the live CIO row updates
+    (regime confidence 95.4% -> 62.7%) but the substitution table
+    was cache-keyed only by data_hash, so the stale cached table
+    kept serving the OLD confidence even after the CIO updated.
+    The cio_identity element is the recommendation row's stable id
+    (or computed_at ISO string as fallback) so a CIO update
+    naturally invalidates the cache. Empty string when no CIO row
+    -- legacy callers without a CIO are unaffected. _CACHE_VERSION
+    bumped to 6 in parallel so every pre-fix cached entry misses
+    on first post-deploy read.
+    """
+    cio_identity = ""
+    if isinstance(cio_recommendation, dict):
+        # Prefer id (stable PK); fall back to computed_at (monotonic
+        # per recompute); fall back to empty string (treated as
+        # 'no CIO' -- identical to None case so legacy behaviour
+        # holds).
+        raw = (
+            cio_recommendation.get("id")
+            or cio_recommendation.get("recommendation_id")
+            or cio_recommendation.get("computed_at"))
+        if raw is not None:
+            cio_identity = str(raw)
     return (
         _CACHE_VERSION,
         data_hash,
@@ -907,6 +936,7 @@ def _cache_key(
         bool(kwargs.get("factor_loadings")),
         bool(kwargs.get("cost_sensitivity")),
         bool(kwargs.get("crisis_performance")),
+        cio_identity,
     )
 
 
@@ -958,7 +988,7 @@ def get_substitution_table(
                 table, strategy_cache,
                 factor_loadings=factor_loadings_for_append)
         return table
-    key = _cache_key(data_hash, kwargs)
+    key = _cache_key(data_hash, kwargs, cio_recommendation)
     if rebuild or key not in _substitution_cache:
         table = build_substitution_table(
             strategy_cache, cio_recommendation, data_hash, **kwargs)
