@@ -728,6 +728,7 @@ _STORY_PLAN_TOLERANCE = 0.01
 def _count_unauthorized_numbers(
     prose: str,
     anchor_values: list[float],
+    substitution_table: dict[str, str] | None = None,
 ) -> list[str]:
     """Returns the list of token strings in prose that are NOT in
     the anchor_values set (within _STORY_PLAN_TOLERANCE) and NOT
@@ -736,9 +737,33 @@ def _count_unauthorized_numbers(
     document_audit.check_brief_story_plan_violations but on a
     per-section scope.
 
-    Empty list = no unauthorized numbers -> no retry needed."""
+    Empty list = no unauthorized numbers -> no retry needed.
+
+    June 28 2026 (Fix 9) -- the structural-exemption registry
+    from tools.untoken_numeric_check is consulted before
+    flagging a numeric as a violation. Without this, the story-
+    plan check produces noise-violation counts of 20-30+ per
+    section because the LLM correctly emits ordinals (Section
+    2 / Figure 3), citation years ((Smith, 2020)), document-
+    format references (5 pages / 16 slides), methodology
+    constants (10,000 resamples / 12-month block), index names
+    (S&P 500), and definitional weights (60% equity / 40%
+    bonds) -- ALL of which are structurally exempt from the
+    hard-lock scanner but the story-plan check was treating
+    as bare numbers. The result: failing retries that produce
+    MORE violations than the original, scores tanking below
+    6.0 on substantively-correct content.
+
+    Substitution-table-priority constraint preserved: a value
+    that IS in the substitution table flags as a violation
+    (no exemption) so the writer gets feedback to swap the
+    raw value for the matching {{TOKEN}}."""
     if not prose or not anchor_values:
         return []
+    from tools.untoken_numeric_check import (
+        _matches_structural_pattern, _build_token_index,
+    )
+    value_to_token = _build_token_index(substitution_table or {})
     found: list[str] = []
     seen: set[float] = set()
     for m in _STORY_PLAN_NUMBER_RE.finditer(prose):
@@ -759,6 +784,20 @@ def _count_unauthorized_numbers(
         if any(abs(val - a) <= _STORY_PLAN_TOLERANCE
                for a in anchor_values):
             continue
+        # June 28 2026 (Fix 9) -- structural-exemption check.
+        # Substitution-table values are NEVER exempted (the LLM
+        # gets the swap suggestion in feedback); other
+        # structural-prose numerics (ordinals, citation years,
+        # S&P index name, definitional weights, methodology
+        # counts, document-format references, etc.) are exempt.
+        in_table = tok in value_to_token or (
+            tok.rstrip("%") in value_to_token) or (
+            (tok + "%") in value_to_token)
+        if not in_table:
+            structural_name = _matches_structural_pattern(
+                tok, prose, m.span(1))
+            if structural_name is not None:
+                continue
         seen.add(val)
         found.append(tok)
     return found
@@ -1110,7 +1149,8 @@ def harness_narrative(
                         continue
                 if anchor_values:
                     bad = _count_unauthorized_numbers(
-                        final_text, anchor_values)
+                        final_text, anchor_values,
+                        substitution_table=substitution_table)
                     if len(bad) >= _STORY_PLAN_VIOLATION_RETRY_THRESHOLD:
                         log.info(
                             "harness_story_plan_violation_retry",
@@ -1140,7 +1180,8 @@ def harness_narrative(
                             feedback_prompt)
                         retry_clean = _strip_banner(retry_text) or ""
                         retry_bad = _count_unauthorized_numbers(
-                            retry_clean, anchor_values)
+                            retry_clean, anchor_values,
+                            substitution_table=substitution_table)
                         if (retry_clean
                                 and len(retry_bad) < len(bad)):
                             log.info(
