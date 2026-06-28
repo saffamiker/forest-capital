@@ -154,6 +154,28 @@ _MARKDOWN_BOLD_RE = re.compile(r"\*\*(?P<inner>[^*\n]+)\*\*")
 # narrow -- only brief narratives route through there.
 _MD_HEADING_LINE_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
 
+# June 28 2026 (Fix 1) -- LLM-generated section-restate headings
+# the brief narrative occasionally leads with. The outer brief
+# builder already emits Heading1 for each section
+# ("1. Executive Summary"); if the LLM also opens its narrative
+# with "## Section 1: Executive Summary" or "## Section 1: ...",
+# we get a duplicate heading rendering. Match the SECTION pattern
+# and skip the inline restate entirely.
+#
+# Tolerates the bold-wrapped form "## **Section 1: ...**" and
+# the bold-only form "**Section 1: ...**" without a markdown
+# heading prefix.
+_SECTION_RESTATE_RE = re.compile(
+    r"^(?:\*{0,2})\s*section\s*\d+\s*[:\-\.]",
+    re.IGNORECASE)
+
+# June 28 2026 (Fix 2) -- strip leading/trailing markdown bold
+# markers from a heading line. The LLM occasionally wraps the
+# whole heading text in ** so the DOCX heading paragraph would
+# render with literal ** characters; the heading style
+# already applies bold weighting via its template setting.
+_HEADING_BOLD_WRAP_RE = re.compile(r"^\*{1,3}|\*{1,3}$")
+
 
 def _add_md_heading_paragraph(
     doc: Document, text: str, level: int,
@@ -230,6 +252,15 @@ def _add_brief_body(doc: Document, text: str) -> None:
         if not block:
             continue
         first_line, _, rest = block.partition("\n")
+        # June 28 2026 (Fix 1) -- the bare-bold restate form,
+        # e.g. "**Section 2: Methodology**" as a standalone
+        # paragraph with no markdown heading prefix. Skip the
+        # restate line + write any remainder.
+        if _SECTION_RESTATE_RE.match(first_line.strip()):
+            if rest.strip():
+                _add_body(doc, rest)
+                real_heading_seen = True
+            continue
         m = _MD_HEADING_LINE_RE.match(first_line.strip())
         if m is None:
             _add_body(doc, block)
@@ -237,6 +268,16 @@ def _add_brief_body(doc: Document, text: str) -> None:
             continue
         level = len(m.group(1))
         heading_text = m.group(2).strip()
+        # June 28 2026 (Fix 1) -- skip section-restate headings
+        # the LLM emits inline. The outer brief builder already
+        # rendered the section's Heading1; the LLM's
+        # "## Section N: Title" / "## **Section N: Title**" /
+        # "**Section N: Title**" prefix is a duplicate.
+        if _SECTION_RESTATE_RE.match(heading_text):
+            if rest.strip():
+                _add_body(doc, rest)
+                real_heading_seen = True
+            continue
         # Cover-title duplicate detection -- the gate stays open
         # until the first REAL (non-cover) heading lands, so a
         # leading sequence of cover-dupe H1/H2 lines (the LLM
@@ -250,6 +291,11 @@ def _add_brief_body(doc: Document, text: str) -> None:
                     _add_body(doc, rest)
                     real_heading_seen = True
                 continue
+        # June 28 2026 (Fix 2) -- strip ** wrappers from the
+        # heading text. The heading style template already
+        # bolds; literal ** would render as visible characters.
+        heading_text = _HEADING_BOLD_WRAP_RE.sub(
+            "", heading_text).strip()
         real_heading_seen = True
         _add_md_heading_paragraph(doc, heading_text, level)
         if rest.strip():
