@@ -812,6 +812,18 @@ def harness_narrative(
     # raising UntokenNumericLockError. None / non-protected
     # types preserve the legacy single-pass behaviour.
     document_type: str | None = None,
+    # June 28 2026 -- async-resolved deferral flag passed in
+    # from the async caller (e.g. _generate_narratives awaits
+    # is_defer_substitution_enabled() ONCE before launching
+    # asyncio.to_thread jobs and threads the bool through here).
+    # Eliminates the failed asyncio.run-from-worker-thread path
+    # which raised "Future attached to a different loop" because
+    # SQLAlchemy's async session is bound to the main event
+    # loop; opening a fresh loop in a worker thread cannot reuse
+    # connections from the main loop's pool. With the bool
+    # pre-resolved, the worker thread never touches the loop
+    # boundary. Default False = legacy behaviour (no deferral).
+    defer_substitution: bool = False,
 ) -> str:
     """
     Generates one section of academic prose through the Academic Writer
@@ -1288,20 +1300,22 @@ def harness_narrative(
                 and substitution_table is not None
                 and final_text):
             try:
-                from tools.platform_flags import (
-                    is_defer_substitution_enabled_sync,
-                )
-                # harness_narrative runs synchronously inside
-                # asyncio.to_thread (see _generate_narratives
-                # jobs.append at main.py:13719) so the sync
-                # variant is the right reader -- it opens its
-                # own asyncio.run when no event loop is running.
-                _flag_state = is_defer_substitution_enabled_sync()
+                # June 28 2026 -- the deferral flag is now
+                # pre-resolved by the async caller and threaded
+                # in as `defer_substitution`. Reads from inside
+                # this worker thread raised "Future attached to
+                # a different loop" because SQLAlchemy's async
+                # session is bound to the main loop and a fresh
+                # asyncio.run inside asyncio.to_thread cannot
+                # reuse those connections. No DB query happens
+                # here -- the bool was settled at dispatch time.
+                _flag_state = defer_substitution
                 log.info(
                     "deferred_substitution_flag_resolved",
                     agent_id=agent_id,
                     document_type=document_type,
-                    flag_enabled=_flag_state)
+                    flag_enabled=_flag_state,
+                    source="async_caller_threaded")
                 if _flag_state:
                     raw_form = _raw_per_substituted.get(
                         final_text)
