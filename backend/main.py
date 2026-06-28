@@ -3924,6 +3924,8 @@ async def _auto_upgrade_draft_to_token_values(
     from sqlalchemy import text as _text
     from database import AsyncSessionLocal as _ASL
     from tools.draft_token_upgrade import (
+        upgrade_canvas_slides_for_unverified_tags,
+        upgrade_content_json_for_unverified_tags,
         upgrade_content_json_to_token_values,
     )
     from tools.platform_flags import (
@@ -3932,8 +3934,14 @@ async def _auto_upgrade_draft_to_token_values(
     import json as _json
 
     try:
-        if not await is_defer_substitution_enabled():
-            return
+        # Phase 2 deferral gate ONLY guards the token-upgrade
+        # pass. The <unverified> tag upgrade runs UNCONDITIONALLY
+        # because soft-fail tags can be emitted regardless of
+        # the deferral flag (the hard-lock soft-fail in
+        # harness_narrative / generate_script /
+        # _substitute_slide_content fires whenever the
+        # 3-pass cap is hit).
+        defer_on = await is_defer_substitution_enabled()
         if _ASL is None:
             return
         async with _ASL() as s:
@@ -3947,34 +3955,60 @@ async def _auto_upgrade_draft_to_token_values(
             if not r:
                 return
             content_json, manifest, migration_run = r
-            if migration_run:
-                return
             if not isinstance(content_json, dict):
                 return
-            if not manifest:
-                return
-            upgraded, stats = (
-                upgrade_content_json_to_token_values(
-                    content_json, manifest))
-            await s.execute(_text(
-                "UPDATE editor_drafts "
-                "SET pre_migration_content_json "
-                "      = CAST(:snap AS JSONB), "
-                "    content_json = CAST(:cj AS JSONB), "
-                "    migration_run = true, "
-                "    updated_at = NOW() "
-                "WHERE id = :id"),
-                {
-                    "snap": _json.dumps(content_json),
-                    "cj":   _json.dumps(upgraded),
-                    "id":   draft_id,
-                })
-            await s.commit()
+            cj_after = content_json
+            token_stats = {
+                "nodes_upgraded": 0, "already_upgraded": 0}
+            unverified_stats = {
+                "nodes_upgraded": 0, "already_upgraded": 0}
+            # Token upgrade only when flag ON + manifest exists
+            # + migration hasn't run yet.
+            if (defer_on and manifest
+                    and not migration_run):
+                cj_after, token_stats = (
+                    upgrade_content_json_to_token_values(
+                        cj_after, manifest))
+            # June 28 2026 (PR #479) -- unverified-tag upgrade
+            # runs for every doc type, every generation,
+            # regardless of the deferral flag. The deck uses
+            # a different schema (canvas slides) so dispatch
+            # by document_type.
+            if document_type == "presentation_deck":
+                cj_after, unverified_stats = (
+                    upgrade_canvas_slides_for_unverified_tags(
+                        cj_after))
+            else:
+                cj_after, unverified_stats = (
+                    upgrade_content_json_for_unverified_tags(
+                        cj_after))
+            any_change = (
+                token_stats["nodes_upgraded"] > 0
+                or unverified_stats["nodes_upgraded"] > 0)
+            if any_change:
+                await s.execute(_text(
+                    "UPDATE editor_drafts "
+                    "SET pre_migration_content_json "
+                    "      = COALESCE("
+                    "          pre_migration_content_json, "
+                    "          CAST(:snap AS JSONB)), "
+                    "    content_json = CAST(:cj AS JSONB), "
+                    "    migration_run = true, "
+                    "    updated_at = NOW() "
+                    "WHERE id = :id"),
+                    {
+                        "snap": _json.dumps(content_json),
+                        "cj":   _json.dumps(cj_after),
+                        "id":   draft_id,
+                    })
+                await s.commit()
         log.info(
             "draft_auto_upgrade_persisted",
             draft_id=draft_id,
             document_type=document_type,
-            nodes_upgraded=stats["nodes_upgraded"])
+            token_nodes_upgraded=token_stats["nodes_upgraded"],
+            unverified_nodes_upgraded=(
+                unverified_stats["nodes_upgraded"]))
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "draft_auto_upgrade_failed",
@@ -5730,6 +5764,100 @@ async def editor_create_draft(
     return draft
 
 
+@app.post(
+    "/api/v1/editor/drafts/{draft_id}/accept-unverified")
+async def accept_unverified_value(
+    draft_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 (PR #479) -- log an operator "accept as-is"
+    decision for an <unverified> tag in a draft.
+
+    The frontend popover (UnverifiedPopover.tsx) calls this
+    when Bob or Molly clicks "Accept as-is" on a flagged
+    numeric value. The endpoint:
+      1. Logs the override into editor_numeric_overrides
+         (migration 066 -- the existing table from PR #469).
+      2. Returns the override-record id + a timestamp.
+
+    The frontend separately rewrites the draft content_json
+    via the existing PATCH endpoint to remove the
+    <unverified> wrapper (leaving the raw value as plain
+    text). This endpoint is the AUDIT LOG, not a content
+    mutator -- separation of concerns.
+
+    Body: {value: str, sentence_context: str, document_type:
+    str?}. `value` is the raw numeric the operator accepted.
+    `sentence_context` is the surrounding sentence text for
+    the audit log (caps at 1000 chars on persist).
+    `document_type` defaults to the draft's stored type when
+    omitted.
+
+    Fail-open: DB write failure returns a 503 with details;
+    the frontend should surface the error + leave the
+    <unverified> wrapper in place pending a retry."""
+    value = str(body.get("value", "")).strip()
+    sentence = str(body.get("sentence_context", "")).strip()
+    user_email = session.get("email") or ""
+    if not value:
+        raise HTTPException(
+            status_code=422,
+            detail="value is required")
+    if not user_email:
+        raise HTTPException(
+            status_code=401,
+            detail="session has no email")
+    # Resolve document_type from the body or the stored draft.
+    doc_type = body.get("document_type")
+    if not doc_type:
+        try:
+            from tools.editor_drafts import get_draft
+            d = await get_draft(draft_id)
+            if d is not None:
+                doc_type = d.get("document_type")
+        except Exception:  # noqa: BLE001
+            doc_type = None
+    # Persist as a single editor_numeric_overrides row using
+    # the existing log_editor_overrides helper. The
+    # suggested_token slot is intentionally NULL for an
+    # accept-as-is decision (the operator chose NOT to swap).
+    from tools.editor_save_numeric_check import (
+        log_editor_overrides,
+    )
+    n = await log_editor_overrides(
+        draft_id,
+        doc_type,
+        user_email,
+        [{
+            "offending_value": value,
+            "sentence":        sentence,
+            "suggested_token": None,
+        }])
+    if n != 1:
+        # DB write failed (log_editor_overrides logged the
+        # exception + returned 0 / -1). Surface 503 so the
+        # frontend can retry.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not log the accept-as-is decision. "
+                "Retry; the <unverified> wrapper is still in "
+                "place."))
+    log.info(
+        "unverified_accept_logged",
+        draft_id=draft_id,
+        document_type=doc_type,
+        user_email=user_email,
+        value=value)
+    return {
+        "logged":         True,
+        "draft_id":       draft_id,
+        "document_type":  doc_type,
+        "value":          value,
+        "user_email":     user_email,
+    }
+
+
 @app.patch("/api/v1/documents/drafts/{draft_id}")
 async def editor_update_draft(
     draft_id: int, body: dict,
@@ -6787,6 +6915,14 @@ async def _generate_script_document(
         log.error("script_draft_create_failed", ref=ref)
         raise RuntimeError(
             f"Could not save the generated script (ref: {ref})")
+
+    # June 28 2026 (PR #479) -- auto-upgrade hook for script.
+    # Walks content_json + converts any <unverified> tag
+    # substrings into structured unverified TipTap nodes so
+    # the NodeView renders. Document-type-agnostic per
+    # operator directive.
+    await _auto_upgrade_draft_to_token_values(
+        new_draft["id"], "presentation_script")
 
     # Build the docx for the job's /download endpoint -- the
     # frontend Download button reads from there. Mirrors the
@@ -19824,6 +19960,15 @@ async def _finalize_deck(
                     "value_manifest_persist_failed",
                     document_type="presentation_deck",
                     error=str(exc))
+
+            # June 28 2026 (PR #479) -- auto-upgrade hook for
+            # deck. Walks canvas slide content_json + flags
+            # any element containing <unverified> tag
+            # substrings. Document-type-agnostic per operator
+            # directive.
+            if draft_id is not None:
+                await _auto_upgrade_draft_to_token_values(
+                    draft_id, "presentation_deck")
     except Exception as exc:  # noqa: BLE001
         log.warning("deck_draft_create_failed", error=str(exc))
 

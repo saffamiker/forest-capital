@@ -1491,12 +1491,34 @@ def _tiptap_text(node: Any) -> str:
     June 28 2026 (PR-DM-Lite) -- token_value nodes (dual-mode
     storage) emit attrs.override or attrs.resolved as plain
     text. The exported DOCX is clean: no token metadata, no
-    {{TOKEN}} placeholders, just the resolved number."""
+    {{TOKEN}} placeholders, just the resolved number.
+
+    June 28 2026 (PR #479) -- unverified nodes render via the
+    3-state rule:
+      (1) attrs.accepted is True (operator accepted as-is via
+          editor_numeric_overrides) -> raw value, no marker.
+          The wrapper got removed by the editor save flow when
+          the override was logged; if any stragglers remain
+          we treat them as accepted-equivalent.
+      (2) attrs.replaced_with_token is set -> the operator
+          chose a token replacement; the wrapper is now a
+          token_value node, NOT an unverified node. Not
+          reachable in this branch.
+      (3) Default (still flagged, not yet resolved) -> render
+          "[UNVERIFIED: VALUE]" as a visible marker so the
+          DOCX export carries a clear flag for Bob + Molly's
+          review before submission."""
     if not isinstance(node, dict):
         return ""
     if node.get("type") == "token_value":
         attrs = node.get("attrs") or {}
         return str(attrs.get("override") or attrs.get("resolved") or "")
+    if node.get("type") == "unverified":
+        attrs = node.get("attrs") or {}
+        value = str(attrs.get("value") or "")
+        if attrs.get("accepted"):
+            return value
+        return f"[UNVERIFIED: {value}]"
     if node.get("text"):
         return str(node["text"])
     return "".join(_tiptap_text(c) for c in (node.get("content") or []))
@@ -1580,6 +1602,22 @@ def _tiptap_runs(node: Any) -> list[tuple[str, dict[str, bool]]]:
         if not text:
             return []
         return [(text, {})]
+    # June 28 2026 (PR #479) -- unverified node render.
+    # 3-state per the operator's directive: accepted ->
+    # raw value plain; default -> [UNVERIFIED: VALUE]
+    # visible marker. The replaced-with-token state isn't
+    # reachable here because that path rewrites the node
+    # type to token_value.
+    if node.get("type") == "unverified":
+        attrs = node.get("attrs") or {}
+        value = str(attrs.get("value") or "")
+        if not value:
+            return []
+        if attrs.get("accepted"):
+            return [(value, {})]
+        # Bold the visible marker so the [UNVERIFIED: ...]
+        # flag is visually distinct in the exported file.
+        return [(f"[UNVERIFIED: {value}]", {"bold": True})]
     if node.get("text"):
         marks_list = node.get("marks") or []
         marks: dict[str, bool] = {}
