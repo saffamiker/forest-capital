@@ -378,12 +378,20 @@ async def run_verification() -> dict[str, Any]:
     strategy_cache = await get_strategy_cache(eff_hash) or {}
 
     # Implied allocation derives from CIO blend weights.
+    # June 28 2026 HOTFIX -- compute_implied_asset_allocation is
+    # async (it reads strategy_results_cache for the per-strategy
+    # avg_equity_weight / avg_bond_weight). The original PR #460
+    # called it WITHOUT await, so the coroutine object was passed
+    # to get_substitution_table as implied_allocation, and the
+    # first downstream .get() on it raised AttributeError -> the
+    # operator-visible 500. Awaiting the coroutine returns the
+    # expected dict | None.
     implied_alloc: dict[str, Any] = {}
     try:
         if cio_row.get("blend_weights"):
             implied_alloc = (
-                compute_implied_asset_allocation(
-                    cio_row.get("blend_weights")) or {})
+                await compute_implied_asset_allocation(
+                    cio_row.get("blend_weights"))) or {}
     except Exception as exc:  # noqa: BLE001
         log.warning("verifier_implied_alloc_failed",
                     error=str(exc))
@@ -400,10 +408,18 @@ async def run_verification() -> dict[str, Any]:
     # Build the substitution table -- same path the doc generators
     # use. PR 1 v2 cache-key invalidation makes this safe to call
     # repeatedly without stale-table risk.
+    # June 28 2026 HOTFIX -- pass hash_verified=True. The verifier
+    # explicitly loaded strategy_cache + historical analytics via
+    # the hash-aware path (get_strategy_cache(eff_hash) above), so
+    # the audit signal that the data_hash is verified-to-match
+    # must be set. Without this flag, build_substitution_table
+    # logs the spurious 'data_hash supplied without
+    # hash_verified=True' warning on every verifier call.
     table = get_substitution_table(
         eff_hash, strategy_cache, cio_row,
         implied_allocation=implied_alloc,
-        live_signals=live_signals)
+        live_signals=live_signals,
+        hash_verified=True)
 
     # Pre-check live freshness for the LIVE-scope tokens.
     cio_fresh, regime_fresh, freshness_msg = (

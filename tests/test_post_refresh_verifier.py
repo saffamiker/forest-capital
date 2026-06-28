@@ -233,3 +233,74 @@ class TestFullDatasetPlausibility:
         status, _ = _check_full_dataset_plausibility(
             "{{POST_2022_EQ_IG_CORR}}", "-1.1")
         assert status == "fail"
+
+
+# ── Hotfix regression -- compute_implied_asset_allocation await ─
+
+
+class TestRunVerificationAwaitsImpliedAllocation:
+    """June 28 2026 hotfix regression pin.
+
+    PR #460 called compute_implied_asset_allocation WITHOUT await.
+    Since the helper is async, the unawaited coroutine got passed
+    to get_substitution_table as the implied_allocation kwarg,
+    and the first downstream .get() on it raised AttributeError
+    -> the production 500 on first call after deploy.
+
+    Pin source-inspection that the orchestrator awaits the call.
+    A regression that drops the await silently would re-introduce
+    the same 500."""
+
+    def test_compute_implied_asset_allocation_is_awaited(self):
+        import inspect
+        from tools.post_refresh_verifier import run_verification
+        src = inspect.getsource(run_verification)
+        # The await keyword must precede the call. A naked
+        # 'compute_implied_asset_allocation(' without await is
+        # the regression we're guarding against.
+        assert "await compute_implied_asset_allocation" in src, (
+            "run_verification MUST await "
+            "compute_implied_asset_allocation -- it is an async "
+            "coroutine. Passing the unawaited coroutine to "
+            "get_substitution_table as implied_allocation crashes "
+            "the substitution table builder on the first .get() "
+            "(production 500 on PR #460 first deploy).")
+
+    def test_compute_implied_asset_allocation_is_actually_async(
+            self):
+        """Belt-and-braces: confirm the helper REALLY is async.
+        If a future refactor makes it sync, this test should be
+        the first to surface the change so we can also update the
+        orchestrator + the source-inspection test above."""
+        import asyncio
+        from tools.cio_recommendation import (
+            compute_implied_asset_allocation,
+        )
+        assert asyncio.iscoroutinefunction(
+            compute_implied_asset_allocation), (
+            "compute_implied_asset_allocation is expected to be "
+            "async; if a future refactor makes it sync, the "
+            "verifier's `await` would itself become a bug -- "
+            "update both this test and run_verification together.")
+
+    def test_get_substitution_table_called_with_hash_verified(
+            self):
+        """June 28 2026 hotfix pin -- the verifier MUST pass
+        hash_verified=True to build_substitution_table. It
+        explicitly loaded strategy_cache + historical analytics
+        via the hash-aware path (get_strategy_cache(eff_hash)),
+        so the audit signal that the data_hash is verified-to-
+        match must be set. Without this flag,
+        build_substitution_table logs the spurious 'data_hash
+        supplied without hash_verified=True' warning on every
+        verifier call."""
+        import inspect
+        from tools.post_refresh_verifier import run_verification
+        src = inspect.getsource(run_verification)
+        assert "hash_verified=True" in src, (
+            "run_verification MUST pass hash_verified=True to "
+            "get_substitution_table -- the verifier loads "
+            "strategy_cache via the hash-aware path so the "
+            "audit signal must be set, otherwise every verifier "
+            "call logs a spurious 'data_hash supplied without "
+            "hash_verified=True' warning.")

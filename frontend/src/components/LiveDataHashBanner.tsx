@@ -7,10 +7,20 @@
  *   green  "All drafts current" -- every current draft's data_hash
  *          equals the live strategy_hash. Hash chip is click-to-copy.
  *
+ *   green  "All drafts locked to submission freeze hash" -- freeze
+ *          active and every current draft matches the freeze hash.
+ *          NO "Run Light Refresh" prompt (June 28 2026 hotfix --
+ *          mirrors the LightRefreshButton freeze-aware fix in
+ *          PR #459 so the Reports page doesn't show a misleading
+ *          "Data stale" warning when drafts are correctly on
+ *          the freeze hash).
+ *
  *   amber  "Hash mismatch detected" -- one or more drafts were
- *          generated against an older dataset. Lists the stale docs
- *          ("Executive Brief — generated against d0b1339e (current:
- *          f2e87dec)") and links to Light Refresh on the same page.
+ *          generated against an older dataset (or under freeze,
+ *          against a hash other than the freeze hash). Lists the
+ *          stale docs ("Executive Brief — generated against
+ *          d0b1339e (current: f2e87dec)") and links to Light
+ *          Refresh on the same page.
  *
  * Doc types with NO current draft are excluded from the mismatch
  * list -- nothing to compare against.
@@ -46,10 +56,30 @@ interface DraftRow {
 }
 
 
+// June 28 2026 hotfix -- submission-freeze status shape returned
+// by GET /api/v1/admin/submission-status. Mirrors the FreezeStatus
+// interface in LightRefreshButton.tsx (PR #459). Available to any
+// authenticated user; fail-open to freeze_active=false on fetch
+// failure -- the banner shows the legacy live-hash comparison in
+// that case.
+interface FreezeStatus {
+  freeze_active:     boolean
+  freeze_hash:       string | null
+  current_live_hash: string
+}
+
+
 export default function LiveDataHashBanner(): React.ReactElement | null {
   const [liveHash, setLiveHash] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<DraftRow[]>([])
   const [copied, setCopied] = useState(false)
+  // June 28 2026 hotfix -- freeze-aware hash comparison. Without
+  // this, the banner compared draft_hash to live_hash + flagged
+  // every draft 'stale' under freeze even when drafts correctly
+  // carried the freeze hash. Mirrors the LightRefreshButton fix
+  // from PR #459.
+  const [freezeStatus, setFreezeStatus]
+    = useState<FreezeStatus | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -67,10 +97,29 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
         setDrafts(res.data?.drafts ?? [])
       })
       .catch(() => { if (!cancelled) setDrafts([]) })
+    axios.get<FreezeStatus>('/api/v1/admin/submission-status')
+      .then((res) => {
+        if (cancelled) return
+        setFreezeStatus(res.data ?? null)
+      })
+      .catch(() => { if (!cancelled) setFreezeStatus(null) })
     return () => { cancelled = true }
   }, [])
 
   if (!liveHash) return null
+
+  // June 28 2026 hotfix -- comparison hash = freeze hash when
+  // freeze active, live hash otherwise. The stale-docs list
+  // checks against this comparison hash, not the raw live hash,
+  // so a draft correctly carrying the freeze hash does NOT get
+  // flagged stale + the "Run Light Refresh" prompt does NOT
+  // fire.
+  const freezeActive = Boolean(
+    freezeStatus?.freeze_active && freezeStatus.freeze_hash)
+  const comparisonHash: string = (
+    freezeActive && freezeStatus?.freeze_hash
+      ? freezeStatus.freeze_hash
+      : liveHash)
 
   const currentDrafts = drafts.filter(
     (d) => d.is_current !== false
@@ -78,7 +127,7 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
       && d.document_type in DOC_LABELS)
 
   const staleDocs = currentDrafts
-    .filter((d) => d.data_hash !== liveHash)
+    .filter((d) => d.data_hash !== comparisonHash)
     .map((d) => ({
       label: DOC_LABELS[
         d.document_type as LiveDataHashBannerDocType],
@@ -90,7 +139,13 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
 
   const handleCopy = async (): Promise<void> => {
     try {
-      await navigator.clipboard.writeText(liveHash)
+      // June 28 2026 hotfix -- copy the FREEZE hash when freeze
+      // is active, so the operator's clipboard carries the value
+      // the comparison + the banner header actually reference.
+      await navigator.clipboard.writeText(
+        freezeActive && freezeStatus?.freeze_hash
+          ? freezeStatus.freeze_hash
+          : liveHash)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
@@ -124,13 +179,19 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
               className="w-4 h-4 text-success shrink-0" />}
         <span className="font-semibold">
           {staleDocs.length > 0
-            ? 'Hash mismatch detected'
+            ? (freezeActive
+              ? 'Drafts drifted from freeze hash'
+              : 'Hash mismatch detected')
             : (allCurrent
-              ? 'All drafts current'
-              : 'Live platform data hash')}
+              ? (freezeActive
+                ? 'All drafts locked to submission freeze hash'
+                : 'All drafts current')
+              : (freezeActive
+                ? 'Submission freeze active'
+                : 'Live platform data hash'))}
         </span>
         <span className="text-muted">
-          Live platform data hash:
+          {freezeActive ? 'Freeze hash:' : 'Live platform data hash:'}
         </span>
         <button
           type="button"
@@ -139,7 +200,9 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
           title="Click to copy the full hash"
           className="font-mono text-electric hover:text-blue-400
                       inline-flex items-center gap-1">
-          {liveHash.slice(0, 8)}
+          {(freezeActive && freezeStatus?.freeze_hash
+            ? freezeStatus.freeze_hash
+            : liveHash).slice(0, 8)}
           {copied
             ? <Check className="w-3 h-3 text-success" />
             : <Copy className="w-3 h-3 opacity-60" />}
@@ -156,9 +219,9 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
                 <strong>{d.label}</strong> — generated against{' '}
                 <span className="font-mono">{d.draftHash}</span>{' '}
                 <span className="text-muted">
-                  (current:{' '}
+                  ({freezeActive ? 'freeze' : 'current'}:{' '}
                   <span className="font-mono">
-                    {liveHash.slice(0, 8)}
+                    {comparisonHash.slice(0, 8)}
                   </span>)
                 </span>
               </span>
@@ -169,7 +232,9 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
             onClick={handleLightRefreshScroll}
             data-testid="live-data-hash-refresh-link"
             className="text-electric hover:underline mt-1">
-            Run Light Refresh →
+            {freezeActive
+              ? 'Regenerate against freeze hash →'
+              : 'Run Light Refresh →'}
           </button>
         </div>
       )}

@@ -2,12 +2,18 @@
  * DataHashChip -- June 25 2026.
  *
  * Compact status chip rendered next to the editor's Export button.
- * Reads the draft's data_hash against the current live strategy
- * hash from /api/v1/audit/runs/latest (the same source verify-all
- * uses) and surfaces:
+ * Reads the draft's data_hash against the comparison hash and
+ * surfaces:
  *
  *   green  "Data current"
+ *   green  "Current (freeze active)" -- freeze active and draft
+ *          matches the freeze hash (June 28 2026 hotfix; mirrors
+ *          LightRefreshButton freeze-aware fix from PR #459).
  *   amber  "Data stale — Light Refresh recommended"
+ *
+ * The comparison hash is the freeze hash when freeze is active +
+ * the freeze fetch succeeded, otherwise the live strategy hash
+ * from /api/v1/audit/runs/latest.
  *
  * Clicking the amber chip toggles a tooltip explaining what Light
  * Refresh does + linking to the Reports page where the button
@@ -29,11 +35,23 @@ export interface DataHashChipProps {
 }
 
 
+// June 28 2026 hotfix -- submission-freeze status shape returned
+// by GET /api/v1/admin/submission-status. Mirrors the
+// LightRefreshButton + LiveDataHashBanner shapes.
+interface FreezeStatus {
+  freeze_active:     boolean
+  freeze_hash:       string | null
+  current_live_hash: string
+}
+
+
 export default function DataHashChip(
   { draftDataHash }: DataHashChipProps,
 ): React.ReactElement | null {
   const navigate = useNavigate()
   const [liveHash, setLiveHash] = useState<string | null>(null)
+  const [freezeStatus, setFreezeStatus]
+    = useState<FreezeStatus | null>(null)
   const [tooltipOpen, setTooltipOpen] = useState(false)
 
   useEffect(() => {
@@ -45,22 +63,53 @@ export default function DataHashChip(
         setLiveHash(res.data?.current_data_hash ?? null)
       })
       .catch(() => { if (!cancelled) setLiveHash(null) })
+    // June 28 2026 hotfix -- freeze status alongside the live
+    // hash so the comparison knows which hash to check against.
+    // Fail-open to freeze_active=false on fetch failure -- chip
+    // shows the legacy live-hash comparison in that case.
+    axios.get<FreezeStatus>('/api/v1/admin/submission-status')
+      .then((res) => {
+        if (cancelled) return
+        setFreezeStatus(res.data ?? null)
+      })
+      .catch(() => { if (!cancelled) setFreezeStatus(null) })
     return () => { cancelled = true }
   }, [draftDataHash])
 
   if (!draftDataHash || !liveHash) return null
 
-  const match = draftDataHash === liveHash
+  // June 28 2026 hotfix -- freeze-aware comparison hash. Under
+  // freeze, drafts on the freeze hash are CORRECT and must NOT
+  // be flagged stale + must NOT prompt a light refresh.
+  const freezeActive = Boolean(
+    freezeStatus?.freeze_active && freezeStatus.freeze_hash)
+  const comparisonHash: string = (
+    freezeActive && freezeStatus?.freeze_hash
+      ? freezeStatus.freeze_hash
+      : liveHash)
+  const match = draftDataHash === comparisonHash
   if (match) {
+    const label = freezeActive
+      ? 'Current (freeze active)'
+      : 'Data current'
+    const titleText = freezeActive
+      ? (
+          `Data hash ${draftDataHash.slice(0, 12)}… matches the `
+          + 'submission freeze hash. Locked.')
+      : (
+          `Data hash ${draftDataHash.slice(0, 12)}… matches the `
+          + 'analytics cache. No refresh needed.')
     return (
       <span
-        data-testid="data-hash-chip-current"
-        title={`Data hash ${draftDataHash.slice(0, 12)}… matches the analytics cache. No refresh needed.`}
+        data-testid={freezeActive
+          ? 'data-hash-chip-current-frozen'
+          : 'data-hash-chip-current'}
+        title={titleText}
         className="inline-flex items-center gap-1 px-1.5 py-0.5
                    rounded text-2xs font-medium bg-success/15
                    border border-success/40 text-success">
         <CheckCircle className="w-3 h-3" />
-        Data current
+        {label}
       </span>
     )
   }
@@ -102,9 +151,11 @@ export default function DataHashChip(
             </span>
           </p>
           <p>
-            <span className="font-mono text-muted">live  </span>
+            <span className="font-mono text-muted">
+              {freezeActive ? 'freeze' : 'live  '}
+            </span>
             <span className="font-mono">
-              {liveHash.slice(0, 14)}…
+              {comparisonHash.slice(0, 14)}…
             </span>
           </p>
           <p className="mt-2">
