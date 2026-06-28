@@ -31,6 +31,9 @@ import {
   CheckCircle2, XCircle,
 } from 'lucide-react'
 
+import PostRefreshVerificationPanel
+  from './PostRefreshVerificationPanel'
+
 
 interface LockedProvenance {
   lock_date:     string
@@ -524,6 +527,10 @@ export default function DataReferenceSheetPanel() {
   const [validation, setValidation] =
     useState<ValidationResponse | null>(null)
   const [validationLoading, setValidationLoading] = useState(false)
+  // June 27 2026 -- triggerKey for the post-refresh verification
+  // panel. Bumped by the "Verify submission data" button so the
+  // panel fires its endpoint without requiring a light refresh.
+  const [verifyTrigger, setVerifyTrigger] = useState<number>(0)
   const [validationError, setValidationError] = useState<
     string | null>(null)
 
@@ -654,6 +661,31 @@ export default function DataReferenceSheetPanel() {
               type="button"
               onClick={(e) => {
                 e.stopPropagation()
+                // June 27 2026 -- manual "Verify submission data"
+                // button. Bumps the verify trigger key so the
+                // mounted PostRefreshVerificationPanel re-fires
+                // the verifier endpoint without requiring a full
+                // light refresh first. Counter increment used as
+                // a stable changing key (toString() avoids the
+                // verifier-panel re-render on stale equality).
+                setVerifyTrigger(verifyTrigger + 1)
+              }}
+              data-testid="data-reference-verify-button"
+              className="flex items-center gap-1.5 text-2xs
+                         text-warning bg-warning/10
+                         border border-warning/30 px-2 py-1
+                         rounded hover:bg-warning/20
+                         uppercase tracking-wide font-medium
+                         transition-colors">
+              <AlertCircle className="w-3 h-3" />
+              Verify submission data
+            </button>
+          )}
+          {data && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
                 downloadCsv(data)
               }}
               data-testid="data-reference-csv-button"
@@ -681,6 +713,17 @@ export default function DataReferenceSheetPanel() {
 
       {expanded && (
         <div className="px-4 pb-4 pt-2 border-t border-border">
+          {/* June 27 2026 -- manual verification panel. Mounted
+              alongside the data so the "Verify submission data"
+              header button fires the verifier endpoint without
+              triggering a light refresh. Renders null until the
+              user clicks the button (verifyTrigger > 0). */}
+          {verifyTrigger > 0 ? (
+            <div className="mb-3">
+              <PostRefreshVerificationPanel
+                triggerKey={verifyTrigger} />
+            </div>
+          ) : null}
           {loading && (
             <div className="flex items-center justify-center gap-2
                             py-4 text-muted text-xs">
