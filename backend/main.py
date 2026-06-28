@@ -5598,15 +5598,94 @@ async def editor_update_draft(
     """
     Auto-save — overwrites the working content. Silent: does NOT create
     a version. Body: {content_json, content_text, word_count?}.
+
+    June 28 2026 -- touchpoint 5 of the hard-lock guardrail.
+    BEFORE persisting, the incoming content_json is scanned for
+    untoken-backed numerics (e.g. operator typed a "0.86" by hand
+    that bypasses the harness loop). Warnings are NON-BLOCKING --
+    the save always succeeds. Offenders are logged to
+    editor_numeric_overrides for audit + returned in the response
+    so the frontend can render a dismissible banner.
     """
     from tools.editor_drafts import update_draft
+    from tools.editor_save_numeric_check import (
+        log_editor_overrides,
+        scan_editor_save_for_untoken_numerics,
+    )
+
+    # ── Pre-persist scan -- non-blocking, fail-open ────────────
+    warnings: list[dict] = []
+    try:
+        # Build the current substitution table so the scanner
+        # has the canonical token-to-value map. Freeze-aware via
+        # PR #455 v4's effective-hash resolver.
+        from tools.audit_assembler import current_data_hash
+        from tools.cache import get_strategy_cache
+        from tools.cio_recommendation import (
+            get_latest_recommendation,
+        )
+        from tools.numeric_substitution import (
+            get_substitution_table,
+        )
+        from tools.submission_freeze import (
+            get_effective_data_hash,
+        )
+
+        live_hash = await current_data_hash()
+        eff_hash = (
+            await get_effective_data_hash(live_hash) or live_hash)
+        cio = await get_latest_recommendation() or {}
+        strategy_cache = await get_strategy_cache(eff_hash) or {}
+        sub_table = get_substitution_table(
+            eff_hash, strategy_cache, cio, hash_verified=True)
+
+        warnings = scan_editor_save_for_untoken_numerics(
+            body.get("content_json"), sub_table)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_save_numeric_scan_skipped",
+            draft_id=draft_id, error=str(exc))
+        warnings = []
+
+    # ── Persist regardless of warning count ────────────────────
     wc = body.get("word_count")
     ok = await update_draft(
         draft_id, body.get("content_json"), body.get("content_text"),
         word_count_override=int(wc) if isinstance(wc, (int, float)) else None)
     if not ok:
         raise HTTPException(status_code=404, detail="Draft not found.")
-    return {"saved": True, "draft_id": draft_id}
+
+    # ── Audit-log every warning (after persist; idempotent on
+    #    DB failure) ────────────────────────────────────────────
+    if warnings:
+        try:
+            from sqlalchemy import text as _text
+            from database import AsyncSessionLocal
+            doc_type: str | None = None
+            if AsyncSessionLocal is not None:
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(_text(
+                        "SELECT document_type FROM editor_drafts "
+                        "WHERE id = :id"), {"id": draft_id})
+                    row = r.fetchone()
+                    doc_type = row[0] if row else None
+            await log_editor_overrides(
+                draft_id,
+                doc_type,
+                session.get("email", ""),
+                warnings)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "editor_save_numeric_audit_log_skipped",
+                draft_id=draft_id, error=str(exc))
+
+    return {
+        "saved":    True,
+        "draft_id": draft_id,
+        # June 28 2026 -- non-blocking numeric warnings. Frontend
+        # surfaces these in a dismissible banner.
+        "numeric_warnings": warnings,
+    }
 
 
 @app.post("/api/v1/documents/drafts/{draft_id}/versions", status_code=201)

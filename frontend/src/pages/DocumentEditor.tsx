@@ -16,6 +16,8 @@ import {
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
+import NumericOverrideWarningBanner from
+  '../components/editor/NumericOverrideWarningBanner'
 import CanvasSlideEditor from '../components/editor/CanvasSlideEditor'
 import ChartPicker from '../components/editor/ChartPicker'
 import {
@@ -188,6 +190,20 @@ export default function DocumentEditor() {
     regeneratingSlideNumber, setRegeneratingSlideNumber,
   ] = useState<number | null>(null)
   const [lastSaved, setLastSaved] = useState<string>('not yet')
+  // June 28 2026 -- touchpoint 5 hard-lock guardrail. Warnings
+  // returned by the PATCH save endpoint for any untoken-backed
+  // numerics introduced via direct editor typing. Save itself
+  // is non-blocking; this state drives the dismissible banner.
+  interface NumericOverrideWarning {
+    offending_value: string
+    sentence:        string
+    suggested_token: string | null
+    severity:        'token_available' | 'unsupported'
+  }
+  const [numericWarnings, setNumericWarnings]
+    = useState<NumericOverrideWarning[]>([])
+  const dismissNumericWarnings = useCallback(
+    () => setNumericWarnings([]), [])
   // Viewport gating — desktop renders the side-aside panels; mobile
   // (below the lg breakpoint) renders the same panels as full-screen
   // overlay drawers. We track isDesktop as JS state so the two
@@ -331,7 +347,23 @@ export default function DocumentEditor() {
     if (!dirtyRef.current || !draft) return
     setSaveState('saving')
     try {
-      await axios.patch(`/api/v1/documents/drafts/${id}`, {
+      // June 28 2026 -- touchpoint 5 hard-lock guardrail. The
+      // PATCH response carries `numeric_warnings` (non-blocking)
+      // for any untoken-backed numeric the backend scanner
+      // flagged in the saved content. We surface them via the
+      // NumericOverrideWarningBanner. Save itself always
+      // succeeds regardless of warning count -- the manual
+      // editor save path is intentionally non-blocking.
+      const res = await axios.patch<{
+        saved: boolean
+        draft_id: number
+        numeric_warnings?: Array<{
+          offending_value:  string
+          sentence:         string
+          suggested_token:  string | null
+          severity:         'token_available' | 'unsupported'
+        }>
+      }>(`/api/v1/documents/drafts/${id}`, {
         content_json: contentJson,
         content_text: contentText,
         word_count: countWords(contentText),
@@ -340,6 +372,10 @@ export default function DocumentEditor() {
       setSaveState('saved')
       setLastSaved(new Date().toLocaleTimeString(undefined,
         { hour: '2-digit', minute: '2-digit' }))
+      const incoming = res.data?.numeric_warnings ?? []
+      if (incoming.length > 0) {
+        setNumericWarnings(incoming)
+      }
     } catch {
       setSaveState('error')
     }
@@ -1002,6 +1038,15 @@ export default function DocumentEditor() {
         )}
 
         <main className="flex-1 min-w-0 bg-navy-900">
+          {/* June 28 2026 -- touchpoint 5 warning banner. Renders
+              above the editor surface so the operator sees it
+              immediately after the save round-trip. Dismissible;
+              the audit-trail rows persist regardless. */}
+          <div className="px-3 pt-2">
+            <NumericOverrideWarningBanner
+              warnings={numericWarnings}
+              onDismiss={dismissNumericWarnings} />
+          </div>
           {isDeck ? (
             <CanvasSlideEditor draftId={id}
               deck={(contentJson as CanvasDeck | null) ?? { slides: [] }}
