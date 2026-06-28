@@ -1258,16 +1258,115 @@ def harness_narrative(
                         sample_offenders=[
                             v.raw_value for v in viols[:5]])
                     if _pass == _UNTOKEN_LOCK_MAX_PASSES:
-                        # Out of correction passes -- raise so
-                        # the generator endpoint surfaces the
-                        # list to the operator.
-                        log.error(
-                            "untoken_lock_unrecoverable",
+                        # June 28 2026 -- SOFT-FAIL + TAG on
+                        # hard-lock cap. Operator-directed
+                        # change for the June 30 deadline:
+                        # [DATA PENDING] is a hard submission
+                        # blocker; a flagged numeric is
+                        # recoverable via human review.
+                        #
+                        # The cap-branch wraps each surviving
+                        # violation in <unverified>...</unverified>
+                        # tags inline in the best-attempt
+                        # narrative, then breaks (no raise).
+                        # The tagged form persists into
+                        # content_json so Bob + Molly see the
+                        # exact offenders highlighted during
+                        # in-editor review. The downstream
+                        # document_audit also flags them in
+                        # the AuditWarningsBanner.
+                        #
+                        # Implementation: span-based reverse-
+                        # order replacement on the form that
+                        # will be persisted. Under deferred
+                        # substitution the persisted form is
+                        # the RAW (token-bearing) text from
+                        # the stash; without deferral it's the
+                        # substituted final_text. Both forms
+                        # contain the bare-numeric offenders
+                        # at the SAME character spans (since
+                        # apply_substitutions only mutates
+                        # {{TOKEN}} runs, not bare numerics).
+                        def _wrap_unverified(
+                            text: str, violations: list,
+                        ) -> str:
+                            # Reverse-span order preserves
+                            # indices as we splice.
+                            sorted_v = sorted(
+                                violations,
+                                key=lambda v: v.span[0],
+                                reverse=True)
+                            out = text
+                            for v in sorted_v:
+                                start, end = v.span
+                                if 0 <= start < end <= len(out):
+                                    out = (
+                                        out[:start]
+                                        + "<unverified>"
+                                        + v.raw_value
+                                        + "</unverified>"
+                                        + out[end:])
+                            return out
+                        # Wrap the substituted final_text so a
+                        # non-deferral persist path sees the
+                        # tags. Also mutate the stash entry so
+                        # the deferral swap below picks up the
+                        # wrapped raw form. The substituted +
+                        # raw forms share violation spans
+                        # because apply_substitutions never
+                        # touches bare numerics, but to be
+                        # safe re-scan each side independently
+                        # against its own text shape isn't
+                        # needed -- the scan was on raw_for_
+                        # scan + the spans align with the
+                        # original raw text. For the
+                        # substituted form, do a final string
+                        # replace pass per raw_value (less
+                        # span-precise but safe given the
+                        # narrow value set).
+                        wrapped_raw = _wrap_unverified(
+                            raw_for_scan, viols)
+                        if (raw_for_scan in
+                                _raw_per_substituted.values()
+                                or final_text in
+                                _raw_per_substituted):
+                            _raw_per_substituted[final_text] = (
+                                wrapped_raw)
+                        # Substituted form: tag each unique
+                        # raw_value once via string replace.
+                        # Bare numerics rarely collide with
+                        # other context numerics; if a value
+                        # appears multiple times in the
+                        # substituted prose, all occurrences
+                        # tag (acceptable -- the operator
+                        # wants every flag visible).
+                        _wrapped_subst = final_text
+                        for _raw_v in {
+                                v.raw_value for v in viols}:
+                            _wrapped_subst = (
+                                _wrapped_subst.replace(
+                                    _raw_v,
+                                    "<unverified>"
+                                    + _raw_v
+                                    + "</unverified>"))
+                        final_text = _wrapped_subst
+                        log.warning(
+                            "untoken_lock_soft_fail",
                             agent_id=agent_id,
                             document_type=document_type,
-                            remaining_violations=len(viols))
-                        raise UntokenNumericLockError(
-                            document_type, agent_id, viols)
+                            remaining_violations=len(viols),
+                            sample_offenders=[
+                                v.raw_value for v in viols[:10]],
+                            note=(
+                                "hard-lock cap reached; "
+                                "persisting best-attempt "
+                                "narrative with each surviving "
+                                "raw numeric wrapped in "
+                                "<unverified> tags for "
+                                "in-editor human review. "
+                                "audit_warnings will also "
+                                "flag for the banner."))
+                        break
                     # Re-call the generator with explicit
                     # correction feedback. _substituting_generator
                     # already handles substitution + truncation

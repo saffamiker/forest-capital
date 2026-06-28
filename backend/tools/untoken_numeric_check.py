@@ -408,6 +408,25 @@ def _is_value_supported_by_substitution(
 # ── Public scanner ─────────────────────────────────────────────
 
 
+# June 28 2026 (Issue A) -- always-exempt bare values. The
+# scanner skips these BEFORE the sub-table-priority gate so a
+# bare value in this set is allowed even when its corresponding
+# {{TOKEN}} exists in the substitution table. Used for known
+# constants where the LLM's correction-pass retries can't be
+# reliably driven to emit the token form. Adding here is a
+# deliberate operator-blessed override of the "never exempt a
+# substitution-table value" rule.
+_ALWAYS_EXEMPT_BARE_VALUES: frozenset[str] = frozenset({
+    # Benjamini-Hochberg FDR significance threshold. Token form
+    # is {{BH_SIGNIFICANCE_THRESHOLD}}. The bare 0.005 form
+    # appears in correction-pass retries of brief_key_findings
+    # and brief_final_recommendations where Sonnet rewrites
+    # "p < 0.005" prose paraphrased without the operator
+    # ("the 0.005 threshold" / "an alpha of 0.005").
+    "0.005",
+})
+
+
 # June 28 2026 -- references / bibliography heading regexes.
 # Used to detect the start of a references block + the start
 # of any subsequent non-references heading so the scanner can
@@ -564,6 +583,31 @@ def find_untoken_backed_numerics(
         if raw in anchor_values:
             continue
         if raw.rstrip("%") in anchor_values:
+            continue
+
+        # June 28 2026 (Issue A) -- always-exempt bare-value
+        # carve-out. Operator-blessed override for known
+        # constants where:
+        #   1. The value DOES have a corresponding token in
+        #      the substitution table (e.g. 0.005 ->
+        #      {{BH_SIGNIFICANCE_THRESHOLD}}).
+        #   2. The first occurrence gets substituted correctly
+        #      during initial generation.
+        #   3. Correction-pass retries regenerate fresh prose
+        #      containing the bare form, and Sonnet stubbornly
+        #      refuses to swap to the token despite the
+        #      correction feedback. Net effect: hard-lock cap
+        #      triggers + the section fails as [DATA PENDING].
+        # The override fires BEFORE the sub-table-priority
+        # gate so the bare form is allowed through. The
+        # token-aware paths (initial generation + critic
+        # corrections) still emit the {{TOKEN}} when the LLM
+        # gets it right -- this only catches the failure mode
+        # where Sonnet won't swap on retry.
+        if raw in _ALWAYS_EXEMPT_BARE_VALUES:
+            log.info(
+                "untoken_numeric_check_always_exempt",
+                value=raw)
             continue
 
         # Either supported (swap) or unsupported (rephrase).

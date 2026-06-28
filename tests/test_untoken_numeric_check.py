@@ -137,17 +137,20 @@ class TestStructuralProseExemptions:
         """Operator constraint: 'Do not exempt any value that
         appears in the substitution table.' Even if the value
         coincidentally appears inside a structural pattern, if
-        a token would produce it the LLM must swap, not skip."""
+        a token would produce it the LLM must swap, not skip.
+
+        June 28 2026 -- 0.005 is now in _ALWAYS_EXEMPT_BARE_VALUES
+        (operator-blessed override for the BH-FDR constant where
+        correction-pass retries can't drive Sonnet to swap).
+        Use a different value (0.01) that is NOT in the override
+        set so this test still pins the general rule."""
         from tools.untoken_numeric_check import (
             find_untoken_backed_numerics,
         )
-        # 0.005 inside a structural p-value pattern AND in the
-        # substitution table -- must still flag as
-        # token_available so the LLM swaps the literal.
-        text = "The result is significant at p < 0.005."
+        text = "The result is significant at p < 0.01."
         viols = find_untoken_backed_numerics(
             text,
-            substitution_table={"{{P_VALUE_THRESHOLD}}": "0.005"})
+            substitution_table={"{{P_VALUE_THRESHOLD}}": "0.01"})
         assert len(viols) == 1
         assert viols[0].severity == "token_available"
         assert viols[0].suggested_token == "{{P_VALUE_THRESHOLD}}"
