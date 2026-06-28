@@ -1137,6 +1137,17 @@ def harness_narrative(
         # Loop the generator with explicit correction feedback
         # up to _UNTOKEN_LOCK_MAX_PASSES times. Persist on a
         # clean pass; raise UntokenNumericLockError otherwise.
+        #
+        # CRITICAL: scan the RAW pre-substitution text, NOT the
+        # substituted final_text. Otherwise every legitimate
+        # substituted value (e.g. "+0.57" from
+        # {{POST_2022_EQ_IG_CORR}}) looks like an untoken-backed
+        # numeric and the lock recommends swapping it for the
+        # very token that already produced it -- an infinite
+        # loop until the 3-pass cap raises. The
+        # _raw_per_substituted stash captures (substituted ->
+        # raw) for every Sonnet response in this section; look
+        # up the raw form to scan against.
         _PROTECTED = {"executive_brief", "analytical_appendix"}
         if (document_type in _PROTECTED
                 and substitution_table is not None
@@ -1148,8 +1159,17 @@ def harness_narrative(
                     find_untoken_backed_numerics,
                 )
                 for _pass in range(1, _UNTOKEN_LOCK_MAX_PASSES + 1):
+                    # Resolve the raw (token-bearing) form of
+                    # final_text via the stash. Fallback to
+                    # final_text when the stash misses (defensive
+                    # -- shouldn't happen since every accepted
+                    # response was generated via
+                    # _substituting_generator which populates
+                    # the stash).
+                    raw_for_scan = _raw_per_substituted.get(
+                        final_text, final_text)
                     viols = find_untoken_backed_numerics(
-                        final_text, substitution_table,
+                        raw_for_scan, substitution_table,
                         numeric_anchors)
                     if not viols:
                         if _pass > 1:

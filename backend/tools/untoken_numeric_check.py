@@ -91,6 +91,78 @@ _ALLOWLIST_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# June 28 2026 -- structural-prose patterns that anchor a
+# numeric to a non-data-driven context. The numeric is part of
+# a recognised structural phrase (index name, definitional
+# allocation, strategy reference, statistical threshold) rather
+# than a substitution-eligible value. These patterns short-
+# circuit the violation classification BEFORE the
+# substitution-table check -- BUT a value that IS in the
+# substitution table never gets exempted (the operator's
+# constraint: "Do not exempt any value that appears in the
+# substitution table").
+#
+# Each pattern matches against a (value, surrounding_window)
+# tuple where surrounding_window is ~40 chars of text centred on
+# the value's position. The window-based match avoids false
+# positives from coincidental substrings elsewhere in the
+# sentence.
+_STRUCTURAL_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # "S&P 500" / "S&P 100" / "S&P 1500" -- index name. The
+    # numeric is part of the proper noun, not a finding.
+    (re.compile(r"S&P\s*\d{2,4}", re.IGNORECASE), "sp_index"),
+    # "100% equity" / "100% allocation" / "100% bond" /
+    # "100% bonds" -- definitional allocation prose ("the
+    # benchmark holds 100% equity"). The "100%" is structural,
+    # not a substitution-eligible value.
+    (re.compile(
+        r"100%\s+(equity|equities|bond|bonds|allocation|"
+        r"cash|stocks|stock)",
+        re.IGNORECASE), "definitional_100pct"),
+    # "60/40", "70/30", etc -- strategy name references
+    # (canonical balanced-portfolio shorthand). The numeric pair
+    # IS the strategy identifier, not a substitutable value.
+    (re.compile(r"\d{2,3}/\d{2,3}"), "balanced_portfolio_ref"),
+    # Statistical-threshold prose: "p < 0.05" / "p = 0.001" /
+    # "p <= 0.005" / "p > 0.10" / "alpha = 0.05". The numeric
+    # tail is conventional statistical notation, not a data
+    # finding from the cache.
+    (re.compile(
+        r"\b(?:p|alpha|significance)\s*[<>=≤≥]+\s*0?\.\d+",
+        re.IGNORECASE), "stat_threshold"),
+]
+
+
+def _matches_structural_pattern(
+    value: str,
+    text: str,
+    span: tuple[int, int],
+) -> str | None:
+    """Returns the structural-pattern name when `value` sits
+    inside a recognised structural phrase, else None. Match
+    window is 40 chars before + 40 chars after the value's
+    span to keep the regex cost bounded + avoid matching
+    patterns elsewhere in the sentence.
+
+    Important: this does NOT consult the substitution table --
+    the caller (find_untoken_backed_numerics) applies the
+    "never exempt a substitution-table value" rule by checking
+    the inverse table BEFORE invoking this helper."""
+    start, end = span
+    window_start = max(0, start - 40)
+    window_end = min(len(text), end + 40)
+    window = text[window_start:window_end]
+    for pattern, name in _STRUCTURAL_PATTERNS:
+        for m in pattern.finditer(window):
+            m_start = window_start + m.start()
+            m_end = window_start + m.end()
+            # The value's span must sit WITHIN the structural
+            # match.
+            if m_start <= start and end <= m_end:
+                return name
+    return None
+
+
 @dataclass
 class NumericViolation:
     """One untoken-backed numeric found in the text."""
@@ -284,14 +356,34 @@ def find_untoken_backed_numerics(
         if raw.rstrip("%") in anchor_values:
             continue
 
+        # Either supported (swap) or unsupported (rephrase).
+        suggested = _is_value_supported_by_substitution(
+            raw, value_to_token)
+
+        # June 28 2026 -- structural-prose exemption.
+        # When the numeric sits inside a structural phrase
+        # (S&P 500 / 100% equity / 60/40 / p < 0.005) AND the
+        # value is NOT in the substitution table, skip the
+        # violation. The "not in substitution table" guard
+        # enforces the operator constraint: "Do not exempt any
+        # value that appears in the substitution table." A
+        # substitution-table value that ALSO happens to land
+        # inside a structural pattern still flags as
+        # token_available so the LLM swaps it for the token.
+        if suggested is None:
+            structural_name = _matches_structural_pattern(
+                raw, text, span)
+            if structural_name is not None:
+                log.info(
+                    "untoken_numeric_check_structural_exempt",
+                    value=raw, pattern=structural_name)
+                continue
+
         # Skip if the surrounding sentence looks like a citation.
         sentence = _sentence_containing(text, span)
         if _sentence_is_citation(sentence):
             continue
 
-        # Either supported (swap) or unsupported (rephrase).
-        suggested = _is_value_supported_by_substitution(
-            raw, value_to_token)
         violations.append(NumericViolation(
             raw_value=raw,
             sentence=sentence,
