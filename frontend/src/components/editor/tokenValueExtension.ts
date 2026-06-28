@@ -25,6 +25,9 @@
  * like a span, not as a block.
  */
 import { Node, mergeAttributes } from '@tiptap/core'
+import { ReactNodeViewRenderer } from '@tiptap/react'
+
+import TokenValueNodeView from './TokenValueNodeView'
 
 
 export interface TokenValueAttrs {
@@ -163,6 +166,14 @@ export const TokenValueExtension = Node.create({
   renderText({ node }) {
     const attrs = node.attrs as TokenValueAttrs
     return attrs.override || attrs.resolved || ''
+  },
+  // June 28 2026 (PR-DM-Rich) -- rich React NodeView replaces
+  // the plain renderHTML output in the EDITOR display. The
+  // renderHTML above is still consumed by getJSON / DOCX-source
+  // round-trips + non-React TipTap consumers (storage,
+  // copy-paste). The NodeView only mounts in the editor.
+  addNodeView() {
+    return ReactNodeViewRenderer(TokenValueNodeView)
   },
 })
 
