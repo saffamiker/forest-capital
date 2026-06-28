@@ -2033,6 +2033,16 @@ roles / division of labor (that lived in the midpoint paper) and does
 NOT contain "Next Steps and Open Questions" framing (the brief
 deliberately closes with investable Final Recommendations).
 
+RUBRIC-CLOSED SECTION ENFORCEMENT (June 28 2026):
+The FNA 670 Brief rubric is CLOSED. Required sections only:
+Section 1, Section 2, Section 3, Section 4, Section 5, Section 6.
+If the draft contains a "Next Steps" section, "Future Work" section,
+"Recommendations for Further Research" section, or any other
+forward-looking action-item block: raise a HIGH severity issue
+naming the offending heading + recommend removal. The brief closes
+with investable Final Recommendations -- a Next Steps section is
+out-of-rubric content that would lose marks with the FNA 670 panel.
+
 AUDIENCE — the brief is read by a senior investment audience first
 (portfolio managers, allocators) and graded by the FNA 670 academic
 panel second. Both lenses matter: investment substance for the PM
@@ -2430,6 +2440,17 @@ not flag absence of features that the team has not committed to
 for the appendix. The appendix does NOT contain roles / division
 of labor and does NOT close with "Next Steps and Open Questions"
 framing. The appendix is a reference document, not a narrative.
+
+RUBRIC-CLOSED SECTION ENFORCEMENT (June 28 2026):
+The FNA 670 Appendix rubric is CLOSED. Required sections only:
+Section A, Section B, Section C, Section D, Section E, Section F,
+Section G, Section H. If the draft contains a "Next Steps"
+section, "Future Work" section, "Recommendations for Further
+Research" section, or any other forward-looking action-item
+block: raise a HIGH severity issue naming the offending heading +
+recommend removal. The appendix is a reference document closed
+by the rubric -- out-of-rubric content loses marks with the
+FNA 670 panel.
 
 AUDIENCE — the academic panel reads the appendix to verify
 methodology; a portfolio manager reads it to check the executive

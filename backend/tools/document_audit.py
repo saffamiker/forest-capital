@@ -910,17 +910,44 @@ _REQUIRED_CITATION_PATTERNS: dict[str, tuple[tuple[str, ...], str]] = {
 
 def check_unresolved_placeholders(
     content_text: str,
+    substitution_table: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Returns one flag per distinct unresolved {{TOKEN}}. Empty
     output is the green state. Fail-open: a missing import or any
     other error leaves the dispatcher with `skipped[...]` -- the
-    rest of the audit still runs."""
+    rest of the audit still runs.
+
+    June 28 2026 -- substitution_table kwarg added for the
+    Phase-1 deferred-substitution pipeline. When supplied, the
+    function applies substitution to content_text FIRST + then
+    checks the substituted projection for residual {{TOKEN}}
+    patterns. Under deferred substitution, content_text
+    legitimately carries {{TOKEN}} placeholders that the
+    substitution layer WILL resolve at export time -- those
+    tokens are not 'unresolved' in the audit's sense and must
+    not be flagged. Only tokens that have NO substitution-table
+    entry (typo / missing / forgotten) survive the
+    pre-substitution + remain flagged. When the kwarg is None
+    (legacy generation), the check is unchanged: any {{TOKEN}}
+    in content_text fires a flag."""
     try:
-        from tools.numeric_substitution import unresolved_placeholders
+        from tools.numeric_substitution import (
+            apply_substitutions, unresolved_placeholders,
+        )
     except Exception:
         return []
+    text_to_check = content_text
+    if substitution_table:
+        try:
+            substituted, _replaced = apply_substitutions(
+                content_text, substitution_table)
+            text_to_check = substituted
+        except Exception:
+            # Fail-open -- check the raw text in legacy mode
+            # rather than skipping the check entirely.
+            text_to_check = content_text
     flags: list[dict[str, Any]] = []
-    for token in unresolved_placeholders(content_text):
+    for token in unresolved_placeholders(text_to_check):
         flags.append({
             "type":     "unresolved_placeholder",
             "token":    token,

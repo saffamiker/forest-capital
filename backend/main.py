@@ -3970,6 +3970,112 @@ async def post_upgrade_all_drafts_to_token_values(
     }
 
 
+@app.post("/api/v1/admin/revert-all-draft-migrations")
+async def post_revert_all_draft_migrations(
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- batch revert of every draft whose
+    upgrade pass ran AND has a pre_migration_content_json
+    snapshot. Restores content_json from the snapshot, clears
+    the snapshot, sets migration_run = FALSE.
+
+    Used to undo a buggy upgrade pass in one shot. After this
+    runs the operator deploys the upgrade-pass fix + re-invokes
+    POST /api/v1/admin/upgrade-all-drafts-to-token-values.
+
+    Returns per-draft summary (id, document_type, owner, status,
+    message)."""
+    _ = session  # team-gated
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    import json as _json
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not configured")
+
+    results: list[dict] = []
+    async with _ASL() as s:
+        rows = await s.execute(_text(
+            "SELECT id, document_type, owner_email "
+            "FROM editor_drafts "
+            "WHERE is_current = true "
+            "  AND is_deleted = false "
+            "  AND migration_run = true "
+            "  AND pre_migration_content_json IS NOT NULL "
+            "ORDER BY id"))
+        candidates = rows.fetchall()
+        for row in candidates:
+            draft_id, doc_type, owner = row
+            try:
+                snap_row = await s.execute(_text(
+                    "SELECT pre_migration_content_json "
+                    "FROM editor_drafts WHERE id = :id"),
+                    {"id": draft_id})
+                r = snap_row.fetchone()
+                snap = r[0] if r else None
+                if snap is None:
+                    results.append({
+                        "draft_id":      draft_id,
+                        "document_type": doc_type,
+                        "owner":         owner,
+                        "status":        "skipped",
+                        "message":       "no snapshot present",
+                    })
+                    continue
+                await s.execute(_text(
+                    "UPDATE editor_drafts "
+                    "SET content_json = CAST(:cj AS JSONB), "
+                    "    migration_run = false, "
+                    "    pre_migration_content_json = NULL, "
+                    "    updated_at = NOW() "
+                    "WHERE id = :id"),
+                    {
+                        "cj": _json.dumps(snap)
+                              if not isinstance(snap, str)
+                              else snap,
+                        "id": draft_id,
+                    })
+                results.append({
+                    "draft_id":      draft_id,
+                    "document_type": doc_type,
+                    "owner":         owner,
+                    "status":        "reverted",
+                    "message":       (
+                        "content_json restored from snapshot; "
+                        "migration_run reset to FALSE; "
+                        "snapshot cleared"),
+                })
+                log.info(
+                    "draft_migration_reverted",
+                    draft_id=draft_id,
+                    document_type=doc_type)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "draft_migration_revert_failed",
+                    draft_id=draft_id, error=str(exc))
+                results.append({
+                    "draft_id":      draft_id,
+                    "document_type": doc_type,
+                    "owner":         owner,
+                    "status":        "failed",
+                    "message":       str(exc),
+                })
+        await s.commit()
+
+    return {
+        "drafts_checked": len(candidates),
+        "reverted":  sum(
+            1 for r in results if r["status"] == "reverted"),
+        "skipped":   sum(
+            1 for r in results if r["status"] == "skipped"),
+        "failed":    sum(
+            1 for r in results if r["status"] == "failed"),
+        "results":   results,
+    }
+
+
 @app.post("/api/v1/admin/revert-draft-migration/{draft_id}")
 async def post_revert_draft_migration(
     draft_id: int,
@@ -13553,6 +13659,7 @@ async def _generate_narratives(
     specs: list[dict], *,
     n_strategies: int | None = None,
     substitution_table: dict[str, str] | None = None,
+    document_type: str | None = None,
 ) -> dict[str, str]:
     """
     Generates a set of narrative sections concurrently.
@@ -13609,6 +13716,12 @@ async def _generate_narratives(
         # (Option 2: harness retry on flag count).
         if "numeric_anchors" in spec:
             kwargs["numeric_anchors"] = spec["numeric_anchors"]
+        # June 28 2026 -- thread document_type so harness_narrative
+        # can enable the hard-lock untoken-numeric guardrail on
+        # protected document types (executive_brief +
+        # analytical_appendix). Deck + script paths are unaffected.
+        if document_type is not None:
+            kwargs["document_type"] = document_type
         jobs.append((spec["key"], asyncio.to_thread(
             harness_narrative, spec["agent_id"], spec["task"], spec["context"],
             **kwargs)))
@@ -17394,7 +17507,11 @@ async def _generate_brief_document(
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs, document_type="executive_brief"),
             n_strategies=len(data.get("strategy_results") or {}),
-            substitution_table=substitution_table)
+            substitution_table=substitution_table,
+            # June 28 2026 -- arms the untoken-numeric hard lock
+            # inside harness_narrative. Brief is one of the two
+            # protected document types.
+            document_type="executive_brief")
 
         # Substitution-architecture summary log. Operators read this
         # in Render logs to confirm the determinism layer fired
@@ -18111,7 +18228,11 @@ async def _generate_appendix_document(
             _apply_draft_caveats(
                 specs, document_type="analytical_appendix"),
             n_strategies=len(data.get("strategy_results") or {}),
-            substitution_table=substitution_table)
+            substitution_table=substitution_table,
+            # June 28 2026 -- arms the untoken-numeric hard lock
+            # inside harness_narrative. Appendix is the second
+            # protected document type alongside brief.
+            document_type="analytical_appendix")
 
         # Per-document substitution-complete telemetry. Same shape the
         # brief + deck writers emit at end of generation.
@@ -18132,8 +18253,15 @@ async def _generate_appendix_document(
                             document_type="analytical_appendix",
                             error=str(exc))
 
+        # June 28 2026 -- thread substitution_table through so the
+        # builder can resolve {{TOKEN}} placeholders in narratives
+        # at export time. Required by the Phase-1 deferred-
+        # substitution pipeline; harmless under legacy generation
+        # (substitution_table=None) where narratives already carry
+        # resolved values.
         docx_bytes = await asyncio.to_thread(
-            build_analytical_appendix, data, narratives)
+            build_analytical_appendix, data, narratives,
+            substitution_table=substitution_table)
 
         # Load the generated content into an editor draft so the
         # frontend can open it directly in the editor — same pattern
