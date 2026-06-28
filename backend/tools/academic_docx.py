@@ -1297,9 +1297,17 @@ def _add_verification_receipt(
 # ── Editor-content export ─────────────────────────────────────────────────────
 
 def _tiptap_text(node: Any) -> str:
-    """The concatenated plain text of a TipTap node and its descendants."""
+    """The concatenated plain text of a TipTap node and its descendants.
+
+    June 28 2026 (PR-DM-Lite) -- token_value nodes (dual-mode
+    storage) emit attrs.override or attrs.resolved as plain
+    text. The exported DOCX is clean: no token metadata, no
+    {{TOKEN}} placeholders, just the resolved number."""
     if not isinstance(node, dict):
         return ""
+    if node.get("type") == "token_value":
+        attrs = node.get("attrs") or {}
+        return str(attrs.get("override") or attrs.get("resolved") or "")
     if node.get("text"):
         return str(node["text"])
     return "".join(_tiptap_text(c) for c in (node.get("content") or []))
@@ -1371,6 +1379,18 @@ def _tiptap_runs(node: Any) -> list[tuple[str, dict[str, bool]]]:
     emphasis in the editor export."""
     if not isinstance(node, dict):
         return []
+    # June 28 2026 (PR-DM-Lite) -- token_value nodes emit
+    # attrs.override or attrs.resolved as an unmarked run.
+    # Override semantics: an explicitly-overridden value still
+    # exports as plain text (no marks), so the reader can't
+    # distinguish auto-resolved from overridden in the exported
+    # file -- the override is purely an editor-side affordance.
+    if node.get("type") == "token_value":
+        attrs = node.get("attrs") or {}
+        text = str(attrs.get("override") or attrs.get("resolved") or "")
+        if not text:
+            return []
+        return [(text, {})]
     if node.get("text"):
         marks_list = node.get("marks") or []
         marks: dict[str, bool] = {}
