@@ -477,6 +477,36 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
             "June 3 cohort peer review + July 1 panel"),
         "locked_value": "+22.8pp",
     },
+
+    # ── Classic 60/40 definitional weights (June 28 2026) ────
+    # The Classic 60/40 strategy is by-construction 60% equity
+    # / 40% bonds; the weights are the strategy definition,
+    # not cache-derived. Locked because they are immutable
+    # over the study period -- a 60/40 is a 60/40.
+    "constant 60% (strategy definition)": {
+        "lock_date": "Strategy definition (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional constant: the Classic 60/40 strategy "
+            "is by-construction 60% S&P 500 equity / 40% "
+            "Bloomberg US Aggregate Bond, rebalanced monthly. "
+            "Weight pair is the strategy identifier; varying "
+            "the weights produces a different strategy."),
+        "defended": "Standard academic baseline",
+        "locked_value": "60%",
+    },
+    "constant 40% (strategy definition)": {
+        "lock_date": "Strategy definition (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional constant: the Classic 60/40 strategy "
+            "is by-construction 60% S&P 500 equity / 40% "
+            "Bloomberg US Aggregate Bond, rebalanced monthly. "
+            "Weight pair is the strategy identifier; varying "
+            "the weights produces a different strategy."),
+        "defended": "Standard academic baseline",
+        "locked_value": "40%",
+    },
 }
 
 
