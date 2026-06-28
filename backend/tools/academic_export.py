@@ -1166,6 +1166,14 @@ _FOUR_DP_PERCENTS: frozenset[str] = frozenset({
 })
 _TWO_DP_PERCENTS: frozenset[str] = frozenset({
     "weight", "turnover",
+    # June 28 2026 -- Excess return vs benchmark (annualised CAGR
+    # alpha relative to BENCHMARK, stored as fraction in
+    # strategy_results_cache.results_json[STRATEGY].excess_return
+    # from tools/backtester.py:537). Rendered at 2dp + '%' suffix
+    # so Table B.1 reads e.g. '-1.10%' / '0.00%'. Negative sign
+    # appears naturally; positives have no '+' prefix (matches
+    # the operator spec values).
+    "excess_return",
 })
 
 
@@ -1293,9 +1301,19 @@ def table_strategy_performance_full(
     headline ordering matches the dashboard's strategy table. The
     benchmark sits in the same table (not in a separate row) so a
     reader can read every column side-by-side.
+
+    June 28 2026 -- "Excess Return vs Benchmark" column inserted
+    after CAGR. Value sourced from r.get('excess_return'), which
+    is annualised CAGR alpha relative to BENCHMARK computed at
+    backtester time (tools/backtester.py:537 stores it as
+    round(cagr - bm_cagr, 4) on every strategy result). The
+    surrounding appendix text already claims this column is
+    present as a Part I required metric; this restores the
+    schema match.
     """
-    headers = ["Strategy", "Sharpe", "CAGR", "Volatility",
-               "Sortino", "Calmar", "Max DD"]
+    headers = ["Strategy", "Sharpe", "CAGR",
+               "Excess Return vs Benchmark",
+               "Volatility", "Sortino", "Calmar", "Max DD"]
     items = list(strategies.items())
     items.sort(
         key=lambda kv: -float(kv[1].get("sharpe_ratio") or 0))
@@ -1305,6 +1323,7 @@ def table_strategy_performance_full(
             str(name),
             format_metric(r.get("sharpe_ratio"), "sharpe_ratio"),
             format_metric(r.get("cagr"), "cagr"),
+            format_metric(r.get("excess_return"), "excess_return"),
             format_metric(r.get("volatility"), "volatility"),
             format_metric(r.get("sortino_ratio"), "sortino_ratio"),
             format_metric(r.get("calmar_ratio"), "calmar_ratio"),
@@ -1541,11 +1560,26 @@ async def gather_analytical_appendix_data(
     #    the right anchor: every appendix figure traces back to a
     #    strategy results row (either directly or via the analytics
     #    metric that was refreshed alongside it).
-    try:
-        from tools.cache import get_latest_strategy_hash
-        bundle["data_hash"] = await get_latest_strategy_hash()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("appendix_data_hash_read_failed", error=str(exc))
-        bundle["data_hash"] = None
+    #
+    # June 28 2026 -- when data_hash is supplied (the 3 doc generators
+    # always supply it post-PR-1-v3), use the FREEZE-EFFECTIVE hash
+    # the caller threaded through. Without this, the reproducibility
+    # line (_add_reproducibility_line at academic_docx.py:1731) wrote
+    # the LIVE hash (d0b1339e) to the appendix footer under freeze --
+    # while strategy headlines + inline {{DATA_HASH}} captions
+    # correctly showed the freeze hash. The two values disagreed in
+    # the same document. The inline {{DATA_HASH}} token already flows
+    # through the substitution table (hash-aware); only the footer
+    # reproducibility line needed this fix.
+    if data_hash:
+        bundle["data_hash"] = data_hash
+    else:
+        try:
+            from tools.cache import get_latest_strategy_hash
+            bundle["data_hash"] = await get_latest_strategy_hash()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_data_hash_read_failed", error=str(exc))
+            bundle["data_hash"] = None
 
     return bundle
