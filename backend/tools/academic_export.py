@@ -1276,55 +1276,18 @@ def harness_narrative(
                         # document_audit also flags them in
                         # the AuditWarningsBanner.
                         #
-                        # Implementation: span-based reverse-
-                        # order replacement on the form that
-                        # will be persisted. Under deferred
-                        # substitution the persisted form is
-                        # the RAW (token-bearing) text from
-                        # the stash; without deferral it's the
-                        # substituted final_text. Both forms
-                        # contain the bare-numeric offenders
-                        # at the SAME character spans (since
-                        # apply_substitutions only mutates
-                        # {{TOKEN}} runs, not bare numerics).
-                        def _wrap_unverified(
-                            text: str, violations: list,
-                        ) -> str:
-                            # Reverse-span order preserves
-                            # indices as we splice.
-                            sorted_v = sorted(
-                                violations,
-                                key=lambda v: v.span[0],
-                                reverse=True)
-                            out = text
-                            for v in sorted_v:
-                                start, end = v.span
-                                if 0 <= start < end <= len(out):
-                                    out = (
-                                        out[:start]
-                                        + "<unverified>"
-                                        + v.raw_value
-                                        + "</unverified>"
-                                        + out[end:])
-                            return out
-                        # Wrap the substituted final_text so a
-                        # non-deferral persist path sees the
-                        # tags. Also mutate the stash entry so
-                        # the deferral swap below picks up the
-                        # wrapped raw form. The substituted +
-                        # raw forms share violation spans
-                        # because apply_substitutions never
-                        # touches bare numerics, but to be
-                        # safe re-scan each side independently
-                        # against its own text shape isn't
-                        # needed -- the scan was on raw_for_
-                        # scan + the spans align with the
-                        # original raw text. For the
-                        # substituted form, do a final string
-                        # replace pass per raw_value (less
-                        # span-precise but safe given the
-                        # narrow value set).
-                        wrapped_raw = _wrap_unverified(
+                        # Span-based wrap on the raw text (the
+                        # form the deferral swap will persist),
+                        # value-based wrap on the substituted
+                        # final_text (the form the legacy path
+                        # persists). Both share the same set
+                        # of raw values; spans align with the
+                        # raw text only.
+                        from tools.untoken_numeric_check import (
+                            wrap_unverified,
+                            wrap_unverified_by_value,
+                        )
+                        wrapped_raw = wrap_unverified(
                             raw_for_scan, viols)
                         if (raw_for_scan in
                                 _raw_per_substituted.values()
@@ -1332,24 +1295,9 @@ def harness_narrative(
                                 _raw_per_substituted):
                             _raw_per_substituted[final_text] = (
                                 wrapped_raw)
-                        # Substituted form: tag each unique
-                        # raw_value once via string replace.
-                        # Bare numerics rarely collide with
-                        # other context numerics; if a value
-                        # appears multiple times in the
-                        # substituted prose, all occurrences
-                        # tag (acceptable -- the operator
-                        # wants every flag visible).
-                        _wrapped_subst = final_text
-                        for _raw_v in {
-                                v.raw_value for v in viols}:
-                            _wrapped_subst = (
-                                _wrapped_subst.replace(
-                                    _raw_v,
-                                    "<unverified>"
-                                    + _raw_v
-                                    + "</unverified>"))
-                        final_text = _wrapped_subst
+                        final_text = wrap_unverified_by_value(
+                            final_text,
+                            {v.raw_value for v in viols})
                         log.warning(
                             "untoken_lock_soft_fail",
                             agent_id=agent_id,

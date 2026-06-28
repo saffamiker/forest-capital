@@ -292,6 +292,127 @@ class TestHardLockSoftFail:
         assert "remaining_violations" in src
         assert "sample_offenders" in src
 
+    def test_shared_wrap_helpers_exist(self):
+        """The wrap helpers live in untoken_numeric_check so
+        all four document-type soft-fail paths (brief,
+        appendix, script, deck) share one implementation."""
+        from tools.untoken_numeric_check import (
+            wrap_unverified, wrap_unverified_by_value,
+        )
+        assert callable(wrap_unverified)
+        assert callable(wrap_unverified_by_value)
+
+    def test_wrap_unverified_span_based(self):
+        """Behaviour pin: span-based wrap preserves indices
+        via reverse-order replacement."""
+        from dataclasses import dataclass
+        from tools.untoken_numeric_check import wrap_unverified
+        @dataclass
+        class _V:
+            raw_value: str
+            span: tuple[int, int]
+        text = "The Sharpe is 0.86 and the MaxDD is -29.7%."
+        viols = [
+            _V("0.86", (14, 18)),
+            _V("-29.7%", (37, 43)),
+        ]
+        out = wrap_unverified(text, viols)
+        assert "<unverified>0.86</unverified>" in out
+        assert "<unverified>-29.7%</unverified>" in out
+
+    def test_wrap_unverified_by_value_replaces_all(self):
+        from tools.untoken_numeric_check import (
+            wrap_unverified_by_value,
+        )
+        text = "Sharpe 0.86 and 0.86 again."
+        out = wrap_unverified_by_value(text, {"0.86"})
+        assert out.count("<unverified>0.86</unverified>") == 2
+
+
+class TestScriptSoftFailWired:
+
+    def test_generate_script_imports_wrap(self):
+        import inspect
+        from tools.script_generation import generate_script
+        src = inspect.getsource(generate_script)
+        assert "wrap_unverified" in src
+        assert "script_untoken_lock_soft_fail" in src
+
+    def test_generate_script_does_not_raise_on_violations(
+            self):
+        """Source-pin: script soft-fail path never raises
+        UntokenNumericLockError -- it logs + wraps + persists."""
+        import inspect
+        from tools.script_generation import generate_script
+        src = inspect.getsource(generate_script)
+        assert (
+            "raise UntokenNumericLockError(" not in src)
+
+
+class TestDeckSoftFailWired:
+
+    def test_substitute_slide_content_wraps(self):
+        import inspect
+        import main as _main
+        src = inspect.getsource(
+            _main._substitute_slide_content)
+        assert "wrap_unverified" in src
+        assert "deck_untoken_lock_soft_fail" in src
+
+    def test_deck_path_does_not_raise(self):
+        import inspect
+        import main as _main
+        src = inspect.getsource(
+            _main._substitute_slide_content)
+        assert (
+            "raise UntokenNumericLockError(" not in src)
+
+
+class TestAuditCheckUnverifiedTagsAllDocTypes:
+
+    def test_audit_check_runs_unconditionally(self):
+        """Source-pin: the document_audit dispatcher fires
+        check_unverified_tags for every document type, not
+        only is_substitution_doc. Document-type-agnostic per
+        operator directive."""
+        import inspect
+        from tools.document_audit import audit_document
+        src = inspect.getsource(audit_document)
+        idx = src.find('"unverified_tags"')
+        assert idx > -1
+        # Wider window to capture the preceding doc comment.
+        slice_ = src[max(0, idx - 800):idx + 200]
+        # Operator-directive comment is present ONLY in the
+        # agnostic form.
+        assert "Document-type AGNOSTIC" in slice_
+
+    def test_check_unverified_tags_detects(self):
+        from tools.document_audit import check_unverified_tags
+        text = (
+            "The blue line surges above "
+            "<unverified>+0.5</unverified> in the post-2022 "
+            "regime.")
+        flags = check_unverified_tags(text)
+        assert len(flags) == 1
+        assert flags[0]["type"] == "unverified_numeric"
+        assert flags[0]["value"] == "+0.5"
+        assert flags[0]["severity"] == "high"
+
+    def test_check_unverified_tags_dedupes(self):
+        from tools.document_audit import check_unverified_tags
+        text = (
+            "<unverified>0.5</unverified> here "
+            "and <unverified>0.5</unverified> again.")
+        flags = check_unverified_tags(text)
+        # One flag per UNIQUE value.
+        assert len(flags) == 1
+
+    def test_check_unverified_tags_clean_returns_empty(self):
+        from tools.document_audit import check_unverified_tags
+        assert check_unverified_tags(
+            "Clean prose with no tags.") == []
+        assert check_unverified_tags("") == []
+
 
 # ── Issue 6: brief_final_recommendations token guidance ────
 

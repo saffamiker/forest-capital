@@ -19429,6 +19429,64 @@ def _substitute_slide_content(
                  slide_number=slide_number,
                  tokens_replaced=sorted(replaced_all),
                  count=len(replaced_all))
+
+    # June 28 2026 -- deck soft-fail hard-lock. Mirrors the
+    # brief / appendix / script soft-fail behaviour: scan
+    # each text field for untoken-backed numerics + wrap
+    # survivors with <unverified>...</unverified> tags. The
+    # deck doesn't go through harness_narrative (direct
+    # call_claude per slide) so it needs its own scan +
+    # wrap pass. Document-type-agnostic per operator
+    # directive (June 28 2026). Fail-open: any scanner error
+    # leaves the slide unchanged.
+    try:
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+            wrap_unverified,
+        )
+        _slide_offenders: list[str] = []
+        for _key in ("title", "headline", "speaker_notes"):
+            if isinstance(parsed.get(_key), str):
+                _viols = find_untoken_backed_numerics(
+                    parsed[_key], substitution_table)
+                if _viols:
+                    parsed[_key] = wrap_unverified(
+                        parsed[_key], _viols)
+                    _slide_offenders.extend(
+                        v.raw_value for v in _viols)
+        if isinstance(parsed.get("bullets"), list):
+            new_bullets: list[str] = []
+            for _bullet in parsed["bullets"]:
+                if isinstance(_bullet, str):
+                    _viols = find_untoken_backed_numerics(
+                        _bullet, substitution_table)
+                    if _viols:
+                        new_bullets.append(wrap_unverified(
+                            _bullet, _viols))
+                        _slide_offenders.extend(
+                            v.raw_value for v in _viols)
+                    else:
+                        new_bullets.append(_bullet)
+                else:
+                    new_bullets.append(_bullet)
+            parsed["bullets"] = new_bullets
+        if _slide_offenders:
+            log.warning(
+                "deck_untoken_lock_soft_fail",
+                document_type="presentation_deck",
+                slide_number=slide_number,
+                remaining_violations=len(_slide_offenders),
+                sample_offenders=_slide_offenders[:10],
+                note=(
+                    "hard-lock detected raw numerics in "
+                    "slide content; wrapping with "
+                    "<unverified> tags for human review."))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deck_untoken_lock_check_failed",
+            slide_number=slide_number,
+            error=str(exc))
+
     return parsed
 
 

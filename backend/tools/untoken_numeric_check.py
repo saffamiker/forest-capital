@@ -408,6 +408,72 @@ def _is_value_supported_by_substitution(
 # ── Public scanner ─────────────────────────────────────────────
 
 
+def wrap_unverified(text: str, violations: list) -> str:
+    """June 28 2026 -- shared soft-fail wrapper.
+
+    Wraps each violation's raw value with
+    `<unverified>...</unverified>` tags inline in `text`,
+    span-based + reverse-order so indices stay aligned during
+    splicing. Used by harness_narrative (brief / appendix),
+    script_generation (script), and the deck per-slide scan
+    so all four document types share the same tagging
+    convention.
+
+    Skips violations whose span is out-of-range vs text (a
+    defensive guard for callers that scan one form of the text
+    + wrap a different form). Skips on duplicate spans
+    deterministically (last span wins given the reverse
+    sort order).
+
+    Fail-open: empty violations OR empty text returns text
+    unchanged."""
+    if not text or not violations:
+        return text
+    sorted_v = sorted(
+        violations,
+        key=lambda v: v.span[0],
+        reverse=True)
+    out = text
+    seen_spans: set[tuple[int, int]] = set()
+    for v in sorted_v:
+        start, end = v.span
+        if (start, end) in seen_spans:
+            continue
+        seen_spans.add((start, end))
+        if 0 <= start < end <= len(out):
+            out = (
+                out[:start]
+                + "<unverified>"
+                + v.raw_value
+                + "</unverified>"
+                + out[end:])
+    return out
+
+
+def wrap_unverified_by_value(
+    text: str, raw_values: set[str],
+) -> str:
+    """June 28 2026 -- value-based soft-fail wrapper for
+    callers where span data isn't available (e.g. the scan
+    was done on a different text shape than the one being
+    wrapped). Tags every occurrence of each raw_value in
+    `text` exactly once per appearance using string replace.
+
+    Less precise than wrap_unverified (string replace can
+    catch a value-shaped substring inside an unrelated
+    context), but adequate when the value set is narrow +
+    every flagged occurrence deserves a tag for human
+    review."""
+    if not text or not raw_values:
+        return text
+    out = text
+    for raw_v in raw_values:
+        out = out.replace(
+            raw_v,
+            "<unverified>" + raw_v + "</unverified>")
+    return out
+
+
 # June 28 2026 (Issue A) -- always-exempt bare values. The
 # scanner skips these BEFORE the sub-table-priority gate so a
 # bare value in this set is allowed even when its corresponding
