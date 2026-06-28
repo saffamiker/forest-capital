@@ -218,6 +218,34 @@ def _index_by_strategy(rows: list[dict] | None) -> dict[str, dict]:
     return out
 
 
+def _pre_2022_months(
+    study_months: int | None,
+    strategy_cache: dict | None,
+) -> str:
+    """June 28 2026 -- months in the study period BEFORE 2022.
+
+    Computed as study_months - post_2022_window_length where
+    post_2022_window_length is the number of months from Jan
+    2022 through STUDY_END (May 2026 = 53). Falls back to a
+    direct subtraction against the cached n_observations when
+    study_months is None, then to em-dash when neither source
+    resolves.
+
+    Used by brief / appendix prose that contrasts the pre- and
+    post-2022 correlation regimes."""
+    POST_2022_MONTHS = 53  # Jan 2022 -> May 2026 inclusive
+    n = study_months
+    if n is None and isinstance(strategy_cache, dict):
+        n = strategy_cache.get("n_observations")
+    try:
+        n_int = int(n) if n is not None else None
+    except (TypeError, ValueError):
+        return "—"
+    if n_int is None or n_int <= POST_2022_MONTHS:
+        return "—"
+    return str(n_int - POST_2022_MONTHS)
+
+
 def _cost_scenario(
     cost_sensitivity: dict | None, bps: int,
 ) -> dict:
@@ -577,6 +605,41 @@ def build_substitution_table(
         "{{STUDY_START}}": study_start,
         "{{STUDY_END}}": study_end,
         "{{DATA_HASH}}": (data_hash or "")[:8] or "—",
+
+        # June 28 2026 -- definitional Classic 60/40 weights.
+        # These are by-construction strategy constants (not
+        # cache-derived) but get tokens so prose like
+        # "{{CLASSIC_6040_WEIGHT_EQUITY}} equity and
+        # {{CLASSIC_6040_WEIGHT_BOND}} bonds" stays
+        # substitution-aware -- the LLM can use the tokens
+        # rather than emitting raw "60% equity" which trips
+        # the hard-lock loop. The structural exemption
+        # balanced_allocation_weights covers the bare "60%/40%"
+        # form when the LLM prefers it.
+        "{{CLASSIC_6040_WEIGHT_EQUITY}}": "60%",
+        "{{CLASSIC_6040_WEIGHT_BOND}}":   "40%",
+        # Underscored-variant aliases for the recovery + MaxDD
+        # tokens. The Academic Writer prompt has historically
+        # been inconsistent (emits both "{{CLASSIC_6040_*}}" and
+        # "{{CLASSIC_60_40_*}}"); rather than fight the prompt
+        # we accept both names. Resolved value is identical to
+        # the canonical un-underscored form.
+        "{{CLASSIC_60_40_RECOVERY}}":
+            format_months_only(
+                classic.get("drawdown_recovery_days")),
+        "{{CLASSIC_60_40_RECOVERY_MONTHS}}":
+            format_months_from_days(
+                classic.get("drawdown_recovery_days")),
+        "{{CLASSIC_60_40_MAX_DD}}": format_pct(
+            classic.get("max_drawdown")),
+        "{{CLASSIC_60_40_SHARPE}}": format_sharpe(
+            classic.get("sharpe")),
+        # June 28 2026 -- months-before-2022 in the study
+        # period. Derived from STUDY_MONTHS minus the post-2022
+        # window length (when available); falls back to em-dash
+        # when either is null.
+        "{{PRE_2022_MONTHS}}": _pre_2022_months(
+            study_months, strategy_cache),
     }
 
     # ── Deck-specific tokens (Layer 2, June 21 2026) ────────────────────
