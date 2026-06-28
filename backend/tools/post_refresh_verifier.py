@@ -51,69 +51,22 @@ except ImportError:
     log = logging.getLogger(__name__)  # type: ignore[assignment]
 
 
-# ── Submission scope classifier (TODO: consolidate post-merge) ───
+# ── Submission scope classifier (consolidated June 28 2026) ──────
 #
-# Mirrors backend/tools/data_reference_catalog.classify_submission_scope
-# from PR #459 (the 4-tasks PR). Defined locally here so the
-# verifier has no runtime dependency on the data-reference
-# endpoint OR on the 4-tasks PR merge order. Both copies MUST
-# stay in sync.
-#
-# TODO: consolidate with data_reference_catalog.py
-# classify_submission_scope after 4-tasks PR merges. Import the
-# canonical version and delete this local copy.
-
-SCOPE_LOCKED        = "IN_SCOPE_LOCKED"
-SCOPE_CONSTANT      = "IN_SCOPE_CONSTANT"
-SCOPE_FULL_DATASET  = "IN_SCOPE_FULL_DATASET"
-SCOPE_LIVE          = "OUT_OF_SCOPE_LIVE"
-
-_FULL_DATASET_TOKENS: frozenset[str] = frozenset({
-    "{{STUDY_MONTHS}}", "{{STUDY_START}}", "{{STUDY_END}}",
-    "{{PRE_2022_EQ_IG_CORR}}", "{{POST_2022_EQ_IG_CORR}}",
-})
-
-_LIVE_SOURCE_PREFIXES: tuple[str, ...] = (
-    "cio_recommendation.",
-    "regime_signals_cache.",
-    "data.live_signals.",
-    "data.cio_row.",
+# Re-exported from backend/tools/data_reference_catalog (PR #459)
+# so this module + the data-reference endpoint share a single
+# source of truth. The catalog's classify_submission_scope was
+# extended to handle the verifier's source-less call path by
+# checking _LIVE_TOKEN_NAMES before the source-prefix check, so
+# a verifier walking the substitution table (just {token: value}
+# pairs, no source field) still classifies LIVE tokens correctly.
+from tools.data_reference_catalog import (  # noqa: E402
+    SCOPE_LOCKED,
+    SCOPE_CONSTANT,
+    SCOPE_FULL_DATASET,
+    SCOPE_LIVE,
+    classify_submission_scope,
 )
-
-# Tokens whose source path isn't tracked by the catalog (live
-# CIO / regime tokens that the verifier sees as raw token names
-# only). Hardcoded as LIVE so the verifier can classify them
-# without needing the catalog source field.
-_LIVE_TOKEN_NAMES: frozenset[str] = frozenset({
-    "{{CURRENT_REGIME}}", "{{REGIME_CONFIDENCE}}",
-    "{{CURRENT_EQUITY_PCT}}", "{{CURRENT_IG_PCT}}",
-    "{{CURRENT_HY_PCT}}", "{{CURRENT_BOND_PCT}}",
-    "{{BLEND_REGIME_SWITCHING_WT}}",
-    "{{BLEND_BENCHMARK_WT}}", "{{BLEND_CLASSIC_6040_WT}}",
-    "{{VIX_CURRENT}}", "{{CREDIT_SPREAD_CURRENT}}",
-    "{{YIELD_CURVE_CURRENT}}", "{{EQUITY_TREND_CURRENT}}",
-    "{{ESS_CURRENT}}",
-})
-
-
-def classify_submission_scope(
-    token: str, source: str = "", is_locked: bool = False,
-) -> str:
-    """Resolution order matches the canonical
-    data_reference_catalog.classify_submission_scope:
-      1. Explicit FULL_DATASET token set
-      2. LIVE token name OR live source prefix
-      3. is_locked=True -> CONSTANT
-      4. Fallthrough -> LOCKED"""
-    if token in _FULL_DATASET_TOKENS:
-        return SCOPE_FULL_DATASET
-    if token in _LIVE_TOKEN_NAMES:
-        return SCOPE_LIVE
-    if any(source.startswith(p) for p in _LIVE_SOURCE_PREFIXES):
-        return SCOPE_LIVE
-    if is_locked:
-        return SCOPE_CONSTANT
-    return SCOPE_LOCKED
 
 
 # ── Canonical rounding rules ─────────────────────────────────────

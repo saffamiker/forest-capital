@@ -169,9 +169,27 @@ _LIVE_SOURCE_PREFIXES: tuple[str, ...] = (
     "data.cio_row.",
 )
 
+# June 28 2026 consolidation -- LIVE tokens identifiable by NAME
+# alone (no source string needed). Callers without access to the
+# catalog source field (e.g. the post-refresh verifier walking a
+# raw substitution table) classify LIVE tokens via this set.
+# Kept here so both the catalog endpoint AND the verifier share
+# a single source of truth; replaces the local copy that the
+# verifier carried with a TODO from PR #460.
+_LIVE_TOKEN_NAMES: frozenset[str] = frozenset({
+    "{{CURRENT_REGIME}}", "{{REGIME_CONFIDENCE}}",
+    "{{CURRENT_EQUITY_PCT}}", "{{CURRENT_IG_PCT}}",
+    "{{CURRENT_HY_PCT}}", "{{CURRENT_BOND_PCT}}",
+    "{{BLEND_REGIME_SWITCHING_WT}}",
+    "{{BLEND_BENCHMARK_WT}}", "{{BLEND_CLASSIC_6040_WT}}",
+    "{{VIX_CURRENT}}", "{{CREDIT_SPREAD_CURRENT}}",
+    "{{YIELD_CURVE_CURRENT}}", "{{EQUITY_TREND_CURRENT}}",
+    "{{ESS_CURRENT}}",
+})
+
 
 def classify_submission_scope(
-    token: str, source: str, is_locked: bool,
+    token: str, source: str = "", is_locked: bool = False,
 ) -> str:
     """Derive a token's submission scope from its existing
     catalog fields. See SCOPE_LEGEND for the four-category
@@ -179,10 +197,14 @@ def classify_submission_scope(
 
     Resolution order (first match wins):
       1. Explicit FULL_DATASET token set (STUDY_*, rolling corr)
-      2. LIVE source prefix (cio_recommendation, regime_signals_,
-         live_signals, cio_row)
-      3. is_locked=True -> CONSTANT (hardcoded in academic_deck)
-      4. Fallthrough -> LOCKED (strategy cache, historical
+      2. LIVE token name (CURRENT_REGIME, watchpoints, etc) --
+         lets callers without a source field classify LIVE
+         tokens correctly (e.g. the post-refresh verifier).
+      3. LIVE source prefix (cio_recommendation, regime_signals_,
+         live_signals, cio_row) -- catalog callers use this when
+         source is available.
+      4. is_locked=True -> CONSTANT (hardcoded in academic_deck)
+      5. Fallthrough -> LOCKED (strategy cache, historical
          analytics, factor loadings -- everything keyed to the
          freeze hash)
 
@@ -192,7 +214,10 @@ def classify_submission_scope(
     are explicit exceptions; FULL_DATASET is a small named set."""
     if token in _FULL_DATASET_TOKENS:
         return SCOPE_FULL_DATASET
-    if any(source.startswith(p) for p in _LIVE_SOURCE_PREFIXES):
+    if token in _LIVE_TOKEN_NAMES:
+        return SCOPE_LIVE
+    if source and any(
+            source.startswith(p) for p in _LIVE_SOURCE_PREFIXES):
         return SCOPE_LIVE
     if is_locked:
         return SCOPE_CONSTANT
