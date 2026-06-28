@@ -196,6 +196,8 @@ def _canvas_slide(slide_id: int, title: str, content: str) -> dict[str, Any]:
 
 def deck_to_editor(
     narratives: dict[str, str],
+    *,
+    substitution_table: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """
     Builds the editor content for a generated presentation deck.
@@ -208,6 +210,22 @@ def deck_to_editor(
     otherwise from the static per-slide description in _DECK_SLIDES — so
     no slide opens blank. speaker_notes start EMPTY so Molly writes her
     own. content_text concatenates every slide for Academic Review.
+
+    June 28 2026 (Phase 2 substitution-deferral audit) -- the
+    deck's canvas-element content_json schema is structurally
+    incompatible with the dual-mode token_value architecture
+    (Konva positioned elements, not TipTap inline nodes). The
+    upgrade pass does not walk canvas elements; the NodeView
+    only renders inside TipTap. So the deck NEVER benefits from
+    deferring substitution -- the only consequence under
+    DEFER_SUBSTITUTION_TO_EXPORT=ON would be that the operator
+    sees literal `{{OOS_SHARPE_BLEND}}` strings in the Konva
+    canvas editor (bad UX, zero upside).
+
+    Recommendation per audit: substitute at this boundary
+    REGARDLESS of the deferral flag's state. The PPTX export
+    pipeline's _substitute_pptx_text post-build sweep remains
+    a no-op safety net (nothing left to substitute).
     """
     slides: list[dict[str, Any]] = []
     text_lines: list[str] = []
@@ -216,6 +234,12 @@ def deck_to_editor(
         # the static seed — never an empty body.
         narrative = narratives.get(key, "").strip() if key else ""
         content = narrative or seed
+        # June 28 2026 -- substitute at this boundary so the
+        # canvas editor never displays raw {{TOKEN}}. No-op when
+        # no substitution_table OR no tokens to replace.
+        if substitution_table:
+            content = _apply_subs(content, substitution_table)
+            title = _apply_subs(title, substitution_table)
         slides.append(_canvas_slide(i, title, content))
         text_lines.append(f"Slide {i}: {title}")
         if content:
@@ -551,6 +575,7 @@ def deck_slides_to_editor(
     slides: Any,
     *,
     strategy_names: list[str] | None = None,
+    substitution_table: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Editor content for the eleven-slide deck (bridges #98 / #100,
     June 7 2026 -- rebuilt from the six-slide narrative to an eleven-
@@ -579,12 +604,27 @@ def deck_slides_to_editor(
     """
     from tools.academic_deck import SLIDE_TITLES, _normalize_slides
 
+    # June 28 2026 (Phase 2 substitution-deferral audit) -- per
+    # the deck audit, the deck content_json schema (canvas
+    # elements) is structurally incompatible with the dual-mode
+    # token_value architecture. So the deck ALWAYS substitutes
+    # at this boundary regardless of DEFER_SUBSTITUTION_TO_EXPORT
+    # state -- otherwise the Konva canvas editor would display
+    # literal {{OOS_SHARPE_BLEND}} strings in slide content with
+    # no NodeView affordance to resolve them. The PPTX export's
+    # _substitute_pptx_text post-build pass remains a no-op
+    # safety net (nothing left to substitute after this).
+    def _sub(s: str) -> str:
+        if not substitution_table or not isinstance(s, str):
+            return s
+        return _apply_subs(s, substitution_table)
+
     norm = _normalize_slides(slides)
     canvas_slides: list[dict[str, Any]] = []
     text_lines: list[str] = []
     for i, sl in enumerate(norm, start=1):
-        title = sl.get("title") or SLIDE_TITLES[i - 1]
-        bullets = sl.get("bullets") or []
+        title = _sub(sl.get("title") or SLIDE_TITLES[i - 1])
+        bullets = [_sub(b) for b in (sl.get("bullets") or [])]
         body = "\n".join(f"- {b}" for b in bullets)
 
         # June 26 2026 -- table_data now flows into a separate
@@ -598,9 +638,9 @@ def deck_slides_to_editor(
         table_spec: dict[str, Any] | None = None
         td = sl.get("table_data")
         if isinstance(td, dict) and td.get("rows"):
-            headers = [str(h) for h in (td.get("headers") or [])]
+            headers = [_sub(str(h)) for h in (td.get("headers") or [])]
             rows = [
-                [str(c) for c in r]
+                [_sub(str(c)) for c in r]
                 for r in (td.get("rows") or [])
                 if isinstance(r, (list, tuple))
             ]
@@ -645,7 +685,7 @@ def deck_slides_to_editor(
                 i, title, body, chart_key,
                 strategy_names=strategy_names,
                 table_spec=table_spec)
-        notes = str(sl.get("speaker_notes") or "").strip()
+        notes = _sub(str(sl.get("speaker_notes") or "").strip())
         if notes:
             cs["speaker_notes"] = notes
         canvas_slides.append(cs)
@@ -692,6 +732,8 @@ def _word_count_warning_block(
 
 def executive_brief_to_editor(
     narratives: dict[str, str],
+    *,
+    substitution_table: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """
     Builds the editor content for a generated executive brief.
@@ -703,21 +745,51 @@ def executive_brief_to_editor(
     sat on the Executive Summary, Limitations and Final Recommendations
     sections have been removed; the Academic Writer's prose stands as
     each section's interpretation. Bob edits for voice in-editor.
+
+    June 28 2026 (Phase 2 substitution deferral): when
+    substitution_table is supplied AND
+    DEFER_SUBSTITUTION_TO_EXPORT is on at the caller, narratives
+    carry raw {{TOKEN}} placeholders. content_json is built with
+    the tokens INTACT (the dual-mode upgrade pass then converts
+    them to token_value nodes; the in-editor render resolves
+    them via the NodeView). content_text is built from the
+    SUBSTITUTED projection so full-text search + word counts
+    see the rendered values, matching what a human reader sees.
+    When substitution_table is None (legacy generation OR flag
+    OFF) both columns hold whatever narratives already carry.
     """
     doc_content: list[dict] = []
     text_lines: list[str] = []
+    text_lines_substituted: list[str] = []
     for heading, key, callout in _EXEC_BRIEF_SECTIONS:
-        nodes, lines = _section_blocks(heading, narratives.get(key, ""),
-                                       callout)
+        narrative = narratives.get(key, "")
+        nodes, lines = _section_blocks(heading, narrative, callout)
         doc_content.extend(nodes)
         text_lines.extend(lines)
+        # June 28 2026 -- parallel substituted projection for
+        # content_text only. The narrative text inside each
+        # section block is substituted; the heading + callout
+        # markers are token-free already so a straight string
+        # replace on the raw narrative produces the right
+        # parallel `lines` shape.
+        if substitution_table:
+            sub_narrative = _apply_subs(narrative, substitution_table)
+            _, sub_lines = _section_blocks(
+                heading, sub_narrative, callout)
+            text_lines_substituted.extend(sub_lines)
     content_json = {"type": "doc", "content": doc_content}
-    content_text = "\n".join(text_lines).strip()
+    if substitution_table and text_lines_substituted:
+        content_text = (
+            "\n".join(text_lines_substituted).strip())
+    else:
+        content_text = "\n".join(text_lines).strip()
     return content_json, content_text
 
 
 def analytical_appendix_to_editor(
     narratives: dict[str, str],
+    *,
+    substitution_table: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """
     Builds the editor content for a generated analytical appendix.
@@ -729,14 +801,47 @@ def analytical_appendix_to_editor(
     full data tables alongside it. Bob edits the prose in-editor and
     the regenerated .docx includes both his edits and the live
     cached tables.
+
+    June 28 2026 (Phase 2 substitution deferral): same contract
+    as executive_brief_to_editor -- content_json preserves
+    {{TOKEN}} placeholders when substitution_table is supplied;
+    content_text is derived from the substituted projection.
     """
     doc_content: list[dict] = []
     text_lines: list[str] = []
+    text_lines_substituted: list[str] = []
     for heading, key, callout in _ANALYTICAL_APPENDIX_SECTIONS:
-        nodes, lines = _section_blocks(heading, narratives.get(key, ""),
-                                       callout)
+        narrative = narratives.get(key, "")
+        nodes, lines = _section_blocks(heading, narrative, callout)
         doc_content.extend(nodes)
         text_lines.extend(lines)
+        if substitution_table:
+            sub_narrative = _apply_subs(narrative, substitution_table)
+            _, sub_lines = _section_blocks(
+                heading, sub_narrative, callout)
+            text_lines_substituted.extend(sub_lines)
     content_json = {"type": "doc", "content": doc_content}
-    content_text = "\n".join(text_lines).strip()
+    if substitution_table and text_lines_substituted:
+        content_text = (
+            "\n".join(text_lines_substituted).strip())
+    else:
+        content_text = "\n".join(text_lines).strip()
     return content_json, content_text
+
+
+def _apply_subs(text: str, table: dict[str, str]) -> str:
+    """June 28 2026 -- thin wrapper around
+    numeric_substitution.apply_substitutions for use by the
+    editor-content builders. Returns text with {{TOKEN}}
+    replaced by table values. Fail-open: any error returns the
+    input unchanged (the caller falls through to the original
+    narrative for content_text -- both states are correct, just
+    one carries tokens)."""
+    if not text or not table:
+        return text
+    try:
+        from tools.numeric_substitution import apply_substitutions
+        substituted, _ = apply_substitutions(text, table)
+        return substituted
+    except Exception:
+        return text

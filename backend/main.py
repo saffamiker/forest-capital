@@ -6501,8 +6501,40 @@ async def _generate_script_document(
 
     exec_brief = await get_current_draft(email, "executive_brief")
     midpoint = await get_current_draft(email, "midpoint_paper")
+
+    # June 28 2026 (Phase 2) -- build a substitution_table from
+    # the freeze-aware effective hash so the script generator
+    # can derive content_text from the substituted projection
+    # under DEFER_SUBSTITUTION_TO_EXPORT. Fail-open: any error
+    # leaves substitution_table=None + script_to_tiptap falls
+    # through to the legacy single-pass behaviour.
+    _script_sub_table: dict[str, str] | None = None
+    try:
+        from tools.audit_assembler import current_data_hash
+        from tools.cache import get_strategy_cache
+        from tools.cio_recommendation import (
+            get_latest_recommendation,
+        )
+        from tools.numeric_substitution import (
+            get_substitution_table,
+        )
+        from tools.submission_freeze import (
+            get_effective_data_hash,
+        )
+        _live = await current_data_hash()
+        _eff = await get_effective_data_hash(_live) or _live
+        _cio = await get_latest_recommendation() or {}
+        _scache = await get_strategy_cache(_eff) or {}
+        _script_sub_table = get_substitution_table(
+            _eff, _scache, _cio, hash_verified=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "script_substitution_table_build_failed",
+            error=str(exc))
+
     result = await asyncio.to_thread(
-        generate_script, deck, exec_brief, midpoint)
+        generate_script, deck, exec_brief, midpoint,
+        substitution_table=_script_sub_table)
 
     # Stamp the live strategy hash on the draft (migration 063).
     try:
@@ -17554,7 +17586,13 @@ async def _generate_brief_document(
         try:
             from tools.editor_content import executive_brief_to_editor
             from tools.editor_drafts import create_draft
-            content_json, content_text = executive_brief_to_editor(narratives)
+            # June 28 2026 (Phase 2) -- thread the substitution_table
+            # so that under DEFER_SUBSTITUTION_TO_EXPORT the brief's
+            # content_json preserves {{TOKEN}} placeholders + the
+            # parallel content_text shadow column carries the
+            # resolved values for full-text search + word counts.
+            content_json, content_text = executive_brief_to_editor(
+                narratives, substitution_table=substitution_table)
 
             # ── Concern 7h: pre-submission adversarial critic ─────
             # Inlines the critic + debate-round response into the
@@ -18272,8 +18310,12 @@ async def _generate_appendix_document(
         try:
             from tools.editor_content import analytical_appendix_to_editor
             from tools.editor_drafts import create_draft
+            # June 28 2026 (Phase 2) -- same substitution_table
+            # threading as the brief path. content_json keeps
+            # {{TOKEN}} placeholders intact under flag ON;
+            # content_text carries the substituted projection.
             content_json, content_text = analytical_appendix_to_editor(
-                narratives)
+                narratives, substitution_table=substitution_table)
 
             # ── Concern 7h: pre-submission adversarial critic ─────
             try:
@@ -19185,8 +19227,16 @@ async def _finalize_deck(
         # fallback path handles the absent-series case unchanged.
         strategy_names = default_strategy_names_from_cache(
             data.get("strategy_results"))
+        # June 28 2026 (Phase 2 substitution-deferral audit) --
+        # always substitute at this boundary regardless of the
+        # DEFER_SUBSTITUTION_TO_EXPORT flag. Deck content_json
+        # is canvas-element schema (Konva) and structurally
+        # incompatible with the dual-mode token_value
+        # architecture; surfacing raw {{TOKEN}} in the canvas
+        # editor would be bad UX with no upside.
         content_json, content_text = deck_slides_to_editor(
-            slides, strategy_names=strategy_names)
+            slides, strategy_names=strategy_names,
+            substitution_table=substitution_table)
 
         # ── Concern 7h: pre-submission adversarial critic ─────
         try:

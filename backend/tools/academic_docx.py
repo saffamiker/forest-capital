@@ -644,6 +644,23 @@ def build_executive_brief(
     """
     doc = _new_document()
 
+    # June 28 2026 (Phase 2 substitution deferral) -- when the
+    # substitution_table is supplied, pre-substitute every
+    # narrative section once so the 19 downstream
+    # _add_brief_body call sites all see resolved values.
+    # Under DEFER_SUBSTITUTION_TO_EXPORT=ON, narratives carry
+    # {{TOKEN}} placeholders; this resolves them at export
+    # time so the DOCX body prose renders the live values.
+    # Under flag OFF (or legacy generation) narratives already
+    # carry resolved values + the substitution is a harmless
+    # no-op (no {{TOKEN}} survives to replace).
+    if substitution_table:
+        narratives = {
+            k: _apply_substitutions(v, substitution_table)
+            if isinstance(v, str) else v
+            for k, v in narratives.items()
+        }
+
     # ── Title page ────────────────────────────────────────────────────────
     for _ in range(3):
         doc.add_paragraph()
