@@ -408,6 +408,91 @@ def _is_value_supported_by_substitution(
 # ── Public scanner ─────────────────────────────────────────────
 
 
+def wrap_unverified(text: str, violations: list) -> str:
+    """June 28 2026 -- shared soft-fail wrapper.
+
+    Wraps each violation's raw value with
+    `<unverified>...</unverified>` tags inline in `text`,
+    span-based + reverse-order so indices stay aligned during
+    splicing. Used by harness_narrative (brief / appendix),
+    script_generation (script), and the deck per-slide scan
+    so all four document types share the same tagging
+    convention.
+
+    Skips violations whose span is out-of-range vs text (a
+    defensive guard for callers that scan one form of the text
+    + wrap a different form). Skips on duplicate spans
+    deterministically (last span wins given the reverse
+    sort order).
+
+    Fail-open: empty violations OR empty text returns text
+    unchanged."""
+    if not text or not violations:
+        return text
+    sorted_v = sorted(
+        violations,
+        key=lambda v: v.span[0],
+        reverse=True)
+    out = text
+    seen_spans: set[tuple[int, int]] = set()
+    for v in sorted_v:
+        start, end = v.span
+        if (start, end) in seen_spans:
+            continue
+        seen_spans.add((start, end))
+        if 0 <= start < end <= len(out):
+            out = (
+                out[:start]
+                + "<unverified>"
+                + v.raw_value
+                + "</unverified>"
+                + out[end:])
+    return out
+
+
+def wrap_unverified_by_value(
+    text: str, raw_values: set[str],
+) -> str:
+    """June 28 2026 -- value-based soft-fail wrapper for
+    callers where span data isn't available (e.g. the scan
+    was done on a different text shape than the one being
+    wrapped). Tags every occurrence of each raw_value in
+    `text` exactly once per appearance using string replace.
+
+    Less precise than wrap_unverified (string replace can
+    catch a value-shaped substring inside an unrelated
+    context), but adequate when the value set is narrow +
+    every flagged occurrence deserves a tag for human
+    review."""
+    if not text or not raw_values:
+        return text
+    out = text
+    for raw_v in raw_values:
+        out = out.replace(
+            raw_v,
+            "<unverified>" + raw_v + "</unverified>")
+    return out
+
+
+# June 28 2026 (Issue A) -- always-exempt bare values. The
+# scanner skips these BEFORE the sub-table-priority gate so a
+# bare value in this set is allowed even when its corresponding
+# {{TOKEN}} exists in the substitution table. Used for known
+# constants where the LLM's correction-pass retries can't be
+# reliably driven to emit the token form. Adding here is a
+# deliberate operator-blessed override of the "never exempt a
+# substitution-table value" rule.
+_ALWAYS_EXEMPT_BARE_VALUES: frozenset[str] = frozenset({
+    # Benjamini-Hochberg FDR significance threshold. Token form
+    # is {{BH_SIGNIFICANCE_THRESHOLD}}. The bare 0.005 form
+    # appears in correction-pass retries of brief_key_findings
+    # and brief_final_recommendations where Sonnet rewrites
+    # "p < 0.005" prose paraphrased without the operator
+    # ("the 0.005 threshold" / "an alpha of 0.005").
+    "0.005",
+})
+
+
 # June 28 2026 -- references / bibliography heading regexes.
 # Used to detect the start of a references block + the start
 # of any subsequent non-references heading so the scanner can
@@ -564,6 +649,31 @@ def find_untoken_backed_numerics(
         if raw in anchor_values:
             continue
         if raw.rstrip("%") in anchor_values:
+            continue
+
+        # June 28 2026 (Issue A) -- always-exempt bare-value
+        # carve-out. Operator-blessed override for known
+        # constants where:
+        #   1. The value DOES have a corresponding token in
+        #      the substitution table (e.g. 0.005 ->
+        #      {{BH_SIGNIFICANCE_THRESHOLD}}).
+        #   2. The first occurrence gets substituted correctly
+        #      during initial generation.
+        #   3. Correction-pass retries regenerate fresh prose
+        #      containing the bare form, and Sonnet stubbornly
+        #      refuses to swap to the token despite the
+        #      correction feedback. Net effect: hard-lock cap
+        #      triggers + the section fails as [DATA PENDING].
+        # The override fires BEFORE the sub-table-priority
+        # gate so the bare form is allowed through. The
+        # token-aware paths (initial generation + critic
+        # corrections) still emit the {{TOKEN}} when the LLM
+        # gets it right -- this only catches the failure mode
+        # where Sonnet won't swap on retry.
+        if raw in _ALWAYS_EXEMPT_BARE_VALUES:
+            log.info(
+                "untoken_numeric_check_always_exempt",
+                value=raw)
             continue
 
         # Either supported (swap) or unsupported (rephrase).

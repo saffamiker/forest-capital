@@ -143,25 +143,275 @@ class TestBare0005StatThresholdExemption:
         viols = find_untoken_backed_numerics(text, {})
         assert viols == []
 
-    def test_sub_table_priority_preserved_over_bare_exempt(
+    def test_sub_table_priority_preserved_for_non_overridden_values(
             self):
-        """When {{BH_SIGNIFICANCE_THRESHOLD}} IS in the table,
-        bare 0.005 must still flag as token_available so the
-        LLM gets the swap suggestion (sub-table-priority
-        constraint)."""
+        """June 28 2026 -- 0.005 is now in
+        _ALWAYS_EXEMPT_BARE_VALUES (Issue A override). For
+        every value NOT in the override set the sub-table-
+        priority constraint still holds: a value in the table
+        flags as token_available so the LLM gets the swap
+        suggestion. Test uses a non-overridden value (0.86)."""
         from tools.untoken_numeric_check import (
             find_untoken_backed_numerics,
         )
-        text = "The 0.005 threshold is the standard."
+        text = "The 0.86 figure is the headline Sharpe."
+        viols = find_untoken_backed_numerics(
+            text,
+            substitution_table={
+                "{{OOS_SHARPE_BLEND}}": "0.86"})
+        assert len(viols) >= 1
+        assert any(
+            v.suggested_token == "{{OOS_SHARPE_BLEND}}"
+            for v in viols)
+
+
+# ── Issue A: always-exempt bare 0.005 ─────────────────────
+
+
+class TestAlwaysExemptBare0005Override:
+    """0.005 IS in the substitution table as
+    {{BH_SIGNIFICANCE_THRESHOLD}}. The first occurrence in any
+    section gets substituted correctly. Correction-pass retries
+    regenerate fresh prose with bare 0.005 (paraphrased without
+    the operator) and Sonnet stubbornly refuses to swap. The
+    override fires BEFORE the sub-table-priority gate so the
+    bare form is allowed through this specific failure mode.
+    """
+
+    def test_set_exists_and_includes_0005(self):
+        from tools.untoken_numeric_check import (
+            _ALWAYS_EXEMPT_BARE_VALUES,
+        )
+        assert "0.005" in _ALWAYS_EXEMPT_BARE_VALUES
+
+    def test_bare_0005_passes_when_in_sub_table(self):
+        """The load-bearing semantic: bare 0.005 with
+        {{BH_SIGNIFICANCE_THRESHOLD}} in the table must NOT
+        flag (operator-blessed override of sub-table-priority
+        for this specific value)."""
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        text = "Sonnet rewrote: 'the 0.005 threshold for BH-FDR.'"
         viols = find_untoken_backed_numerics(
             text,
             substitution_table={
                 "{{BH_SIGNIFICANCE_THRESHOLD}}": "0.005"})
-        # Sub-table priority -- 0.005 flags as available.
-        assert len(viols) >= 1
+        assert all(
+            v.raw_value != "0.005" for v in viols), (
+            f"0.005 leaked despite always-exempt override: "
+            f"{[v.raw_value for v in viols]}")
+
+    def test_other_values_still_respect_sub_table_priority(
+            self):
+        """Sub-table-priority preserved for every value NOT in
+        _ALWAYS_EXEMPT_BARE_VALUES -- the override is targeted,
+        not a general gate weakening."""
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        text = "The Sharpe is 0.86 over the period."
+        viols = find_untoken_backed_numerics(
+            text,
+            substitution_table={
+                "{{OOS_SHARPE_BLEND}}": "0.86"})
+        # 0.86 NOT in the override set -- still flags as
+        # token_available.
         assert any(
-            v.suggested_token == "{{BH_SIGNIFICANCE_THRESHOLD}}"
+            v.raw_value == "0.86"
+            and v.severity == "token_available"
             for v in viols)
+
+
+# ── Issue B: brief_key_findings correlation token guidance ─
+
+
+class TestBriefKeyFindingsCorrelationTokenGuidance:
+
+    def test_prompt_directs_to_use_correlation_tokens(self):
+        import main as _main
+        with open(
+                _main.__file__, encoding="utf-8") as f:
+            src = f.read()
+        kf_idx = src.find('"brief_key_findings"')
+        assert kf_idx > -1
+        slice_ = src[kf_idx:kf_idx + 6000]
+        # Required tokens for the correlation regime
+        # description.
+        assert "{{PRE_2022_EQ_IG_CORR}}" in slice_
+        assert "{{POST_2022_EQ_IG_CORR}}" in slice_
+        # And an explicit guard against the bare +0.5 form.
+        assert "+0.5" in slice_, (
+            "prompt should explicitly call out the +0.5 "
+            "approximation as forbidden")
+        # CORRELATION REGIME framing.
+        assert "CORRELATION REGIME" in slice_
+
+
+# ── Soft-fail on hard-lock cap (NEW) ──────────────────────
+
+
+class TestHardLockSoftFail:
+    """Operator-directed change for the June 30 deadline:
+    [DATA PENDING] in any section is a hard submission blocker;
+    a flagged numeric is recoverable via human review of the
+    audit_warnings banner. The hard-lock 3-pass cap now soft-
+    fails -- logs a warning + persists the best-attempt
+    narrative instead of raising UntokenNumericLockError.
+    """
+
+    def test_harness_does_not_raise_on_lock_cap(self):
+        """Source-pin: the hard-lock cap branch must NOT call
+        the UntokenNumericLockError constructor. The class
+        name may still appear in comments / imports describing
+        the prior behaviour; the load-bearing semantic is the
+        absence of the constructor call."""
+        import inspect
+        from tools.academic_export import harness_narrative
+        src = inspect.getsource(harness_narrative)
+        # The constructor call form is
+        # `raise UntokenNumericLockError(` -- distinguishes
+        # the actual raise statement from textual mentions in
+        # docstrings / inline comments.
+        assert (
+            "raise UntokenNumericLockError("
+            not in src), (
+            "soft-fail violated: the cap branch raises "
+            "UntokenNumericLockError instead of breaking "
+            "out with best-attempt prose")
+
+    def test_soft_fail_log_event_present(self):
+        """Source-pin: the cap branch logs untoken_lock_soft_fail
+        with the remaining-violations count + sample offenders
+        so the operator can grep Render logs for affected
+        sections."""
+        import inspect
+        from tools.academic_export import harness_narrative
+        src = inspect.getsource(harness_narrative)
+        assert "untoken_lock_soft_fail" in src
+        assert "remaining_violations" in src
+        assert "sample_offenders" in src
+
+    def test_shared_wrap_helpers_exist(self):
+        """The wrap helpers live in untoken_numeric_check so
+        all four document-type soft-fail paths (brief,
+        appendix, script, deck) share one implementation."""
+        from tools.untoken_numeric_check import (
+            wrap_unverified, wrap_unverified_by_value,
+        )
+        assert callable(wrap_unverified)
+        assert callable(wrap_unverified_by_value)
+
+    def test_wrap_unverified_span_based(self):
+        """Behaviour pin: span-based wrap preserves indices
+        via reverse-order replacement."""
+        from dataclasses import dataclass
+        from tools.untoken_numeric_check import wrap_unverified
+        @dataclass
+        class _V:
+            raw_value: str
+            span: tuple[int, int]
+        text = "The Sharpe is 0.86 and the MaxDD is -29.7%."
+        viols = [
+            _V("0.86", (14, 18)),
+            _V("-29.7%", (37, 43)),
+        ]
+        out = wrap_unverified(text, viols)
+        assert "<unverified>0.86</unverified>" in out
+        assert "<unverified>-29.7%</unverified>" in out
+
+    def test_wrap_unverified_by_value_replaces_all(self):
+        from tools.untoken_numeric_check import (
+            wrap_unverified_by_value,
+        )
+        text = "Sharpe 0.86 and 0.86 again."
+        out = wrap_unverified_by_value(text, {"0.86"})
+        assert out.count("<unverified>0.86</unverified>") == 2
+
+
+class TestScriptSoftFailWired:
+
+    def test_generate_script_imports_wrap(self):
+        import inspect
+        from tools.script_generation import generate_script
+        src = inspect.getsource(generate_script)
+        assert "wrap_unverified" in src
+        assert "script_untoken_lock_soft_fail" in src
+
+    def test_generate_script_does_not_raise_on_violations(
+            self):
+        """Source-pin: script soft-fail path never raises
+        UntokenNumericLockError -- it logs + wraps + persists."""
+        import inspect
+        from tools.script_generation import generate_script
+        src = inspect.getsource(generate_script)
+        assert (
+            "raise UntokenNumericLockError(" not in src)
+
+
+class TestDeckSoftFailWired:
+
+    def test_substitute_slide_content_wraps(self):
+        import inspect
+        import main as _main
+        src = inspect.getsource(
+            _main._substitute_slide_content)
+        assert "wrap_unverified" in src
+        assert "deck_untoken_lock_soft_fail" in src
+
+    def test_deck_path_does_not_raise(self):
+        import inspect
+        import main as _main
+        src = inspect.getsource(
+            _main._substitute_slide_content)
+        assert (
+            "raise UntokenNumericLockError(" not in src)
+
+
+class TestAuditCheckUnverifiedTagsAllDocTypes:
+
+    def test_audit_check_runs_unconditionally(self):
+        """Source-pin: the document_audit dispatcher fires
+        check_unverified_tags for every document type, not
+        only is_substitution_doc. Document-type-agnostic per
+        operator directive."""
+        import inspect
+        from tools.document_audit import audit_document
+        src = inspect.getsource(audit_document)
+        idx = src.find('"unverified_tags"')
+        assert idx > -1
+        # Wider window to capture the preceding doc comment.
+        slice_ = src[max(0, idx - 800):idx + 200]
+        # Operator-directive comment is present ONLY in the
+        # agnostic form.
+        assert "Document-type AGNOSTIC" in slice_
+
+    def test_check_unverified_tags_detects(self):
+        from tools.document_audit import check_unverified_tags
+        text = (
+            "The blue line surges above "
+            "<unverified>+0.5</unverified> in the post-2022 "
+            "regime.")
+        flags = check_unverified_tags(text)
+        assert len(flags) == 1
+        assert flags[0]["type"] == "unverified_numeric"
+        assert flags[0]["value"] == "+0.5"
+        assert flags[0]["severity"] == "high"
+
+    def test_check_unverified_tags_dedupes(self):
+        from tools.document_audit import check_unverified_tags
+        text = (
+            "<unverified>0.5</unverified> here "
+            "and <unverified>0.5</unverified> again.")
+        flags = check_unverified_tags(text)
+        # One flag per UNIQUE value.
+        assert len(flags) == 1
+
+    def test_check_unverified_tags_clean_returns_empty(self):
+        from tools.document_audit import check_unverified_tags
+        assert check_unverified_tags(
+            "Clean prose with no tags.") == []
+        assert check_unverified_tags("") == []
 
 
 # ── Issue 6: brief_final_recommendations token guidance ────

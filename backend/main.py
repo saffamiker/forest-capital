@@ -17678,6 +17678,19 @@ async def _generate_brief_document(
                  "the implied asset allocation over time chart when you "
                  "discuss how the blend held the bond sleeve through the "
                  "2022 equity drawdown.\n\n"
+                 "CORRELATION REGIME -- when you describe the equity-IG "
+                 "correlation regime break, USE the tokens "
+                 "{{PRE_2022_EQ_IG_CORR}} (averaged pre-2022 12m rolling "
+                 "correlation) and {{POST_2022_EQ_IG_CORR}} (averaged "
+                 "post-2022) for the actual values. Do NOT write "
+                 "approximations like 'surges above +0.5' or 'crosses "
+                 "+0.5' as a visual descriptor -- those bare numerics "
+                 "are not platform-anchored constants and they trip the "
+                 "hard-lock. Example acceptable phrasing: 'the rolling "
+                 "correlation averaged {{PRE_2022_EQ_IG_CORR}} pre-2022 "
+                 "and inverted to {{POST_2022_EQ_IG_CORR}} in the "
+                 "post-2022 regime; the chart shows the structural "
+                 "break in early 2022.'\n\n"
                  "Honest acknowledgement (one paragraph): the council "
                  "added value in 2 of 9 named market events (the play-"
                  "by-play scorecard). No strategy clears statistical "
@@ -19347,6 +19360,67 @@ def _substitute_slide_content(
         return parsed
     from tools.numeric_substitution import apply_substitutions
 
+    # June 28 2026 -- soft-fail wrap runs BEFORE substitution.
+    # If we scanned AFTER substitution, the scanner would see
+    # the just-resolved values (e.g. "0.54" from
+    # {{BENCHMARK_SHARPE}}) + flag them as token_available +
+    # wrap them -- defeating substitution. Scanning RAW
+    # (pre-substitution) text:
+    #   - bare numerics emitted by the LLM without a token
+    #     wrapper -> flagged + wrapped here
+    #   - {{TOKEN}} placeholders -> protected (numerics
+    #     inside tokens skip the scanner via _is_inside_token)
+    # The wrapped form ("the Sharpe is <unverified>0.43
+    # </unverified>") flows through apply_substitutions
+    # unchanged (no {{TOKEN}} to substitute).
+    try:
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+            wrap_unverified,
+        )
+        _slide_offenders: list[str] = []
+        for _key in ("title", "headline", "speaker_notes"):
+            if isinstance(parsed.get(_key), str):
+                _viols = find_untoken_backed_numerics(
+                    parsed[_key], substitution_table)
+                if _viols:
+                    parsed[_key] = wrap_unverified(
+                        parsed[_key], _viols)
+                    _slide_offenders.extend(
+                        v.raw_value for v in _viols)
+        if isinstance(parsed.get("bullets"), list):
+            wrapped_bullets: list[str] = []
+            for _bullet in parsed["bullets"]:
+                if isinstance(_bullet, str):
+                    _viols = find_untoken_backed_numerics(
+                        _bullet, substitution_table)
+                    if _viols:
+                        wrapped_bullets.append(wrap_unverified(
+                            _bullet, _viols))
+                        _slide_offenders.extend(
+                            v.raw_value for v in _viols)
+                    else:
+                        wrapped_bullets.append(_bullet)
+                else:
+                    wrapped_bullets.append(_bullet)
+            parsed["bullets"] = wrapped_bullets
+        if _slide_offenders:
+            log.warning(
+                "deck_untoken_lock_soft_fail",
+                document_type="presentation_deck",
+                slide_number=slide_number,
+                remaining_violations=len(_slide_offenders),
+                sample_offenders=_slide_offenders[:10],
+                note=(
+                    "hard-lock detected raw numerics in "
+                    "slide content; wrapping with "
+                    "<unverified> tags for human review."))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deck_untoken_lock_check_failed",
+            slide_number=slide_number,
+            error=str(exc))
+
     replaced_all: set[str] = set()
     for key in ("title", "headline", "speaker_notes"):
         if isinstance(parsed.get(key), str):
@@ -19416,6 +19490,7 @@ def _substitute_slide_content(
                  slide_number=slide_number,
                  tokens_replaced=sorted(replaced_all),
                  count=len(replaced_all))
+
     return parsed
 
 

@@ -1258,16 +1258,63 @@ def harness_narrative(
                         sample_offenders=[
                             v.raw_value for v in viols[:5]])
                     if _pass == _UNTOKEN_LOCK_MAX_PASSES:
-                        # Out of correction passes -- raise so
-                        # the generator endpoint surfaces the
-                        # list to the operator.
-                        log.error(
-                            "untoken_lock_unrecoverable",
+                        # June 28 2026 -- SOFT-FAIL + TAG on
+                        # hard-lock cap. Operator-directed
+                        # change for the June 30 deadline:
+                        # [DATA PENDING] is a hard submission
+                        # blocker; a flagged numeric is
+                        # recoverable via human review.
+                        #
+                        # The cap-branch wraps each surviving
+                        # violation in <unverified>...</unverified>
+                        # tags inline in the best-attempt
+                        # narrative, then breaks (no raise).
+                        # The tagged form persists into
+                        # content_json so Bob + Molly see the
+                        # exact offenders highlighted during
+                        # in-editor review. The downstream
+                        # document_audit also flags them in
+                        # the AuditWarningsBanner.
+                        #
+                        # Span-based wrap on the raw text (the
+                        # form the deferral swap will persist),
+                        # value-based wrap on the substituted
+                        # final_text (the form the legacy path
+                        # persists). Both share the same set
+                        # of raw values; spans align with the
+                        # raw text only.
+                        from tools.untoken_numeric_check import (
+                            wrap_unverified,
+                            wrap_unverified_by_value,
+                        )
+                        wrapped_raw = wrap_unverified(
+                            raw_for_scan, viols)
+                        if (raw_for_scan in
+                                _raw_per_substituted.values()
+                                or final_text in
+                                _raw_per_substituted):
+                            _raw_per_substituted[final_text] = (
+                                wrapped_raw)
+                        final_text = wrap_unverified_by_value(
+                            final_text,
+                            {v.raw_value for v in viols})
+                        log.warning(
+                            "untoken_lock_soft_fail",
                             agent_id=agent_id,
                             document_type=document_type,
-                            remaining_violations=len(viols))
-                        raise UntokenNumericLockError(
-                            document_type, agent_id, viols)
+                            remaining_violations=len(viols),
+                            sample_offenders=[
+                                v.raw_value for v in viols[:10]],
+                            note=(
+                                "hard-lock cap reached; "
+                                "persisting best-attempt "
+                                "narrative with each surviving "
+                                "raw numeric wrapped in "
+                                "<unverified> tags for "
+                                "in-editor human review. "
+                                "audit_warnings will also "
+                                "flag for the banner."))
+                        break
                     # Re-call the generator with explicit
                     # correction feedback. _substituting_generator
                     # already handles substitution + truncation
