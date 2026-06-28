@@ -210,15 +210,29 @@ def _walk_and_upgrade(
         text = node.get("text") or ""
         if not text:
             return node
-        # Marks (bold/italic/etc) wrap whole text spans -- a
-        # mid-mark token_value would awkwardly split the mark.
-        # In practice token placeholders live in unmarked spans;
-        # preserve marked text untouched as a safety net.
-        if node.get("marks"):
-            return node
+        # June 28 2026 (Fix 8a) -- previously skipped marked
+        # text nodes entirely (bold / italic / etc.) which
+        # silently left any {{TOKEN}} inside emphasized prose
+        # un-upgraded. The brief writer occasionally emphasises
+        # headline figures (**0.86 Sharpe**) which TipTap parses
+        # into a single marked text node carrying the token.
+        # Now: preserve the marks list onto each split-piece
+        # (text fragments stay marked; token_value nodes carry
+        # the same marks via attrs.marks for the NodeView's
+        # downstream styling). Token presence dominates over
+        # mark-preservation -- a token inside bold renders
+        # correctly resolved, then styled bold by the NodeView.
+        marks = node.get("marks")
         replaced = _split_text_node(text, valid_tokens)
         if replaced is None:
             return node
+        if marks:
+            # Re-attach the original marks to every split piece.
+            replaced = [
+                {**n, "marks": marks}
+                if isinstance(n, dict) else n
+                for n in replaced
+            ]
         # Split produced 1+ token_value nodes; count them.
         new_token_count = sum(
             1 for n in replaced

@@ -640,6 +640,30 @@ def build_substitution_table(
         # when either is null.
         "{{PRE_2022_MONTHS}}": _pre_2022_months(
             study_months, strategy_cache),
+
+        # June 28 2026 (Fix 4) -- transaction-cost sensitivity
+        # tier constants. The Limitations section's cost
+        # sensitivity prose previously hijacked
+        # {{RISK_PARITY_RECOVERY}} / {{BLACK_LITTERMAN_RECOVERY}}
+        # as stand-ins (semantically wrong; those are recovery-
+        # month tokens). These three dedicated bps constants
+        # let the prompt reference each cost tier by its true
+        # name. By-construction constants -- never cache-
+        # derived. Locked.
+        "{{SENSITIVITY_COST_BPS_LOW}}":  "10",
+        "{{SENSITIVITY_COST_BPS_MID}}":  "15",
+        "{{SENSITIVITY_COST_BPS_HIGH}}": "20",
+
+        # June 28 2026 (Fix 5a) -- Benjamini-Hochberg false-
+        # discovery-rate significance threshold used by the
+        # statistical Council. By-construction constant
+        # (academic standard 0.005); having it as a token lets
+        # the LLM reference "p < {{BH_SIGNIFICANCE_THRESHOLD}}"
+        # explicitly without tripping the hard-lock as a raw
+        # 0.005 numeric. The structural exemption
+        # stat_threshold also exempts the bare p < 0.005 form
+        # below; this token provides the swappable alternative.
+        "{{BH_SIGNIFICANCE_THRESHOLD}}": "0.005",
     }
 
     # ── Deck-specific tokens (Layer 2, June 21 2026) ────────────────────
