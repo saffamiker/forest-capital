@@ -1252,6 +1252,38 @@ def harness_narrative(
         # picked. Falls through to substituted text when no match
         # is found in the stash (defensive -- shouldn't happen
         # but the legacy text is correct either way).
+        # June 28 2026 (diagnostic) -- emit a structured log
+        # entry at every swap-eligible attempt so the operator
+        # can pin which gate fails when content_json
+        # unexpectedly carries resolved values instead of
+        # {{TOKEN}} placeholders. Audit-only; no behavior
+        # change. Remove once draft-74-style deferral failures
+        # are pinned + the root cause is fixed.
+        try:
+            from tools.platform_flags import (
+                _SYNC_CACHE as _DEFERRAL_SYNC_CACHE,
+                DEFER_SUBSTITUTION_TO_EXPORT_KEY as _DEF_KEY,
+            )
+            _cache_value = _DEFERRAL_SYNC_CACHE.get(
+                _DEF_KEY, "<unset>")
+        except Exception:  # noqa: BLE001
+            _cache_value = "<import_failed>"
+        log.info(
+            "deferred_substitution_gate_check",
+            agent_id=agent_id,
+            document_type=document_type,
+            document_type_in_protected=(
+                document_type in _PROTECTED),
+            substitution_table_present=(
+                substitution_table is not None),
+            final_text_truthy=bool(final_text),
+            stash_size=len(_raw_per_substituted),
+            stash_has_final_text_key=(
+                final_text in _raw_per_substituted
+                if final_text else False),
+            sync_cache_value=str(_cache_value),
+        )
+
         if (document_type in _PROTECTED
                 and substitution_table is not None
                 and final_text):
@@ -1264,7 +1296,13 @@ def harness_narrative(
                 # jobs.append at main.py:13719) so the sync
                 # variant is the right reader -- it opens its
                 # own asyncio.run when no event loop is running.
-                if is_defer_substitution_enabled_sync():
+                _flag_state = is_defer_substitution_enabled_sync()
+                log.info(
+                    "deferred_substitution_flag_resolved",
+                    agent_id=agent_id,
+                    document_type=document_type,
+                    flag_enabled=_flag_state)
+                if _flag_state:
                     raw_form = _raw_per_substituted.get(
                         final_text)
                     if raw_form is not None:
