@@ -1810,25 +1810,21 @@ def audit_document(
             "not_a_substitution_document")
 
     # Check 8b -- <unverified>...</unverified> tags
-    # (June 28 2026). Inserted by the hard-lock soft-fail path
-    # in tools/academic_export.harness_narrative when the
-    # 3-pass correction loop can't drive Sonnet to swap a
-    # surviving raw numeric. Each tag is a human-review hook
-    # for Bob + Molly to either swap to a {{TOKEN}} or accept
-    # as-is before submission. Routed for the substitution
-    # documents (same gate as Check 8).
-    if is_substitution_doc:
-        try:
-            result.flags_by_check["unverified_tags"] = (
-                check_unverified_tags(text or ""))
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "document_audit_check8b_failed",
-                error=str(exc))
-            result.skipped["unverified_tags"] = str(exc)
-    else:
-        result.skipped["unverified_tags"] = (
-            "not_a_substitution_document")
+    # (June 28 2026). Document-type AGNOSTIC: brief, appendix,
+    # script, AND deck can all carry <unverified> tags from
+    # their respective soft-fail paths (harness_narrative for
+    # brief + appendix; script_generation for script;
+    # _substitute_slide_content for deck). Fires for every
+    # doc type so the audit banner surfaces the flags
+    # regardless of which surface produced the document.
+    try:
+        result.flags_by_check["unverified_tags"] = (
+            check_unverified_tags(text or ""))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "document_audit_check8b_failed",
+            error=str(exc))
+        result.skipped["unverified_tags"] = str(exc)
 
     # Check 9 -- raw numeric in body (substitution bypass signal).
     # Same routing gate as Check 8.
