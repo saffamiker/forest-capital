@@ -41,6 +41,8 @@ import TeamGate from './TeamGate'
 import { useGenerationJobs } from '../lib/generationJobs'
 import PostRefreshVerificationPanel
   from './PostRefreshVerificationPanel'
+import ValueUpdateReviewPanel
+  from './ValueUpdateReviewPanel'
 
 
 interface RefreshStep {
@@ -481,6 +483,14 @@ export default function LightRefreshButton(
               the legacy "All drafts already current" callout as
               the post-refresh confirmation. */}
           <PostRefreshVerificationPanel
+            triggerKey={result ? result.strategy_hash : null} />
+          {/* June 28 2026 (PR-DM-Lite) -- value-update review
+              panel auto-fires after a successful light refresh
+              with the same trigger key the verifier uses. Lets
+              Bob/Molly review proposed token updates against
+              the fresh cache + selectively apply before
+              regeneration. */}
+          <ValueUpdateReviewPanel
             triggerKey={result ? result.strategy_hash : null} />
           <ul className="text-2xs text-slate-300 space-y-0.5">
             {result.steps.map((s, i) => (

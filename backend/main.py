@@ -3840,6 +3840,350 @@ async def post_verify_post_refresh(
     return await run_verification()
 
 
+# ── Dual-mode token storage endpoints (PR-DM-Lite, June 28) ──────
+
+
+@app.post("/api/v1/admin/upgrade-all-drafts-to-token-values")
+async def post_upgrade_all_drafts_to_token_values(
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- explicit, operator-triggered upgrade pass.
+
+    Walks every current draft with value_manifest IS NOT NULL +
+    migration_run = FALSE. For each:
+      1. Snapshot content_json into pre_migration_content_json
+      2. Run upgrade_content_json_to_token_values
+      3. Persist new content_json + set migration_run = TRUE
+
+    Returns a per-draft summary (id / document_type / status /
+    nodes_upgraded / manifest_entries / message).
+
+    The operator MUST run this manually after PR-DM-Lite
+    deploys. NOT triggered automatically on first draft load.
+    """
+    _ = session  # team-gated
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    from tools.draft_token_upgrade import (
+        upgrade_content_json_to_token_values,
+    )
+    import json as _json
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not configured")
+
+    results: list[dict] = []
+    async with _ASL() as s:
+        rows = await s.execute(_text(
+            "SELECT id, document_type, owner_email, "
+            "content_json, value_manifest "
+            "FROM editor_drafts "
+            "WHERE is_current = true "
+            "  AND is_deleted = false "
+            "  AND migration_run = false "
+            "ORDER BY id"))
+        drafts = rows.fetchall()
+
+        for row in drafts:
+            draft_id, doc_type, owner, content_json, manifest = row
+            if not isinstance(content_json, dict):
+                results.append({
+                    "draft_id":       draft_id,
+                    "document_type":  doc_type,
+                    "owner":          owner,
+                    "status":         "skipped",
+                    "message":        (
+                        "content_json missing or non-dict"),
+                })
+                continue
+            if not manifest:
+                results.append({
+                    "draft_id":       draft_id,
+                    "document_type":  doc_type,
+                    "owner":          owner,
+                    "status":         "skipped",
+                    "message":        (
+                        "value_manifest NULL (pre-Layer-3 "
+                        "draft) -- cannot upgrade"),
+                })
+                continue
+            try:
+                upgraded, stats = (
+                    upgrade_content_json_to_token_values(
+                        content_json, manifest))
+                # Persist: snapshot + new content + flag.
+                await s.execute(_text(
+                    "UPDATE editor_drafts "
+                    "SET pre_migration_content_json "
+                    "      = CAST(:snap AS JSONB), "
+                    "    content_json = CAST(:cj AS JSONB), "
+                    "    migration_run = true, "
+                    "    updated_at = NOW() "
+                    "WHERE id = :id"),
+                    {
+                        "snap": _json.dumps(content_json),
+                        "cj":   _json.dumps(upgraded),
+                        "id":   draft_id,
+                    })
+                results.append({
+                    "draft_id":          draft_id,
+                    "document_type":     doc_type,
+                    "owner":             owner,
+                    "status":            "upgraded",
+                    "manifest_entries":  stats["manifest_entries"],
+                    "nodes_upgraded":    stats["nodes_upgraded"],
+                    "already_upgraded":  stats["already_upgraded"],
+                    "message":           (
+                        f"{stats['nodes_upgraded']} "
+                        "token_value nodes inserted"),
+                })
+                log.info(
+                    "draft_upgrade_persisted",
+                    draft_id=draft_id,
+                    document_type=doc_type,
+                    nodes_upgraded=stats["nodes_upgraded"])
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "draft_upgrade_failed",
+                    draft_id=draft_id,
+                    error=str(exc))
+                results.append({
+                    "draft_id":       draft_id,
+                    "document_type":  doc_type,
+                    "owner":          owner,
+                    "status":         "failed",
+                    "message":        str(exc),
+                })
+        await s.commit()
+
+    return {
+        "drafts_checked": len(drafts),
+        "upgraded":  sum(
+            1 for r in results if r["status"] == "upgraded"),
+        "skipped":   sum(
+            1 for r in results if r["status"] == "skipped"),
+        "failed":    sum(
+            1 for r in results if r["status"] == "failed"),
+        "results":   results,
+    }
+
+
+@app.post("/api/v1/admin/revert-draft-migration/{draft_id}")
+async def post_revert_draft_migration(
+    draft_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- restores content_json from
+    pre_migration_content_json + sets migration_run = FALSE.
+    Used when the upgrade pass produced an unexpected result on
+    a specific draft."""
+    _ = session
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    import json as _json
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503, detail="Database not configured")
+    async with _ASL() as s:
+        row = await s.execute(_text(
+            "SELECT pre_migration_content_json "
+            "FROM editor_drafts WHERE id = :id"),
+            {"id": draft_id})
+        r = row.fetchone()
+        if not r or not r[0]:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"draft {draft_id} has no pre-migration "
+                    "snapshot -- nothing to revert"))
+        snap = r[0]
+        await s.execute(_text(
+            "UPDATE editor_drafts "
+            "SET content_json = CAST(:cj AS JSONB), "
+            "    migration_run = false, "
+            "    pre_migration_content_json = NULL, "
+            "    updated_at = NOW() "
+            "WHERE id = :id"),
+            {
+                "cj": _json.dumps(snap)
+                      if not isinstance(snap, str) else snap,
+                "id": draft_id,
+            })
+        await s.commit()
+    return {"ok": True, "draft_id": draft_id}
+
+
+@app.get("/api/v1/data/review-pending-updates/{draft_id}")
+async def get_review_pending_updates_for_draft(
+    draft_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- per-draft review summary for the
+    ValueUpdateReviewPanel. Walks the (upgraded) content_json
+    and returns one entry per token_value node with current
+    value, cache value, match flag, and override status."""
+    _ = session
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    from tools.draft_token_upgrade import build_review_summary
+    from tools.audit_assembler import current_data_hash
+    from tools.cache import get_strategy_cache
+    from tools.cio_recommendation import (
+        get_latest_recommendation,
+    )
+    from tools.numeric_substitution import (
+        get_substitution_table,
+    )
+    from tools.submission_freeze import (
+        get_effective_data_hash,
+    )
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503, detail="Database not configured")
+
+    async with _ASL() as s:
+        row = await s.execute(_text(
+            "SELECT content_json, migration_run "
+            "FROM editor_drafts WHERE id = :id"),
+            {"id": draft_id})
+        r = row.fetchone()
+    if not r:
+        raise HTTPException(
+            status_code=404, detail=f"draft {draft_id} not found")
+    content_json, migration_run = r
+    if not migration_run:
+        return {
+            "draft_id": draft_id,
+            "migration_run": False,
+            "message": (
+                "Draft has not been upgraded to dual-mode token "
+                "storage yet. Run "
+                "POST /api/v1/admin/upgrade-all-drafts-to-token-"
+                "values first."),
+            "entries": [],
+        }
+
+    # Build the current substitution table -- freeze-aware.
+    live_hash = await current_data_hash()
+    eff_hash = await get_effective_data_hash(live_hash) or live_hash
+    cio = await get_latest_recommendation() or {}
+    strategy_cache = await get_strategy_cache(eff_hash) or {}
+    table = get_substitution_table(
+        eff_hash, strategy_cache, cio, hash_verified=True)
+
+    entries = build_review_summary(content_json, table)
+    mismatched = sum(1 for e in entries if not e["match"])
+    overridden = sum(1 for e in entries if e["overridden"])
+    return {
+        "draft_id":       draft_id,
+        "migration_run":  True,
+        "effective_hash": eff_hash,
+        "entries":        entries,
+        "total":          len(entries),
+        "matched":        len(entries) - mismatched,
+        "mismatched":     mismatched,
+        "overridden":     overridden,
+    }
+
+
+@app.post("/api/v1/data/apply-updates/{draft_id}")
+async def post_apply_updates_to_draft(
+    draft_id: int,
+    body: dict | None = None,
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- applies token updates to a draft's
+    content_json. Body shape:
+      {"tokens": ["{{TOKEN_A}}", "{{TOKEN_B}}", ...]}
+    Only nodes whose attrs.token is in the list get updated.
+    Omit the body (or send empty tokens) to apply all changes.
+
+    Returns count + per-update audit log."""
+    _ = session
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    from tools.draft_token_upgrade import apply_token_updates
+    from tools.audit_assembler import current_data_hash
+    from tools.cache import get_strategy_cache
+    from tools.cio_recommendation import (
+        get_latest_recommendation,
+    )
+    from tools.numeric_substitution import (
+        get_substitution_table,
+    )
+    from tools.submission_freeze import (
+        get_effective_data_hash,
+    )
+    import json as _json
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503, detail="Database not configured")
+
+    selected: set[str] | None = None
+    if body and isinstance(body.get("tokens"), list):
+        selected = set(str(t) for t in body["tokens"])
+
+    async with _ASL() as s:
+        row = await s.execute(_text(
+            "SELECT content_json, migration_run "
+            "FROM editor_drafts WHERE id = :id"),
+            {"id": draft_id})
+        r = row.fetchone()
+        if not r:
+            raise HTTPException(
+                status_code=404,
+                detail=f"draft {draft_id} not found")
+        content_json, migration_run = r
+        if not migration_run:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Draft has not been upgraded to dual-mode "
+                    "token storage. Run the upgrade pass first."))
+
+        # Build current substitution table.
+        live_hash = await current_data_hash()
+        eff_hash = (
+            await get_effective_data_hash(live_hash) or live_hash)
+        cio = await get_latest_recommendation() or {}
+        strategy_cache = await get_strategy_cache(eff_hash) or {}
+        table = get_substitution_table(
+            eff_hash, strategy_cache, cio, hash_verified=True)
+
+        new_content_json, updates = apply_token_updates(
+            content_json, table, eff_hash, selected)
+        if updates:
+            await s.execute(_text(
+                "UPDATE editor_drafts "
+                "SET content_json = CAST(:cj AS JSONB), "
+                "    data_hash = :h, "
+                "    updated_at = NOW() "
+                "WHERE id = :id"),
+                {
+                    "cj": _json.dumps(new_content_json),
+                    "h":  eff_hash,
+                    "id": draft_id,
+                })
+            await s.commit()
+        log.info(
+            "draft_token_rewrite_applied",
+            draft_id=draft_id,
+            updates_count=len(updates),
+            actor=(session.get("email") if session else None))
+
+    return {
+        "draft_id":       draft_id,
+        "updates_count":  len(updates),
+        "updates":        updates,
+        "effective_hash": eff_hash,
+    }
+
+
 @app.post("/api/v1/admin/refresh-appendix-caches")
 async def post_refresh_appendix_caches(
     session: dict = Depends(require_team_member),

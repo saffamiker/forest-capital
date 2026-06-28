@@ -21,6 +21,7 @@ import {
   markerExtension, MARKER_RE, transformBobMarkers, docToText,
 } from '../../lib/editorMarkers'
 import { BobCallout } from '../../lib/BobCalloutNode'
+import { TokenValueExtension } from './tokenValueExtension'
 import type { TipTapDoc } from '../../types/editor'
 
 interface Props {
@@ -45,6 +46,16 @@ export default function RichTextEditor({ content, onChange, onAskAI }: Props) {
     extensions: [
       StarterKit,
       BobCallout,
+      // June 28 2026 (PR-DM-Lite) -- pass-through registration
+      // for the token_value inline node. Critical: WITHOUT this
+      // extension, TipTap drops the unknown node on first
+      // editor.getJSON() save, silently corrupting any draft
+      // upgraded via tools/draft_token_upgrade. The extension
+      // renders token_value as a plain span carrying the
+      // resolved (or override) value -- the lock icon + hover
+      // tooltip + override popover ship in PR-DM-Rich as a
+      // richer NodeView on top of this same extension.
+      TokenValueExtension,
       markerExtension.configure({
         onMarkerClick: (marker, coords) => {
           // [[BOB]] is a block node now and never reaches here; only
