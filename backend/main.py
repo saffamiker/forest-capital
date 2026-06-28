@@ -3800,6 +3800,46 @@ async def post_light_refresh(
     }
 
 
+@app.post("/api/v1/data/verify-post-refresh")
+async def post_verify_post_refresh(
+    session: dict = Depends(require_team_member),
+):
+    """June 27 2026 -- post-light-refresh verification pass +
+    rounding audit. Re-reads every substitution token, classifies
+    each by submission scope, runs the per-scope sanity check
+    (LOCKED == strategy_cache, CONSTANT == academic_deck module
+    constant, FULL_DATASET == plausible range, LIVE == fresh and
+    non-null), and checks each numeric value against the
+    canonical rounding rule for its token class.
+
+    Self-contained: does NOT depend on the /data-reference-sheet
+    endpoint. Derives submission_scope locally via the verifier
+    module's classify_submission_scope (consolidated with
+    data_reference_catalog.classify_submission_scope post-merge
+    of PR #459).
+
+    Operator wiring: the Light Refresh panel auto-calls this
+    endpoint after every successful refresh and the Data
+    Reference Sheet header carries a 'Verify submission data'
+    button that fires it on demand.
+
+    Response shape per spec:
+      {verified_at, freeze_active, freeze_hash, effective_hash,
+       passed, failed, warnings,
+       results[{token, label, scope, expected, actual,
+                rounded_correctly, status, message}],
+       rounding_summary{checked, consistent, inconsistent,
+                        inconsistent_tokens[]},
+       ready_for_submission}
+
+    ready_for_submission == true iff (failed == 0
+       AND rounding_summary.inconsistent == 0
+       AND no live tokens stale)."""
+    _ = session  # team-gated
+    from tools.post_refresh_verifier import run_verification
+    return await run_verification()
+
+
 @app.post("/api/v1/admin/refresh-appendix-caches")
 async def post_refresh_appendix_caches(
     session: dict = Depends(require_team_member),

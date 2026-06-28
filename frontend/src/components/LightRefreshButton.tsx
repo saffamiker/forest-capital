@@ -39,6 +39,8 @@ import {
 
 import TeamGate from './TeamGate'
 import { useGenerationJobs } from '../lib/generationJobs'
+import PostRefreshVerificationPanel
+  from './PostRefreshVerificationPanel'
 
 
 interface RefreshStep {
@@ -417,6 +419,14 @@ export default function LightRefreshButton(
               </span>
             </div>
           )}
+          {/* June 27 2026 -- post-refresh verification panel.
+              triggerKey bumped on every successful light refresh
+              (the result-id is good enough -- the panel only
+              cares that the value changes). The verifier replaces
+              the legacy "All drafts already current" callout as
+              the post-refresh confirmation. */}
+          <PostRefreshVerificationPanel
+            triggerKey={result ? result.strategy_hash : null} />
           <ul className="text-2xs text-slate-300 space-y-0.5">
             {result.steps.map((s, i) => (
               <li key={i}
