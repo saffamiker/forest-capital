@@ -3843,6 +3843,94 @@ async def post_verify_post_refresh(
 # ── Dual-mode token storage endpoints (PR-DM-Lite, June 28) ──────
 
 
+async def _auto_upgrade_draft_to_token_values(
+    draft_id: int, document_type: str,
+) -> None:
+    """June 28 2026 (Fix 8b) -- per-draft auto-upgrade hook.
+
+    Fires right after a generator persists its draft +
+    value_manifest. Replaces the manual operator step of
+    POSTing to /api/v1/admin/upgrade-all-drafts-to-token-values
+    after every generation.
+
+    Contract:
+      * Only runs when DEFER_SUBSTITUTION_TO_EXPORT is ON --
+        otherwise content_json carries resolved values not
+        {{TOKEN}} placeholders, the {{TOKEN}}-only matcher
+        finds nothing to upgrade, and the call is a no-op.
+        Short-circuiting here saves a DB round-trip + keeps
+        the legacy flag-OFF path bit-identical.
+      * Only touches the ONE draft_id passed in -- never the
+        batch. The admin endpoint
+        post_upgrade_all_drafts_to_token_values remains
+        available for backfill scenarios; this is the
+        steady-state per-generation path.
+      * Fail-open: every error logs + returns. Generation
+        completion is never blocked by an upgrade-pass
+        failure -- the draft is already persisted; the admin
+        batch endpoint can be re-run to recover."""
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    from tools.draft_token_upgrade import (
+        upgrade_content_json_to_token_values,
+    )
+    from tools.platform_flags import (
+        is_defer_substitution_enabled,
+    )
+    import json as _json
+
+    try:
+        if not await is_defer_substitution_enabled():
+            return
+        if _ASL is None:
+            return
+        async with _ASL() as s:
+            row = await s.execute(_text(
+                "SELECT content_json, value_manifest, "
+                "       migration_run "
+                "FROM editor_drafts "
+                "WHERE id = :id AND is_deleted = false"),
+                {"id": draft_id})
+            r = row.fetchone()
+            if not r:
+                return
+            content_json, manifest, migration_run = r
+            if migration_run:
+                return
+            if not isinstance(content_json, dict):
+                return
+            if not manifest:
+                return
+            upgraded, stats = (
+                upgrade_content_json_to_token_values(
+                    content_json, manifest))
+            await s.execute(_text(
+                "UPDATE editor_drafts "
+                "SET pre_migration_content_json "
+                "      = CAST(:snap AS JSONB), "
+                "    content_json = CAST(:cj AS JSONB), "
+                "    migration_run = true, "
+                "    updated_at = NOW() "
+                "WHERE id = :id"),
+                {
+                    "snap": _json.dumps(content_json),
+                    "cj":   _json.dumps(upgraded),
+                    "id":   draft_id,
+                })
+            await s.commit()
+        log.info(
+            "draft_auto_upgrade_persisted",
+            draft_id=draft_id,
+            document_type=document_type,
+            nodes_upgraded=stats["nodes_upgraded"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "draft_auto_upgrade_failed",
+            draft_id=draft_id,
+            document_type=document_type,
+            error=str(exc))
+
+
 @app.post("/api/v1/admin/upgrade-all-drafts-to-token-values")
 async def post_upgrade_all_drafts_to_token_values(
     session: dict = Depends(require_team_member),
@@ -17869,6 +17957,15 @@ async def _generate_brief_document(
                         "value_manifest_persist_failed",
                         document_type="executive_brief",
                         error=str(exc))
+
+                # June 28 2026 (Fix 8b) -- auto-upgrade to
+                # token_value nodes immediately after persist.
+                # Fail-open: any error logs + the draft is
+                # still usable (admin batch endpoint can
+                # recover).
+                if draft_id is not None:
+                    await _auto_upgrade_draft_to_token_values(
+                        draft_id, "executive_brief")
         except Exception as exc:  # noqa: BLE001
             log.warning("executive_brief_draft_create_failed", error=str(exc))
 
@@ -18571,6 +18668,11 @@ async def _generate_appendix_document(
                         "value_manifest_persist_failed",
                         document_type="analytical_appendix",
                         error=str(exc))
+
+                # June 28 2026 (Fix 8b) -- auto-upgrade hook.
+                if draft_id is not None:
+                    await _auto_upgrade_draft_to_token_values(
+                        draft_id, "analytical_appendix")
         except Exception as exc:  # noqa: BLE001
             log.warning("analytical_appendix_draft_create_failed",
                         error=str(exc))

@@ -176,6 +176,99 @@ _SECTION_RESTATE_RE = re.compile(
 # already applies bold weighting via its template setting.
 _HEADING_BOLD_WRAP_RE = re.compile(r"^\*{1,3}|\*{1,3}$")
 
+# June 28 2026 (Fix 10) -- APA references consolidation.
+# Each per-section narrative the LLM emits has its own inline
+# References / Bibliography block. APA format requires a SINGLE
+# consolidated References section at the end of the document.
+# These two helpers (a) split a section narrative into
+# (body, references_lines) and (b) collect / dedupe / sort
+# the citations across sections so the brief builder can emit
+# one consolidated block at the end.
+_REFS_HEADING_RE = re.compile(
+    r"(?im)^(?:\s*#{1,6}\s*)?(?:\d+\.?\s*)?\*{0,2}"
+    r"(?:references?|bibliography|works\s+cited|"
+    r"citations?|sources)"
+    r":?\*{0,2}\s*:?\s*$")
+# Author-prefix heuristic: a line starting with "Lastname,
+# F." or "Lastname, F.M." -- the APA citation pattern. Used
+# to filter out blank lines + non-citation noise inside a
+# references block.
+_CITATION_LINE_RE = re.compile(
+    r"^\s*([A-Z][a-z'\-]+(?:\s+[A-Z][a-z'\-]+)*),?\s*"
+    r"(?:[A-Z]\.\s*)?(?:[A-Z]\.\s*)?")
+
+
+def _extract_references(narrative: str) -> tuple[str, list[str]]:
+    """Split `narrative` into (body_text, citation_lines).
+    Body is the narrative with any References/Bibliography
+    block stripped. Citation lines are the non-blank citation
+    entries from the block, with leading bullets/numbering
+    trimmed.
+
+    Detection mirrors untoken_numeric_check._strip_references_
+    sections: a line matching _REFS_HEADING_RE starts a block;
+    the block extends to the next non-citation-shaped line OR
+    end-of-text. Fail-open: no references heading found
+    returns (narrative, [])."""
+    if not narrative:
+        return ("", [])
+    lines = narrative.splitlines()
+    body: list[str] = []
+    refs: list[str] = []
+    in_block = False
+    for ln in lines:
+        if in_block:
+            stripped = ln.strip()
+            if not stripped:
+                continue
+            # Stop the block when we hit another heading-shaped
+            # line that ISN'T a continuation of a citation.
+            if (stripped.startswith("#")
+                    or _REFS_HEADING_RE.match(stripped)):
+                in_block = False
+                if not _REFS_HEADING_RE.match(stripped):
+                    body.append(ln)
+                continue
+            # Trim leading "1. " / "- " / "* " bullet/numbering
+            # prefixes so citations dedupe by content.
+            cleaned = re.sub(
+                r"^\s*(?:[-*•]|\d+\.)\s+", "", stripped)
+            # Also strip the ** wrapper if the LLM bolded.
+            cleaned = _HEADING_BOLD_WRAP_RE.sub(
+                "", cleaned).strip()
+            if cleaned:
+                refs.append(cleaned)
+            continue
+        if _REFS_HEADING_RE.match(ln.strip()):
+            in_block = True
+            continue
+        body.append(ln)
+    return ("\n".join(body), refs)
+
+
+def _sort_apa_citations(citations: list[str]) -> list[str]:
+    """Deduplicate + alphabetically sort citation lines by
+    author last name (the first token before the comma).
+    Comparison is case-insensitive; dedupe key is the
+    whitespace-normalised lowercased full line so trivial
+    formatting differences (extra spaces, trailing periods)
+    collapse to one entry."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for c in citations:
+        key = re.sub(r"\s+", " ", c.lower().rstrip(". ")).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(c.strip())
+
+    def _sort_key(line: str) -> str:
+        m = _CITATION_LINE_RE.match(line)
+        if m:
+            return m.group(1).lower()
+        return line.lower()
+    return sorted(unique, key=_sort_key)
+
 
 def _add_md_heading_paragraph(
     doc: Document, text: str, level: int,
@@ -707,6 +800,27 @@ def build_executive_brief(
             for k, v in narratives.items()
         }
 
+    # June 28 2026 (Fix 10) -- APA references consolidation.
+    # Each section's narrative may include its own inline
+    # References / Bibliography block. APA format requires a
+    # SINGLE consolidated References section at the end of
+    # the document. Walk every narrative once, split each
+    # into (body, citations), and replace the dict value with
+    # the body (citations stripped). The accumulated citations
+    # are deduplicated + alphabetised + emitted as a
+    # single ## References section below Section 6 / Visuals.
+    _all_citations: list[str] = []
+    _stripped_narratives: dict[str, str] = {}
+    for _k, _v in narratives.items():
+        if isinstance(_v, str):
+            _body, _refs = _extract_references(_v)
+            _stripped_narratives[_k] = _body
+            _all_citations.extend(_refs)
+        else:
+            _stripped_narratives[_k] = _v
+    narratives = _stripped_narratives
+    _consolidated_refs = _sort_apa_citations(_all_citations)
+
     # ── Title page ────────────────────────────────────────────────────────
     for _ in range(3):
         doc.add_paragraph()
@@ -816,6 +930,18 @@ def build_executive_brief(
     _embed_brief_figures(
         doc, data, substitution_table,
         skip_keys=inline_placed)
+
+    # June 28 2026 (Fix 10) -- consolidated APA References
+    # section. Every per-section narrative had its own inline
+    # References block stripped at the top of this function;
+    # all unique citations now emit as one ## References block
+    # right after Section 6, alphabetised by author last name
+    # per APA convention. Skip the block entirely when the
+    # brief carried zero citations (silent fail-open).
+    if _consolidated_refs:
+        _add_heading(doc, "References")
+        for _ref in _consolidated_refs:
+            doc.add_paragraph(_ref)
 
     # Audit Disclosure Appendix carries the platform's audit trail.
     _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
