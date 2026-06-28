@@ -203,6 +203,11 @@ class AuditResult:
             # Layer-2 PR alongside their substitution call-sites).
             "unresolved_placeholders": [],
             "raw_numeric": [],
+            # June 28 2026 (PR β) -- table structure validation.
+            # Walks content_json for every TipTap table node + checks
+            # against REQUIRED_TABLE_COLUMNS registry. Skipped when
+            # content_json is not passed in (text-only callers).
+            "table_structure": [],
         })
     skipped: dict[str, str] = field(default_factory=dict)  # check_name → reason
 
@@ -222,6 +227,8 @@ class AuditResult:
                 self.flags_by_check.get("unresolved_placeholders", [])),
             "raw_numeric": len(
                 self.flags_by_check.get("raw_numeric", [])),
+            "table_structure": len(
+                self.flags_by_check.get("table_structure", [])),
             "total": sum(len(v) for v in self.flags_by_check.values()),
         }
 
@@ -1531,6 +1538,7 @@ def audit_document(
     slides: list[dict[str, Any]] | None = None,
     story_plan_slides: list[dict[str, Any]] | None = None,
     brief_section_plan: dict[str, Any] | None = None,
+    content_json: dict[str, Any] | None = None,
 ) -> AuditResult:
     """Run the five checks and return a single result object.
 
@@ -1751,6 +1759,39 @@ def audit_document(
             result.skipped["section_truncated"] = str(exc)
     else:
         result.skipped["section_truncated"] = "not_a_brief"
+
+    # Check 11 (PR β, June 28 2026) -- table structure validation.
+    # Walks content_json for every TipTap table node + verifies
+    # every required column from REQUIRED_TABLE_COLUMNS is
+    # present. Caption-prefix match locates each registered
+    # table in the document (e.g. "Table B1" matches "Table B1.
+    # Full-Period Performance..."). Missing columns + entirely-
+    # missing required tables both fire a 'major' severity flag
+    # that surfaces in the editor's audit banner before manual
+    # inspection of the exported DOCX would have caught it.
+    # Skipped when content_json is not passed in (text-only
+    # callers); skipped for document types with no registry
+    # entries (executive_brief / presentation_deck /
+    # presentation_script in the initial registry).
+    if content_json is None:
+        result.skipped["table_structure"] = "no_content_json_passed"
+    else:
+        try:
+            from tools.table_structure_validator import (
+                REQUIRED_TABLE_COLUMNS,
+                validate_table_structure,
+            )
+            if not REQUIRED_TABLE_COLUMNS.get(document_type):
+                result.skipped["table_structure"] = (
+                    "no_registered_tables_for_document_type")
+            else:
+                result.flags_by_check["table_structure"] = (
+                    validate_table_structure(
+                        content_json, document_type))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "document_audit_check11_failed", error=str(exc))
+            result.skipped["table_structure"] = str(exc)
 
     log.info(
         "document_audit_complete",
