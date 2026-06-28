@@ -130,6 +130,20 @@ _STRUCTURAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(
         r"\b(?:p|alpha|significance)\s*[<>=≤≥]+\s*0?\.\d+",
         re.IGNORECASE), "stat_threshold"),
+    # June 28 2026 (Issue 5) -- bare 0.005 (the BH-FDR
+    # significance threshold) WITHOUT a preceding operator.
+    # The LLM occasionally writes prose like "the 0.005
+    # threshold under Benjamini-Hochberg" where 0.005 stands
+    # alone (no preceding "p <" or "alpha ="). 0.005 is a
+    # universally-recognised statistical constant; the bare-
+    # value form should be treated the same way as the
+    # operator-prefixed form. Substitution-table priority
+    # over this exemption is still enforced by the
+    # find_untoken_backed_numerics guard (when 0.005 IS in
+    # the table via {{BH_SIGNIFICANCE_THRESHOLD}}, the
+    # exemption is skipped + the writer gets a token-swap
+    # suggestion).
+    (re.compile(r"\b0\.005\b"), "stat_threshold_bare"),
     # June 28 2026 brief-gen hard-lock exemption: the Classic
     # 60/40 weights "60%/40%" in definitional strategy prose
     # ("Classic 60/40 portfolio holds 60% equity and 40%

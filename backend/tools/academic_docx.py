@@ -1756,6 +1756,33 @@ def build_editor_docx(
             if marks.get("italic"):
                 run.italic = True
 
+    # June 28 2026 (Issue 2 + 3) -- walker-level normalisations
+    # for the editor-export path. Mirror the build_executive_brief
+    # post-processing so the editor-exported DOCX matches the
+    # generation-time output:
+    #
+    #   Issue 2: skip "## Section N: ..." / "**Section N: ...**"
+    #            duplicate-restate lines that the LLM occasionally
+    #            opens each section with. The outer brief Heading1
+    #            is already in the editor's content_json from the
+    #            generator's section_blocks builder.
+    #
+    #   Issue 3: detect inline References / Bibliography blocks +
+    #            accumulate their citation paragraphs + skip the
+    #            block during main render + emit a SINGLE
+    #            consolidated APA References section at the end
+    #            of the document (alphabetised by author last name).
+    consolidated_refs: list[str] = []
+    in_refs_block = False
+
+    def _is_section_restate(text: str) -> bool:
+        return bool(
+            _SECTION_RESTATE_RE.match(text.strip()))
+
+    def _is_references_heading(text: str) -> bool:
+        return bool(
+            _REFS_HEADING_RE.match(text.strip()))
+
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -1765,8 +1792,20 @@ def build_editor_docx(
             level = int(
                 (node.get("attrs") or {}).get("level", 1) or 1)
             runs = _tiptap_runs(node)
-            if any(t.strip() for t, _ in runs):
-                _add_heading_with_style(runs, level)
+            heading_text = "".join(
+                t for t, _ in runs).strip()
+            if not heading_text:
+                continue
+            # Issue 3: a References heading enters the collection
+            # block. A non-references heading exits it.
+            if _is_references_heading(heading_text):
+                in_refs_block = True
+                continue
+            in_refs_block = False
+            # Issue 2: skip section restate.
+            if _is_section_restate(heading_text):
+                continue
+            _add_heading_with_style(runs, level)
         elif ntype == "paragraph":
             # June 25 2026 -- use the marks-aware walker so bold /
             # italic text nodes (e.g. **Finding 1** the generator
@@ -1787,10 +1826,41 @@ def build_editor_docx(
                 # Markdown horizontal rule -- skip; Word would
                 # render a literal '---' line which adds noise.
                 continue
+            # Issue 3: paragraph inside a References block --
+            # collect as a citation, skip render.
+            if in_refs_block:
+                # Substitute tokens in the citation first so
+                # author names + years don't carry literal
+                # placeholders into the consolidated list.
+                _subbed_pairs = _apply_substitutions_to_runs(
+                    runs, sub_table)
+                _cite_text = "".join(
+                    t for t, _ in _subbed_pairs).strip()
+                # Drop leading "1. " / "- " bullets so dedup
+                # collapses formatting variants.
+                _cite_text = re.sub(
+                    r"^\s*(?:[-*•]|\d+\.)\s+", "", _cite_text)
+                _cite_text = _HEADING_BOLD_WRAP_RE.sub(
+                    "", _cite_text).strip()
+                if _cite_text:
+                    consolidated_refs.append(_cite_text)
+                continue
             md_match = _MD_HEADING_RE.match(joined)
             if md_match:
                 level = len(md_match.group(1))
                 stripped = md_match.group(2)
+                # Issue 3 + 2: same checks for the markdown-
+                # heading-in-paragraph path.
+                if _is_references_heading(stripped):
+                    in_refs_block = True
+                    continue
+                in_refs_block = False
+                if _is_section_restate(stripped):
+                    continue
+                # Issue 2: strip ** wrappers from the heading
+                # text. Heading style template already bolds.
+                stripped = _HEADING_BOLD_WRAP_RE.sub(
+                    "", stripped).strip()
                 # Re-emit as a single-run heading. Inline marks on
                 # an '## Heading' paragraph are vanishingly rare;
                 # collapse the marks dict on the surface text to
@@ -1798,6 +1868,10 @@ def build_editor_docx(
                 _add_heading_with_style(
                     [(stripped, {"bold": True})],
                     max(1, min(level, 6)))
+                continue
+            # Issue 2: the bare-bold restate form
+            # ("**Section N: Title**" with no markdown prefix).
+            if _is_section_restate(joined):
                 continue
             subbed = _apply_substitutions_to_runs(runs, sub_table)
             _add_body_from_runs(doc, subbed)
@@ -1809,6 +1883,21 @@ def build_editor_docx(
                     continue
                 joined = "".join(t for t, _ in runs).strip()
                 if not joined:
+                    continue
+                # Issue 3: a citation inside a list under a
+                # References heading still collects.
+                if in_refs_block:
+                    _subbed_pairs = _apply_substitutions_to_runs(
+                        runs, sub_table)
+                    _cite_text = "".join(
+                        t for t, _ in _subbed_pairs).strip()
+                    _cite_text = re.sub(
+                        r"^\s*(?:[-*•]|\d+\.)\s+",
+                        "", _cite_text)
+                    _cite_text = _HEADING_BOLD_WRAP_RE.sub(
+                        "", _cite_text).strip()
+                    if _cite_text:
+                        consolidated_refs.append(_cite_text)
                     continue
                 subbed = _apply_substitutions_to_runs(
                     runs, sub_table)
@@ -1839,6 +1928,18 @@ def build_editor_docx(
             doc, brief_data,
             substitution_table=brief_substitution_table,
             skip_keys=embedded_figure_keys)
+
+    # June 28 2026 (Issue 3) -- emit consolidated APA References
+    # section if any citations were collected during the main
+    # walk. Dedupe + alphabetise by author last name. Skip
+    # entirely when zero refs collected (silent fail-open).
+    if consolidated_refs:
+        _sorted_refs = _sort_apa_citations(consolidated_refs)
+        if _sorted_refs:
+            _add_heading_with_style(
+                [("References", {"bold": True})], 1)
+            for _ref in _sorted_refs:
+                doc.add_paragraph(_ref)
 
     _add_submission_checklist(doc)
     buf = BytesIO()

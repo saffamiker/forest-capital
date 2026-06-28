@@ -14177,6 +14177,21 @@ async def _editor_export(editor_draft_id: int) -> Response:
             # export but passed substitution_table=None; without
             # the table the figure captions show raw placeholders.
             try:
+                # June 28 2026 (Issue 1) -- the editor-export
+                # substitution table previously omitted many
+                # kwargs that the generation-time call supplies
+                # (study_months, implied_allocation, live_signals,
+                # oos_window_pct_of_study, hash_verified, freeze-
+                # aware data_hash). Result: tokens like
+                # {{STUDY_START}} / {{STUDY_END}} /
+                # {{CURRENT_REGIME}} / {{REGIME_CONFIDENCE}} /
+                # {{SENSITIVITY_COST_BPS_*}} resolved to em-dash
+                # or were missing entirely, leaving literal
+                # {{TOKEN}} strings in the exported DOCX
+                # (operator-reported on draft 80). Mirror the
+                # full generation-time kwarg set so EVERY token
+                # that resolves at generation also resolves at
+                # editor-export.
                 from tools.academic_export import (
                     load_substitution_metric_sources,
                 )
@@ -14184,10 +14199,17 @@ async def _editor_export(editor_draft_id: int) -> Response:
                     current_data_hash as _ee_cur_hash,
                 )
                 from tools.cio_recommendation import (
+                    compute_implied_asset_allocation as _ee_alloc,
                     get_latest_recommendation as _ee_cio,
                 )
                 from tools.numeric_substitution import (
                     get_substitution_table,
+                )
+                from tools.submission_freeze import (
+                    get_effective_data_hash as _ee_eff_hash,
+                )
+                from tools.cache import (
+                    get_regime_cache as _ee_regime,
                 )
                 from tools.academic_deck import (
                     CORRELATION_POST_2022,
@@ -14195,10 +14217,56 @@ async def _editor_export(editor_draft_id: int) -> Response:
                     OOS_SHARPE_BENCHMARK,
                     OOS_SHARPE_REGIME_CONDITIONAL,
                 )
-                cur_hash = await _ee_cur_hash() or ""
+                # Freeze-aware hash so the editor-export table
+                # matches what generation produced when a freeze
+                # was active.
+                _ee_live_hash = await _ee_cur_hash() or ""
+                cur_hash = (
+                    await _ee_eff_hash(_ee_live_hash)
+                    or _ee_live_hash)
                 cio_row = await _ee_cio()
+                # Implied allocation for the {{CURRENT_*_PCT}}
+                # token family (needs CIO blend weights).
+                _ee_implied: dict | None = None
+                try:
+                    if cio_row and cio_row.get("blend_weights"):
+                        _ee_implied = await _ee_alloc(
+                            cio_row.get("blend_weights"))
+                except Exception:  # noqa: BLE001
+                    _ee_implied = None
+                # Live regime signals for the 5 watchpoint tokens
+                # ({{VIX_CURRENT}} / {{YIELD_CURVE_CURRENT}} /
+                # {{CREDIT_SPREAD_CURRENT}} /
+                # {{EQUITY_TREND_CURRENT}} / {{ESS_CURRENT}}).
+                _ee_signals: dict | None = None
+                try:
+                    _ee_signals = await _ee_regime()
+                except Exception:  # noqa: BLE001
+                    _ee_signals = None
                 rc_rows, fl_rows, cs_payload, crisis_payload = (
-                    await load_substitution_metric_sources())
+                    await load_substitution_metric_sources(
+                        data_hash=cur_hash or None))
+                # Study-period months -- mirror the generation
+                # call's source preference (validated_constants
+                # OR strategy_results aggregate). Editor export
+                # doesn't carry validated_constants; fall back
+                # to the strategy cache's n_observations.
+                _ee_study_months: int | None = None
+                _ee_strats = (
+                    brief_data.get("strategy_results") or {})
+                if isinstance(_ee_strats, dict):
+                    _n_obs = _ee_strats.get("n_observations")
+                    if isinstance(_n_obs, int):
+                        _ee_study_months = _n_obs
+                # OOS_WINDOW_PCT_OF_STUDY -- constant on
+                # academic_deck (53/287 = 18.5).
+                try:
+                    from tools.academic_deck import (
+                        OOS_WINDOW_PCT_OF_STUDY,
+                    )
+                    _ee_oos_pct = OOS_WINDOW_PCT_OF_STUDY
+                except Exception:  # noqa: BLE001
+                    _ee_oos_pct = 18.5
                 brief_substitution_table = get_substitution_table(
                     cur_hash,
                     brief_data.get("strategy_results") or {},
@@ -14207,10 +14275,15 @@ async def _editor_export(editor_draft_id: int) -> Response:
                     oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
                     pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                     post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                    oos_window_pct_of_study=_ee_oos_pct,
+                    study_months=_ee_study_months,
+                    implied_allocation=_ee_implied,
+                    live_signals=_ee_signals,
                     regime_conditional=rc_rows,
                     factor_loadings=fl_rows,
                     cost_sensitivity=cs_payload,
-                    crisis_performance=crisis_payload)
+                    crisis_performance=crisis_payload,
+                    hash_verified=True)
             except Exception as _exc:  # noqa: BLE001
                 # Fail-open: a substitution-table build failure
                 # leaves the figure captions with literal
@@ -17496,6 +17569,20 @@ async def _generate_brief_document(
                  "hypothesis addresses, and the analysis below is built "
                  "on that scope. Do not introduce methodology details or "
                  "the recommendation here -- those are Sections 2 and 5."
+                 "\n\nIMPORTANT TOKEN HYGIENE: do NOT emit lowercase "
+                 "placeholder tokens like {{play_by_play_events}} or "
+                 "{{play_by_play_add_value}}. These are NOT in the "
+                 "substitution table and will render as literal "
+                 "{{}} text in the exported brief. The context dict "
+                 "field names are NOT substitution tokens -- they're "
+                 "the source data the platform passes you. The only "
+                 "tokens you may emit are the UPPERCASE ones documented "
+                 "in the placeholder guide above (e.g. "
+                 "{{OOS_SHARPE_BLEND}}, {{REGIME_SWITCHING_MAX_DD}}). "
+                 "When you want to reference scorecard / play-by-play "
+                 "evidence, name it descriptively in prose (e.g. "
+                 "'the play-by-play scorecard') rather than emitting a "
+                 "token."
                  + _BRIEF_TONE_RULES),
              "context": {"summary_statistics": data["summary_statistics"],
                          "drawdown_comparison": data["drawdown_comparison"],
@@ -17694,11 +17781,25 @@ async def _generate_brief_document(
                  "to keep separate. A draft without this sentence will "
                  "be rejected on review.\n\n"
                  "Then reference the live recommendation surface for the "
-                 "current portfolio snapshot: 'The current regime + "
-                 "asset-class weights are surfaced on the CIO "
-                 "Recommendation card and the Implied Asset Allocation "
-                 "Over Time chart. This brief is the analytical case; "
-                 "those surfaces are the live snapshot.' If "
+                 "current portfolio snapshot: 'The current regime is "
+                 "{{CURRENT_REGIME}} at {{REGIME_CONFIDENCE}} confidence; "
+                 "the implied equity allocation is "
+                 "{{CURRENT_EQUITY_PCT}}. The CIO Recommendation card "
+                 "and the Implied Asset Allocation Over Time chart "
+                 "surface these live readings. This brief is the "
+                 "analytical case; those surfaces are the live "
+                 "snapshot.'\n\n"
+                 "MANDATORY: when you cite the LIVE regime read, the "
+                 "confidence percentage, or the live equity-allocation "
+                 "weight, you MUST use the {{CURRENT_REGIME}}, "
+                 "{{REGIME_CONFIDENCE}}, and {{CURRENT_EQUITY_PCT}} "
+                 "placeholder tokens -- never write the live values as "
+                 "raw numbers (e.g. '62.7%' or '44.5%'). Raw live values "
+                 "stale instantly because the regime shifts between "
+                 "generation time and reader time; the {{TOKEN}} "
+                 "placeholders bind to the platform's current state at "
+                 "the moment the reader opens the export.\n\n"
+                 "If "
                  "live_recommendation.is_stale is true, include this "
                  "exact disclosure sentence: 'The live regime read at "
                  "generation time was unavailable; the recommendation "
