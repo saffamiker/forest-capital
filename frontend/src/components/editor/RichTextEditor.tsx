@@ -22,6 +22,7 @@ import {
 } from '../../lib/editorMarkers'
 import { BobCallout } from '../../lib/BobCalloutNode'
 import { TokenValueExtension } from './tokenValueExtension'
+import { UnverifiedExtension } from './unverifiedExtension'
 import type { TipTapDoc } from '../../types/editor'
 
 interface Props {
@@ -56,6 +57,15 @@ export default function RichTextEditor({ content, onChange, onAskAI }: Props) {
       // tooltip + override popover ship in PR-DM-Rich as a
       // richer NodeView on top of this same extension.
       TokenValueExtension,
+      // June 28 2026 (PR #479) -- unverified inline node for
+      // soft-fail flagging. The hard-lock 3-pass cap (PR #478)
+      // wraps surviving raw numerics as
+      // <unverified>VALUE</unverified> substrings in
+      // content_text/content_json; the auto-upgrade walker
+      // parses those into structured unverified nodes; this
+      // extension registers the schema + the rich NodeView
+      // with the resolve popover.
+      UnverifiedExtension,
       markerExtension.configure({
         onMarkerClick: (marker, coords) => {
           // [[BOB]] is a block node now and never reaches here; only

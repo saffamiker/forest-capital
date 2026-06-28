@@ -498,3 +498,224 @@ def build_review_summary(
 
     _walk(content_json)
     return out
+
+
+# ── <unverified> tag walker (June 28 2026, PR #479) ──────────────
+#
+# When the hard-lock soft-fail wraps a surviving raw numeric, it
+# emits literal "<unverified>VALUE</unverified>" substrings in the
+# narrative text (academic_export.harness_narrative for brief /
+# appendix, script_generation for script, _substitute_slide_content
+# for deck). At persist time content_json contains TipTap text
+# nodes whose `text` field carries the literal tag substring.
+#
+# For the in-editor NodeView to render, those substrings must be
+# parsed out of the text nodes + replaced with structured
+# `<unverified>` nodes carrying the raw value as an attribute.
+# Walker shape mirrors _split_text_node above: scan + splice +
+# return a list. Idempotent: re-running on already-upgraded
+# content skips existing nodes.
+
+_UNVERIFIED_TAG_RE = re.compile(
+    r"<unverified>(.*?)</unverified>",
+    re.DOTALL)
+
+
+def _split_text_node_for_unverified(
+    text: str,
+) -> list[dict[str, Any]] | None:
+    """Walk `text` for any <unverified>VALUE</unverified> tag.
+    Returns a list of TipTap node dicts (text + unverified
+    alternating) when at least one tag was found, or None when
+    no tags so the caller can keep the original node untouched.
+
+    Unverified node shape:
+      {"type": "unverified", "attrs": {"value": "+0.5"}}
+
+    The NodeView (frontend) reads attrs.value and renders a
+    red/amber pill displaying the raw value with a click handler
+    that opens the resolution popover."""
+    matches = list(_UNVERIFIED_TAG_RE.finditer(text))
+    if not matches:
+        return None
+    out: list[dict[str, Any]] = []
+    cursor = 0
+    for m in matches:
+        start, end = m.span()
+        if start > cursor:
+            out.append({
+                "type": "text",
+                "text": text[cursor:start],
+            })
+        raw_value = (m.group(1) or "").strip()
+        out.append({
+            "type":  "unverified",
+            "attrs": {"value": raw_value},
+        })
+        cursor = end
+    if cursor < len(text):
+        out.append({
+            "type": "text",
+            "text": text[cursor:],
+        })
+    return out
+
+
+def upgrade_content_json_for_unverified_tags(
+    content_json: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Upgrade a draft's content_json: scan every text node
+    for <unverified>...</unverified> literal substrings + split
+    into structured `unverified` nodes.
+
+    Args:
+      content_json: the TipTap doc tree from
+                    editor_drafts.content_json.
+
+    Returns:
+      (new_content_json, stats) where stats carries:
+        nodes_upgraded:    count of unverified nodes inserted
+        already_upgraded:  count of pre-existing unverified
+                           nodes encountered (re-run safety)
+        upgraded:          bool, True iff nodes_upgraded > 0
+
+    Idempotent. Mirrors upgrade_content_json_to_token_values
+    shape so the auto-upgrade hook can run BOTH passes in
+    sequence (token upgrade first to convert {{TOKEN}}
+    placeholders, then unverified upgrade to convert tag
+    substrings)."""
+    stats: dict[str, int] = {
+        "nodes_upgraded":   0,
+        "already_upgraded": 0,
+        "upgraded":         False,
+    }
+    if not isinstance(content_json, dict):
+        return content_json, stats
+
+    def _walk(node: Any) -> Any:
+        if not isinstance(node, dict):
+            return node
+        ntype = node.get("type")
+        if ntype == "unverified":
+            stats["already_upgraded"] += 1
+            return node
+        if ntype == "text":
+            text = node.get("text") or ""
+            if not text:
+                return node
+            replaced = _split_text_node_for_unverified(text)
+            if replaced is None:
+                return node
+            marks = node.get("marks")
+            if marks:
+                replaced = [
+                    {**n, "marks": marks}
+                    if isinstance(n, dict)
+                    and n.get("type") != "unverified"
+                    else n
+                    for n in replaced
+                ]
+            new_token_count = sum(
+                1 for n in replaced
+                if isinstance(n, dict)
+                and n.get("type") == "unverified")
+            stats["nodes_upgraded"] += new_token_count
+            return {"__splice__": replaced}
+        content = node.get("content")
+        if isinstance(content, list):
+            new_content: list[Any] = []
+            for child in content:
+                walked = _walk(child)
+                if (isinstance(walked, dict)
+                        and "__splice__" in walked):
+                    new_content.extend(walked["__splice__"])
+                else:
+                    new_content.append(walked)
+            new_node = dict(node)
+            new_node["content"] = new_content
+            return new_node
+        return node
+
+    new_content_json = _walk(content_json)
+    stats["upgraded"] = stats["nodes_upgraded"] > 0
+    return new_content_json, stats
+
+
+def upgrade_canvas_slides_for_unverified_tags(
+    content_json: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Deck-specific variant. The deck's content_json is the
+    canvas-element schema (NOT TipTap):
+      {"slides": [{"elements": [{"type": "text",
+                                 "content": "...", ...}]}]}
+
+    Walks each text element's `content` field for
+    <unverified>...</unverified> tags. Two options:
+      (a) Strip the tags + leave the raw value in `content`
+          (canvas can't render an inline node mid-text).
+      (b) Add a parallel `unverified_values` list on the
+          element so the canvas editor's renderer can paint
+          red borders around the affected values.
+
+    This implementation goes with option (b): preserve the
+    literal `<unverified>VALUE</unverified>` substring in
+    `content` (canvas editor renders it as-is with surrounding
+    text) AND populate
+    `element["unverified"] = ["+0.5", "0.005", ...]` as a
+    parallel list the canvas renderer can use to apply visual
+    treatment.
+
+    Stats shape matches the TipTap variant for parallel logging.
+    """
+    stats: dict[str, int] = {
+        "nodes_upgraded":   0,
+        "already_upgraded": 0,
+        "upgraded":         False,
+    }
+    if not isinstance(content_json, dict):
+        return content_json, stats
+    slides = content_json.get("slides")
+    if not isinstance(slides, list):
+        return content_json, stats
+    out_slides: list[Any] = []
+    for slide in slides:
+        if not isinstance(slide, dict):
+            out_slides.append(slide)
+            continue
+        new_slide = dict(slide)
+        elements = slide.get("elements")
+        if isinstance(elements, list):
+            new_elements: list[Any] = []
+            for el in elements:
+                if not isinstance(el, dict):
+                    new_elements.append(el)
+                    continue
+                content_str = el.get("content")
+                if not isinstance(content_str, str):
+                    new_elements.append(el)
+                    continue
+                matches = list(
+                    _UNVERIFIED_TAG_RE.finditer(content_str))
+                if not matches:
+                    new_elements.append(el)
+                    continue
+                # Found unverified tags in this element's text.
+                values: list[str] = []
+                for m in matches:
+                    v = (m.group(1) or "").strip()
+                    if v and v not in values:
+                        values.append(v)
+                stats["nodes_upgraded"] += len(values)
+                new_el = dict(el)
+                # Keep the literal tag substring in content so
+                # the canvas renderer can do its own
+                # highlighting; also surface the value list
+                # for editor inspection + popover targeting.
+                new_el["unverified"] = values
+                new_elements.append(new_el)
+            new_slide["elements"] = new_elements
+        out_slides.append(new_slide)
+    new_content = dict(content_json)
+    new_content["slides"] = out_slides
+    stats["upgraded"] = stats["nodes_upgraded"] > 0
+    return new_content, stats
