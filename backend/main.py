@@ -14177,6 +14177,21 @@ async def _editor_export(editor_draft_id: int) -> Response:
             # export but passed substitution_table=None; without
             # the table the figure captions show raw placeholders.
             try:
+                # June 28 2026 (Issue 1) -- the editor-export
+                # substitution table previously omitted many
+                # kwargs that the generation-time call supplies
+                # (study_months, implied_allocation, live_signals,
+                # oos_window_pct_of_study, hash_verified, freeze-
+                # aware data_hash). Result: tokens like
+                # {{STUDY_START}} / {{STUDY_END}} /
+                # {{CURRENT_REGIME}} / {{REGIME_CONFIDENCE}} /
+                # {{SENSITIVITY_COST_BPS_*}} resolved to em-dash
+                # or were missing entirely, leaving literal
+                # {{TOKEN}} strings in the exported DOCX
+                # (operator-reported on draft 80). Mirror the
+                # full generation-time kwarg set so EVERY token
+                # that resolves at generation also resolves at
+                # editor-export.
                 from tools.academic_export import (
                     load_substitution_metric_sources,
                 )
@@ -14184,10 +14199,17 @@ async def _editor_export(editor_draft_id: int) -> Response:
                     current_data_hash as _ee_cur_hash,
                 )
                 from tools.cio_recommendation import (
+                    compute_implied_asset_allocation as _ee_alloc,
                     get_latest_recommendation as _ee_cio,
                 )
                 from tools.numeric_substitution import (
                     get_substitution_table,
+                )
+                from tools.submission_freeze import (
+                    get_effective_data_hash as _ee_eff_hash,
+                )
+                from tools.cache import (
+                    get_regime_cache as _ee_regime,
                 )
                 from tools.academic_deck import (
                     CORRELATION_POST_2022,
@@ -14195,10 +14217,56 @@ async def _editor_export(editor_draft_id: int) -> Response:
                     OOS_SHARPE_BENCHMARK,
                     OOS_SHARPE_REGIME_CONDITIONAL,
                 )
-                cur_hash = await _ee_cur_hash() or ""
+                # Freeze-aware hash so the editor-export table
+                # matches what generation produced when a freeze
+                # was active.
+                _ee_live_hash = await _ee_cur_hash() or ""
+                cur_hash = (
+                    await _ee_eff_hash(_ee_live_hash)
+                    or _ee_live_hash)
                 cio_row = await _ee_cio()
+                # Implied allocation for the {{CURRENT_*_PCT}}
+                # token family (needs CIO blend weights).
+                _ee_implied: dict | None = None
+                try:
+                    if cio_row and cio_row.get("blend_weights"):
+                        _ee_implied = await _ee_alloc(
+                            cio_row.get("blend_weights"))
+                except Exception:  # noqa: BLE001
+                    _ee_implied = None
+                # Live regime signals for the 5 watchpoint tokens
+                # ({{VIX_CURRENT}} / {{YIELD_CURVE_CURRENT}} /
+                # {{CREDIT_SPREAD_CURRENT}} /
+                # {{EQUITY_TREND_CURRENT}} / {{ESS_CURRENT}}).
+                _ee_signals: dict | None = None
+                try:
+                    _ee_signals = await _ee_regime()
+                except Exception:  # noqa: BLE001
+                    _ee_signals = None
                 rc_rows, fl_rows, cs_payload, crisis_payload = (
-                    await load_substitution_metric_sources())
+                    await load_substitution_metric_sources(
+                        data_hash=cur_hash or None))
+                # Study-period months -- mirror the generation
+                # call's source preference (validated_constants
+                # OR strategy_results aggregate). Editor export
+                # doesn't carry validated_constants; fall back
+                # to the strategy cache's n_observations.
+                _ee_study_months: int | None = None
+                _ee_strats = (
+                    brief_data.get("strategy_results") or {})
+                if isinstance(_ee_strats, dict):
+                    _n_obs = _ee_strats.get("n_observations")
+                    if isinstance(_n_obs, int):
+                        _ee_study_months = _n_obs
+                # OOS_WINDOW_PCT_OF_STUDY -- constant on
+                # academic_deck (53/287 = 18.5).
+                try:
+                    from tools.academic_deck import (
+                        OOS_WINDOW_PCT_OF_STUDY,
+                    )
+                    _ee_oos_pct = OOS_WINDOW_PCT_OF_STUDY
+                except Exception:  # noqa: BLE001
+                    _ee_oos_pct = 18.5
                 brief_substitution_table = get_substitution_table(
                     cur_hash,
                     brief_data.get("strategy_results") or {},
@@ -14207,10 +14275,15 @@ async def _editor_export(editor_draft_id: int) -> Response:
                     oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
                     pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                     post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                    oos_window_pct_of_study=_ee_oos_pct,
+                    study_months=_ee_study_months,
+                    implied_allocation=_ee_implied,
+                    live_signals=_ee_signals,
                     regime_conditional=rc_rows,
                     factor_loadings=fl_rows,
                     cost_sensitivity=cs_payload,
-                    crisis_performance=crisis_payload)
+                    crisis_performance=crisis_payload,
+                    hash_verified=True)
             except Exception as _exc:  # noqa: BLE001
                 # Fail-open: a substitution-table build failure
                 # leaves the figure captions with literal
