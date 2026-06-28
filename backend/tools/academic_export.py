@@ -1037,7 +1037,24 @@ def harness_narrative(
             # harness's evaluator + scoring all see substituted
             # text (current behaviour); only the persistence
             # path swaps back to raw + token-bearing form.
+            #
+            # CRITICAL: key the stash by the BANNER-STRIPPED
+            # form of the substituted text. final_text (the
+            # lookup key at the deferral-swap site) is the
+            # result of _strip_banner(result.response) which
+            # drops leading "AI DRAFT" lines + trims
+            # whitespace. Storing by the raw substituted form
+            # (un-stripped) means the lookup misses + the
+            # swap silently falls through to substituted -- the
+            # exact failure mode operator reported on draft 73.
+            # Store under BOTH the un-stripped AND the stripped
+            # form so existing code paths that look up by the
+            # un-stripped substituted (the harness evaluator
+            # cycle) also work.
+            stripped_sub = _strip_banner(substituted) or substituted
+            stripped_raw = _strip_banner(raw) or raw
             _raw_per_substituted[substituted] = raw
+            _raw_per_substituted[stripped_sub] = stripped_raw
             return substituted
 
         # _substituting_generator handles BOTH the no-substitution

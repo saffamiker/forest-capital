@@ -369,6 +369,39 @@ class TestNewTokensInTable:
 # ── Data reference catalog entries ────────────────────────
 
 
+class TestDeferralStashBannerStripping:
+    """REGRESSION pin for draft 73 -- the operator-reported
+    failure where content_json carried resolved values instead
+    of {{TOKEN}} placeholders despite DEFER_SUBSTITUTION_TO_EXPORT
+    being ON.
+
+    Root cause: the deferral swap at the end of harness_narrative
+    looks up `_raw_per_substituted.get(final_text)` where
+    final_text is the BANNER-STRIPPED form (result of
+    _strip_banner(result.response)). The stash was keyed by the
+    UN-STRIPPED substituted form, so the lookup missed + the
+    swap fell through to substituted.
+
+    Fix: also stash under the banner-stripped key so the
+    lookup matches whether final_text was stripped or not."""
+
+    def test_stash_keyed_by_both_stripped_and_unstripped(self):
+        """Source-inspection pin: the stash population stores
+        the raw text under TWO keys -- the un-stripped
+        substituted form (for harness internal use) AND the
+        banner-stripped form (for the deferral swap lookup)."""
+        import inspect
+        from tools.academic_export import harness_narrative
+        src = inspect.getsource(harness_narrative)
+        # The fix must store under stripped_sub (banner-
+        # stripped substituted) so the deferral swap finds
+        # the raw form even when final_text was stripped.
+        assert (
+            "_raw_per_substituted[stripped_sub]" in src)
+        # Plus the un-stripped form for legacy callers.
+        assert "_raw_per_substituted[substituted]" in src
+
+
 class TestNewCatalogEntries:
 
     def test_new_tokens_have_catalog_entries(self):
