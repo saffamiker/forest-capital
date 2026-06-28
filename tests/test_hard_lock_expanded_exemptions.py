@@ -252,6 +252,47 @@ class TestReferencesSectionSkip:
             for v in viols)
         assert not ref_flagged
 
+    def test_bold_inline_references_paragraph_recognised(self):
+        """The earlier brief drafts used **References** as an
+        inline-bold paragraph (NOT a ## heading). The
+        preprocessor must recognise the bold form too."""
+        text = (
+            "Body text with 99.99 as a finding.\n"
+            "\n"
+            "**References**\n"
+            "Smith, J. (2020). Vol. 42, pp. 100-130.\n"
+        )
+        viols = _scan(text)
+        body_flagged = any(v.raw_value == "99.99" for v in viols)
+        ref_flagged = any(
+            v.raw_value in {"42", "100", "130"}
+            for v in viols)
+        assert body_flagged
+        assert not ref_flagged
+
+    def test_bold_inline_with_colon_recognised(self):
+        """**References:** -- colon inside the bold close."""
+        text = (
+            "Body 88.88 finding.\n"
+            "\n"
+            "**References:**\n"
+            "Anderson, M. (2015). Vol. 77.\n"
+        )
+        viols = _scan(text)
+        assert not any(v.raw_value == "77" for v in viols)
+        assert any(v.raw_value == "88.88" for v in viols)
+
+    def test_bold_bibliography_recognised(self):
+        text = (
+            "Finding 77.77.\n"
+            "\n"
+            "**Bibliography**\n"
+            "Brown, P. (2019). Vol. 33.\n"
+        )
+        viols = _scan(text)
+        assert not any(v.raw_value == "33" for v in viols)
+        assert any(v.raw_value == "77.77" for v in viols)
+
     def test_references_block_ends_at_next_heading(self):
         text = (
             "## Body\n"

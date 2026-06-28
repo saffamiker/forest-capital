@@ -402,10 +402,18 @@ def _is_value_supported_by_substitution(
 # data findings). Match is anchored to the start of a line +
 # optionally tolerates a leading "##" / numeric prefix /
 # colon, then matches the heading word.
+# June 28 2026 -- the markdown-bold + inline-paragraph form
+# (**References**, **References:**, **References**:,
+# **Bibliography**) is supported in addition to the
+# heading-prefix (## References) and bare (References) forms.
+# Earlier brief drafts used bold-inline paragraphs not
+# heading-prefix lines, so the original regex missed them and
+# the references-skip wasn't firing.
 _REF_HEADING_RE = re.compile(
-    r"(?im)^(?:\s*#{1,6}\s*)?(?:\d+\.?\s*)?"
+    r"(?im)^(?:\s*#{1,6}\s*)?(?:\d+\.?\s*)?\*{0,2}"
     r"(?:references?|bibliography|works\s+cited|"
-    r"citations?|sources)\s*:?\s*$")
+    r"citations?|sources)"
+    r":?\*{0,2}\s*:?\s*$")
 # A heading is ANY line that starts with a heading marker
 # (markdown #), title-case prose followed by a colon, or a
 # numbered section label. The references-skip stops at the
