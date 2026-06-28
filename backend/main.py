@@ -13827,6 +13827,7 @@ async def _generate_narratives(
     n_strategies: int | None = None,
     substitution_table: dict[str, str] | None = None,
     document_type: str | None = None,
+    defer_substitution: bool | None = None,
 ) -> dict[str, str]:
     """
     Generates a set of narrative sections concurrently.
@@ -13853,6 +13854,29 @@ async def _generate_narratives(
     import asyncio
 
     from tools.academic_export import DATA_PENDING, harness_narrative
+
+    # June 28 2026 -- resolve the DEFER_SUBSTITUTION_TO_EXPORT
+    # flag ONCE in this async caller before launching the
+    # asyncio.to_thread jobs. Threading the bool into harness_
+    # narrative eliminates the failed asyncio.run-from-worker
+    # path that raised "Future attached to a different loop"
+    # (SQLAlchemy's async session is bound to the main loop;
+    # a fresh asyncio.run inside the worker thread cannot
+    # reuse those connections). The caller may also pre-resolve
+    # it themselves and pass through; only query when not
+    # supplied.
+    if defer_substitution is None:
+        try:
+            from tools.platform_flags import (
+                is_defer_substitution_enabled,
+            )
+            defer_substitution = (
+                await is_defer_substitution_enabled())
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(
+                "defer_flag_resolve_failed",
+                error=str(_exc))
+            defer_substitution = False
 
     out: dict[str, str] = {}
     jobs: list[tuple[str, Any]] = []
@@ -13889,6 +13913,12 @@ async def _generate_narratives(
         # analytical_appendix). Deck + script paths are unaffected.
         if document_type is not None:
             kwargs["document_type"] = document_type
+        # June 28 2026 -- thread the pre-resolved deferral flag
+        # so the worker thread never tries to query
+        # platform_config from inside its own asyncio.run (the
+        # SQLAlchemy session is bound to the main loop +
+        # raises "Future attached to a different loop").
+        kwargs["defer_substitution"] = bool(defer_substitution)
         jobs.append((spec["key"], asyncio.to_thread(
             harness_narrative, spec["agent_id"], spec["task"], spec["context"],
             **kwargs)))
