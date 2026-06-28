@@ -61,16 +61,21 @@ class TestBriefPromptUsesNewTokens:
 
     def test_limitations_prompt_references_sensitivity_tokens(
             self):
+        # Read main.py via the loaded module's __file__ so this
+        # works regardless of pytest's cwd (CI runs from
+        # backend/, local runs from repo root).
+        import main as _main_module
         with open(
-                "backend/main.py", encoding="utf-8") as f:
+                _main_module.__file__, encoding="utf-8") as f:
             src = f.read()
         assert "{{SENSITIVITY_COST_BPS_LOW}}" in src
         assert "{{SENSITIVITY_COST_BPS_MID}}" in src
         assert "{{SENSITIVITY_COST_BPS_HIGH}}" in src
 
     def test_methodology_uses_bh_threshold_token(self):
+        import main as _main_module
         with open(
-                "backend/main.py", encoding="utf-8") as f:
+                _main_module.__file__, encoding="utf-8") as f:
             src = f.read()
         # Source-pin: the BH significance token appears (at
         # least 2 references for the brief's two prompts that
@@ -247,18 +252,18 @@ class TestAutoUpgradeHookWired:
     def test_brief_generator_calls_auto_upgrade(self):
         """Source-pin: the brief draft persist site invokes
         the auto-upgrade hook."""
+        import main as _main_module
         with open(
-                "backend/main.py", encoding="utf-8") as f:
+                _main_module.__file__, encoding="utf-8") as f:
             src = f.read()
-        # Auto-upgrade call right after value_manifest persist
-        # for executive_brief.
-        assert (
-            '_auto_upgrade_draft_to_token_values(\n'
-            in src) or (
-            "_auto_upgrade_draft_to_token_values(" in src)
-        # At least 2 call sites (brief + appendix).
+        # At least 3 occurrences: the def + brief call + appendix call.
+        # Function definition counts as 1; we want >= 3 total for
+        # def + 2 call sites (brief + appendix).
         assert src.count(
-            "_auto_upgrade_draft_to_token_values(") >= 2
+            "_auto_upgrade_draft_to_token_values(") >= 3, (
+            "expected def + brief call + appendix call -- "
+            "found "
+            f"{src.count('_auto_upgrade_draft_to_token_values(')}")
 
 
 # ── Fix 10: APA references consolidation ────────────────────
