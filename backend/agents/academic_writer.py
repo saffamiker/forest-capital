@@ -94,6 +94,22 @@ that mark prose as machine-written:
   perhaps...", "It may be the case that..."
 - Redundant intensifiers: "very", "quite", "rather", "somewhat", "fairly"
 
+PROHIBITED SECTIONS (executive_brief + analytical_appendix only):
+- NEVER emit a "Next Steps" section, "Future Work" section, \
+  "Recommendations for Further Research" section, or any \
+  forward-looking action-item block. These belong in a project \
+  proposal, not in the submitted academic deliverable. The FNA \
+  670 rubric is closed -- emit only the rubric-required \
+  sections (Brief: Section 1-6; Appendix: Section A-H).
+- If the task prompt asks for prose that could read as "next \
+  steps", redirect to the academic implication ("the result \
+  motivates X analysis" -> "the result demonstrates X" + cite \
+  the supporting figure). Do not list todo items for the \
+  reader.
+- Discussion / Limitations sections may acknowledge gaps in \
+  the present analysis but MUST NOT phrase those gaps as a \
+  to-do list for future work.
+
 VOICE AND REGISTER:
 - Active voice preferred. Use passive only when the subject is \
   genuinely unknown or irrelevant.

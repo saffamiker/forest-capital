@@ -13659,6 +13659,7 @@ async def _generate_narratives(
     specs: list[dict], *,
     n_strategies: int | None = None,
     substitution_table: dict[str, str] | None = None,
+    document_type: str | None = None,
 ) -> dict[str, str]:
     """
     Generates a set of narrative sections concurrently.
@@ -13715,6 +13716,12 @@ async def _generate_narratives(
         # (Option 2: harness retry on flag count).
         if "numeric_anchors" in spec:
             kwargs["numeric_anchors"] = spec["numeric_anchors"]
+        # June 28 2026 -- thread document_type so harness_narrative
+        # can enable the hard-lock untoken-numeric guardrail on
+        # protected document types (executive_brief +
+        # analytical_appendix). Deck + script paths are unaffected.
+        if document_type is not None:
+            kwargs["document_type"] = document_type
         jobs.append((spec["key"], asyncio.to_thread(
             harness_narrative, spec["agent_id"], spec["task"], spec["context"],
             **kwargs)))
@@ -17500,7 +17507,11 @@ async def _generate_brief_document(
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs, document_type="executive_brief"),
             n_strategies=len(data.get("strategy_results") or {}),
-            substitution_table=substitution_table)
+            substitution_table=substitution_table,
+            # June 28 2026 -- arms the untoken-numeric hard lock
+            # inside harness_narrative. Brief is one of the two
+            # protected document types.
+            document_type="executive_brief")
 
         # Substitution-architecture summary log. Operators read this
         # in Render logs to confirm the determinism layer fired
@@ -18217,7 +18228,11 @@ async def _generate_appendix_document(
             _apply_draft_caveats(
                 specs, document_type="analytical_appendix"),
             n_strategies=len(data.get("strategy_results") or {}),
-            substitution_table=substitution_table)
+            substitution_table=substitution_table,
+            # June 28 2026 -- arms the untoken-numeric hard lock
+            # inside harness_narrative. Appendix is the second
+            # protected document type alongside brief.
+            document_type="analytical_appendix")
 
         # Per-document substitution-complete telemetry. Same shape the
         # brief + deck writers emit at end of generation.
@@ -18238,8 +18253,15 @@ async def _generate_appendix_document(
                             document_type="analytical_appendix",
                             error=str(exc))
 
+        # June 28 2026 -- thread substitution_table through so the
+        # builder can resolve {{TOKEN}} placeholders in narratives
+        # at export time. Required by the Phase-1 deferred-
+        # substitution pipeline; harmless under legacy generation
+        # (substitution_table=None) where narratives already carry
+        # resolved values.
         docx_bytes = await asyncio.to_thread(
-            build_analytical_appendix, data, narratives)
+            build_analytical_appendix, data, narratives,
+            substitution_table=substitution_table)
 
         # Load the generated content into an editor draft so the
         # frontend can open it directly in the editor — same pattern

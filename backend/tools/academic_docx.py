@@ -1762,6 +1762,8 @@ def _add_reproducibility_line(doc: Document, data_hash: str | None) -> None:
 
 def build_analytical_appendix(
     data: dict[str, Any], narratives: dict[str, str],
+    *,
+    substitution_table: dict[str, str] | None = None,
 ) -> bytes:
     """
     The Analytical Appendix — the evidentiary record behind every
@@ -1806,15 +1808,28 @@ def build_analytical_appendix(
     _add_review_warning_box(doc)
     doc.add_page_break()
 
+    # June 28 2026 -- substitution-table-aware narrative reader.
+    # When a substitution_table is supplied (the post-Phase-1
+    # deferred-substitution path), narratives stored on the
+    # editor draft contain raw {{TOKEN}} placeholders that need
+    # resolving at export time. When None (legacy path), the
+    # narratives already carry resolved values from generation-
+    # time substitution and the helper is a no-op.
+    def _narrative(key: str) -> str:
+        raw_text = narratives.get(key, "[DATA PENDING]")
+        if substitution_table is None:
+            return raw_text
+        return _apply_substitutions(raw_text, substitution_table)
+
     # ── Section A — Data and Methodology ──────────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[0])
-    _add_brief_body(doc, narratives.get("appendix_a", "[DATA PENDING]"))
+    _add_brief_body(doc, _narrative("appendix_a"))
     h, r = table_summary_statistics(data.get("summary_statistics", []))
     _add_table(doc, "Table A1. Summary Statistics by Asset Class", h, r)
 
     # ── Section B — Full Strategy Performance ─────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[1])
-    _add_brief_body(doc, narratives.get("appendix_b", "[DATA PENDING]"))
+    _add_brief_body(doc, _narrative("appendix_b"))
     h, r = table_strategy_performance_full(
         data.get("strategy_results") or {})
     _add_table(doc, "Table B1. Full-Period Performance by Strategy "
@@ -1822,42 +1837,42 @@ def build_analytical_appendix(
 
     # ── Section C — Statistical Tests ─────────────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[2])
-    _add_brief_body(doc, narratives.get("appendix_c", "[DATA PENDING]"))
+    _add_brief_body(doc, _narrative("appendix_c"))
     h, r = table_statistical_tests(data.get("strategy_results") or {})
     _add_table(doc, "Table C1. Statistical Tests by Strategy "
                     "(paired-t, FDR-corrected, DSR, PSR, SPA)", h, r)
 
     # ── Section D — Bootstrap Confidence Intervals ────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[3])
-    _add_brief_body(doc, narratives.get("appendix_d", "[DATA PENDING]"))
+    _add_brief_body(doc, _narrative("appendix_d"))
     h, r = table_bootstrap_ci(data.get("bootstrap_ci_sharpe") or [])
     _add_table(doc, "Table D1. Sharpe Ratio with 95% Bootstrap CI "
                     "(block bootstrap, length 12, 10,000 resamples)", h, r)
 
     # ── Section E — Factor Loadings ───────────────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[4])
-    _add_brief_body(doc, narratives.get("appendix_e", "[DATA PENDING]"))
+    _add_brief_body(doc, _narrative("appendix_e"))
     h, r = table_factor_loadings(data.get("factor_loadings", []))
     _add_table(doc, "Table E1. Carhart Four-Factor Loadings by Strategy "
                     "(* significant at p < .05)", h, r)
 
     # ── Section F — Crisis Window Performance ─────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[5])
-    _add_brief_body(doc, narratives.get("appendix_f", "[DATA PENDING]"))
+    _add_brief_body(doc, _narrative("appendix_f"))
     h, r = table_crisis_performance(data.get("crisis_performance"))
     _add_table(doc, "Table F1. Cumulative Return by Strategy and "
                     "Crisis Window († indicates partial-overlap)", h, r)
 
     # ── Section G — Transaction Cost Sensitivity ──────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[6])
-    _add_brief_body(doc, narratives.get("appendix_g", "[DATA PENDING]"))
+    _add_brief_body(doc, _narrative("appendix_g"))
     h, r = table_cost_sensitivity(data.get("cost_sensitivity"))
     _add_table(doc, "Table G1. Net-of-Cost Sharpe at 10/15/20 bps "
                     "per Material Rebalance (OOS Window)", h, r)
 
     # ── Section H — Validation Audit Summary ──────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[7])
-    _add_brief_body(doc, narratives.get("appendix_h", "[DATA PENDING]"))
+    _add_brief_body(doc, _narrative("appendix_h"))
     h, r = table_invariant_summary(data.get("invariant_summary"))
     _add_table(doc, "Table H1. Latest Warm Invariant Verdict "
                     "(deterministic detection only — see "

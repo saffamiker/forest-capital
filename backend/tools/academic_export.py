@@ -702,6 +702,18 @@ def academic_doc_present(academic_docs: list[dict], document_type: str) -> bool:
 # section with 3+ stray numbers is a writer-drift signal.
 _STORY_PLAN_VIOLATION_RETRY_THRESHOLD = 3
 
+# June 28 2026 -- hard-lock numeric guardrail. After the initial
+# generation pass + the story-plan-violation retry, the brief /
+# appendix paths loop the generator up to this many times to
+# eliminate untoken-backed numerics from the prose. Each pass
+# uses build_correction_prompt to feed the LLM the offending
+# sentences + suggested {{TOKEN}} swaps (when the value matches
+# a substitution-table output). On the Nth pass with violations
+# still present, raises UntokenNumericLockError so the operator
+# sees the offending list rather than getting a silent
+# hallucination through to the editor.
+_UNTOKEN_LOCK_MAX_PASSES = 3
+
 
 # Matches the same numeric pattern the document_audit's story-plan
 # check uses. Decimal with optional %, sign, comma thousands. Kept
@@ -788,6 +800,18 @@ def harness_narrative(
     # output if cleaner. Fail-open: any error in the check
     # leaves the original prose unchanged.
     numeric_anchors: dict[str, Any] | None = None,
+    # June 28 2026 -- hard-lock numeric guardrail. When the
+    # caller supplies the document_type AND it is one of the
+    # protected types (executive_brief / analytical_appendix),
+    # the harness loop post-scans the final approved prose for
+    # numerics not backed by a {{TOKEN}} from the substitution
+    # table AND not in the numeric_anchors AND not allowlisted
+    # (year, citation, etc). When violations are found, the
+    # function loops the generator with explicit correction
+    # feedback up to _UNTOKEN_LOCK_MAX_PASSES times before
+    # raising UntokenNumericLockError. None / non-protected
+    # types preserve the legacy single-pass behaviour.
+    document_type: str | None = None,
 ) -> str:
     """
     Generates one section of academic prose through the Academic Writer
@@ -958,6 +982,16 @@ def harness_narrative(
                 visual_context=visual_context,
                 trigger="document_export_narrative")
 
+        # June 28 2026 -- DEFER_SUBSTITUTION_TO_EXPORT support.
+        # Closure-captured dict mapping substituted -> raw for
+        # every Sonnet call this section makes. When the flag is
+        # ON, the persistence path (post-harness, post-untoken-
+        # lock) looks up final_text here to recover the raw
+        # form with {{TOKEN}} placeholders intact. When OFF, the
+        # stash is populated but unused -- the legacy behaviour
+        # (substituted text persisted) is preserved.
+        _raw_per_substituted: dict[str, str] = {}
+
         def _substituting_generator(prompt: str) -> str:
             raw = _call_sonnet(prompt, max_tokens)
             # Self-healing retry loop. Two attempts at +1000 / +2000
@@ -997,6 +1031,13 @@ def harness_narrative(
                      agent_id=agent_id,
                      tokens_replaced=replaced,
                      count=len(replaced))
+            # June 28 2026 -- stash raw -> substituted so the
+            # post-harness layer can recover raw text when the
+            # DEFER_SUBSTITUTION_TO_EXPORT flag is on. The
+            # harness's evaluator + scoring all see substituted
+            # text (current behaviour); only the persistence
+            # path swaps back to raw + token-bearing form.
+            _raw_per_substituted[substituted] = raw
             return substituted
 
         # _substituting_generator handles BOTH the no-substitution
@@ -1089,6 +1130,126 @@ def harness_narrative(
             log.warning(
                 "harness_story_plan_check_failed",
                 agent_id=agent_id, error=str(_exc))
+
+        # ── June 28 2026 -- hard-lock numeric guardrail ─────────
+        # For executive_brief + analytical_appendix only, scan
+        # the approved prose for numerics not backed by a token.
+        # Loop the generator with explicit correction feedback
+        # up to _UNTOKEN_LOCK_MAX_PASSES times. Persist on a
+        # clean pass; raise UntokenNumericLockError otherwise.
+        _PROTECTED = {"executive_brief", "analytical_appendix"}
+        if (document_type in _PROTECTED
+                and substitution_table is not None
+                and final_text):
+            try:
+                from tools.untoken_numeric_check import (
+                    UntokenNumericLockError,
+                    build_correction_prompt,
+                    find_untoken_backed_numerics,
+                )
+                for _pass in range(1, _UNTOKEN_LOCK_MAX_PASSES + 1):
+                    viols = find_untoken_backed_numerics(
+                        final_text, substitution_table,
+                        numeric_anchors)
+                    if not viols:
+                        if _pass > 1:
+                            log.info(
+                                "untoken_lock_cleared",
+                                agent_id=agent_id,
+                                document_type=document_type,
+                                passes_used=_pass - 1)
+                        break
+                    log.warning(
+                        "untoken_lock_correction_pass",
+                        agent_id=agent_id,
+                        document_type=document_type,
+                        pass_n=_pass,
+                        violation_count=len(viols),
+                        sample_offenders=[
+                            v.raw_value for v in viols[:5]])
+                    if _pass == _UNTOKEN_LOCK_MAX_PASSES:
+                        # Out of correction passes -- raise so
+                        # the generator endpoint surfaces the
+                        # list to the operator.
+                        log.error(
+                            "untoken_lock_unrecoverable",
+                            agent_id=agent_id,
+                            document_type=document_type,
+                            remaining_violations=len(viols))
+                        raise UntokenNumericLockError(
+                            document_type, agent_id, viols)
+                    # Re-call the generator with explicit
+                    # correction feedback. _substituting_generator
+                    # already handles substitution + truncation
+                    # retry per call.
+                    correction_prompt = build_correction_prompt(
+                        user_message, viols, _pass)
+                    try:
+                        retry_text = _substituting_generator(
+                            correction_prompt)
+                        retry_text = (
+                            _strip_banner(retry_text) or "")
+                        if retry_text:
+                            final_text = retry_text
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "untoken_lock_retry_call_failed",
+                            agent_id=agent_id, error=str(exc))
+                        break
+            except UntokenNumericLockError:
+                # Bubble up so the brief / appendix generator
+                # endpoint can surface a structured 500 with
+                # the list of remaining offenders.
+                raise
+            except Exception as _lock_exc:  # noqa: BLE001
+                log.warning(
+                    "untoken_lock_check_failed",
+                    agent_id=agent_id, error=str(_lock_exc))
+
+        # June 28 2026 -- DEFER_SUBSTITUTION_TO_EXPORT swap.
+        # When the flag is ON for protected document types, swap
+        # final_text (substituted form) for the raw form with
+        # {{TOKEN}} placeholders intact. The stash was populated
+        # by every _substituting_generator call; look up the raw
+        # form of whichever attempt the harness ultimately
+        # picked. Falls through to substituted text when no match
+        # is found in the stash (defensive -- shouldn't happen
+        # but the legacy text is correct either way).
+        if (document_type in _PROTECTED
+                and substitution_table is not None
+                and final_text):
+            try:
+                from tools.platform_flags import (
+                    is_defer_substitution_enabled_sync,
+                )
+                # harness_narrative runs synchronously inside
+                # asyncio.to_thread (see _generate_narratives
+                # jobs.append at main.py:13719) so the sync
+                # variant is the right reader -- it opens its
+                # own asyncio.run when no event loop is running.
+                if is_defer_substitution_enabled_sync():
+                    raw_form = _raw_per_substituted.get(
+                        final_text)
+                    if raw_form is not None:
+                        log.info(
+                            "deferred_substitution_persisting_raw",
+                            agent_id=agent_id,
+                            document_type=document_type,
+                            raw_len=len(raw_form),
+                            substituted_len=len(final_text))
+                        final_text = raw_form
+                    else:
+                        log.warning(
+                            "deferred_substitution_stash_miss",
+                            agent_id=agent_id,
+                            document_type=document_type,
+                            note=(
+                                "final_text not in raw stash; "
+                                "persisting substituted form"))
+            except Exception as _flag_exc:  # noqa: BLE001
+                log.warning(
+                    "deferred_substitution_check_failed",
+                    agent_id=agent_id, error=str(_flag_exc))
 
         return final_text or (
             f"{DATA_PENDING} — narrative generation returned no content."
