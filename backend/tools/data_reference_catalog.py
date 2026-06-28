@@ -507,6 +507,59 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "defended": "Standard academic baseline",
         "locked_value": "40%",
     },
+
+    # ── Cost-sensitivity grid constants (June 28 2026, Fix 4) ──
+    # By-construction transaction-cost tiers (basis points) the
+    # cost-sensitivity analysis sweeps over. Not cache-derived.
+    "constant 10 (cost-sensitivity grid bps)": {
+        "lock_date": "Methodology constant (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional methodology constant: the cost-"
+            "sensitivity analysis sweeps over a [10, 15, 20] "
+            "bps grid of round-trip transaction costs. The "
+            "LOW tier (10 bps) approximates a high-liquidity "
+            "ETF execution; MID (15 bps) the academic baseline; "
+            "HIGH (20 bps) a conservative retail upper bound."),
+        "defended": "Academic methodology standard",
+        "locked_value": "10",
+    },
+    "constant 15 (cost-sensitivity grid bps)": {
+        "lock_date": "Methodology constant (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional methodology constant: the cost-"
+            "sensitivity grid mid tier. See LOW (10) entry for "
+            "the full grid spec."),
+        "defended": "Academic methodology standard",
+        "locked_value": "15",
+    },
+    "constant 20 (cost-sensitivity grid bps)": {
+        "lock_date": "Methodology constant (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional methodology constant: the cost-"
+            "sensitivity grid high tier. See LOW (10) entry "
+            "for the full grid spec."),
+        "defended": "Academic methodology standard",
+        "locked_value": "20",
+    },
+
+    # ── BH FDR significance threshold (June 28 2026, Fix 5a) ──
+    "constant 0.005 (BH-FDR academic standard)": {
+        "lock_date": "Statistical convention (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional statistical constant: the Benjamini-"
+            "Hochberg false-discovery-rate adjusted p-value "
+            "threshold the Council applies for multiple-"
+            "hypothesis correction across 10 strategies. The "
+            "0.005 cut-point is the academic recommendation "
+            "of Benjamini & Yekutieli (2001) at a 5% FDR "
+            "ceiling when 10 hypotheses are tested in parallel."),
+        "defended": "Academic statistical standard",
+        "locked_value": "0.005",
+    },
 }
 
 
@@ -817,6 +870,39 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             source="constant 40% (strategy definition)",
             is_locked=True,
             document_locations=(_BRIEF_S2, _BRIEF_S3, _APP_A)),
+        # June 28 2026 (Fix 4) -- transaction-cost sensitivity
+        # tier constants for the Limitations section's cost
+        # sensitivity prose.
+        TokenEntry(
+            token="{{SENSITIVITY_COST_BPS_LOW}}",
+            label="Sensitivity analysis low cost tier (bps)",
+            source=(
+                "constant 10 (cost-sensitivity grid bps)"),
+            is_locked=True,
+            document_locations=(_BRIEF_S4, _APP_G)),
+        TokenEntry(
+            token="{{SENSITIVITY_COST_BPS_MID}}",
+            label="Sensitivity analysis mid cost tier (bps)",
+            source=(
+                "constant 15 (cost-sensitivity grid bps)"),
+            is_locked=True,
+            document_locations=(_BRIEF_S4, _APP_G)),
+        TokenEntry(
+            token="{{SENSITIVITY_COST_BPS_HIGH}}",
+            label="Sensitivity analysis high cost tier (bps)",
+            source=(
+                "constant 20 (cost-sensitivity grid bps)"),
+            is_locked=True,
+            document_locations=(_BRIEF_S4, _APP_G)),
+        # June 28 2026 (Fix 5a) -- Benjamini-Hochberg FDR
+        # significance threshold (academic standard 0.005).
+        TokenEntry(
+            token="{{BH_SIGNIFICANCE_THRESHOLD}}",
+            label="Benjamini-Hochberg FDR significance threshold",
+            source=(
+                "constant 0.005 (BH-FDR academic standard)"),
+            is_locked=True,
+            document_locations=(_BRIEF_S2, _APP_C)),
     )),
 
     # ── Correlation regime -------------------------------------------
