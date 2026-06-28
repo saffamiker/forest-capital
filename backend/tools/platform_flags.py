@@ -121,30 +121,62 @@ async def is_defer_substitution_enabled() -> bool:
 
 def is_defer_substitution_enabled_sync() -> bool:
     """Synchronous variant for callers inside non-async contexts
-    (e.g. the build_*_executive_brief DOCX builders that run
-    sync). Uses a per-process cache to avoid blocking the event
-    loop on every brief paragraph render.
+    (e.g. the harness_narrative deferral-swap path running
+    inside asyncio.to_thread). Always queries -- no caching.
 
-    Cache is keyed at module level + cleared via
-    reset_flag_cache() in tests. Default OFF + same fail-open
-    semantics as the async variant."""
-    cached = _SYNC_CACHE.get(DEFER_SUBSTITUTION_TO_EXPORT_KEY)
-    if cached is not None:
-        return cached
+    REPLACED June 28 2026: the prior implementation maintained
+    a process-wide _SYNC_CACHE that NEVER invalidated. When the
+    FIRST call ran from a context with a running event loop, the
+    function fail-opened to False AND cached that False
+    permanently. Every subsequent call (including the
+    legitimate harness_narrative-in-asyncio.to_thread context
+    where the query would otherwise succeed) returned the
+    poisoned False. That was the operator-confirmed root cause
+    of Phase 2 deferral silently no-op-ing for the executive
+    brief on draft 74 / draft 75 despite
+    DEFER_SUBSTITUTION_TO_EXPORT=true in platform_config.
+
+    Current contract: must reliably return True whenever the
+    platform_config row holds {"enabled": true}, regardless of
+    thread context OR call order. Two cases:
+
+      1. No running loop in the caller's thread -- typical for
+         harness_narrative inside asyncio.to_thread (the default
+         executor's worker threads have no event loop). Direct
+         asyncio.run(is_defer_substitution_enabled()) succeeds.
+
+      2. Running loop in the caller's thread -- typical for a
+         test calling this helper from inside an async test or
+         a hypothetical sync invocation from request-handling
+         code. Delegate to a single-worker ThreadPoolExecutor so
+         the query runs in a fresh thread that gets its own
+         loop. The current thread blocks on .result() but does
+         NOT deadlock (the running loop is unaffected; the
+         query runs in a sibling thread).
+
+    Per-call DB cost: one indexed-PK row select. With 6 brief
+    sections that's 6 queries per generation -- negligible.
+    The premature cache was buying microseconds at the cost of
+    correctness."""
     try:
         import asyncio
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-        if loop is not None and loop.is_running():
-            # Cannot block the running loop from a sync helper;
-            # caller is responsible for using the async variant
-            # in async contexts. Fail-open to OFF.
-            return False
-        val = asyncio.run(is_defer_substitution_enabled())
-        _SYNC_CACHE[DEFER_SUBSTITUTION_TO_EXPORT_KEY] = val
-        return val
+        if loop is None:
+            return asyncio.run(is_defer_substitution_enabled())
+        # Running loop present -- delegate to a worker thread
+        # that opens its own asyncio.run. concurrent.futures
+        # avoids the run_until_complete-on-running-loop
+        # deadlock.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=1) as pool:
+            return pool.submit(
+                lambda: asyncio.run(
+                    is_defer_substitution_enabled())
+            ).result(timeout=10)
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "platform_flag_sync_read_failed",
@@ -152,11 +184,17 @@ def is_defer_substitution_enabled_sync() -> bool:
         return False
 
 
+# Module-level cache kept ONLY for backward-compat with the
+# reset_flag_cache() test helper -- the helper is a no-op now
+# but existing tests still call it during setup/teardown.
 _SYNC_CACHE: dict[str, bool] = {}
 
 
 def reset_flag_cache() -> None:
-    """Test helper -- clears the sync cache. Production code
-    never calls this; the cache is intentionally process-wide
-    so a flag flip requires a deploy or a restart."""
+    """Test helper -- clears the sync cache.
+
+    June 28 2026: kept for API compatibility but is now a no-op
+    since is_defer_substitution_enabled_sync no longer
+    consults _SYNC_CACHE. Existing tests that call this
+    continue to work without modification."""
     _SYNC_CACHE.clear()
