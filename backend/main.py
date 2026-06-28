@@ -12226,7 +12226,36 @@ async def get_data_reference_sheet(
     ) -> tuple[str | None, str | None]:
         """Returns (value, last_verified). Value None -> render
         em-dash; last_verified None means the source didn't
-        carry a timestamp."""
+        carry a timestamp.
+
+        June 27 2026 (Task 1) -- {{REGIME_CONFIDENCE}} and
+        {{CURRENT_REGIME}} are read DIRECTLY from cio_row (the
+        live get_latest_recommendation() result), bypassing the
+        substitution table cache. The data-reference sheet is a
+        diagnostic tool and must always reflect the true current
+        CIO state, not a cached approximation. The PR 1 v2 cache-
+        key fix (CIO identity in _cache_key, June 27 2026) closes
+        the invalidation gap on doc generation, but the sheet
+        still gets the live read here so a future cache-shape
+        bug or a TTL race never produces a stale diagnostic
+        display. The last_verified stamp 'live (from
+        cio_recommendation)' makes it visible to the reader
+        that this row bypasses the table cache."""
+        if token == "{{REGIME_CONFIDENCE}}":
+            from tools.numeric_substitution import format_pct
+            raw = cio_row.get("confidence") if cio_row else None
+            # Handle the two known cio_row.confidence shapes:
+            # scalar float (e.g. 0.954) or dict with probability
+            # field (e.g. {"probability": 0.954}). Same dispatch
+            # as numeric_substitution.py:538-541.
+            if isinstance(raw, dict):
+                raw = raw.get("probability")
+            value = format_pct(raw)
+            return (value, "live (from cio_recommendation)")
+        if token == "{{CURRENT_REGIME}}":
+            raw = cio_row.get("regime") if cio_row else None
+            value = str(raw) if raw else "—"
+            return (value, "live (from cio_recommendation)")
         if source.startswith("data.factor_loadings."):
             # factor_loadings.<STRATEGY>.<metric>
             _, _, rest = source.partition(
@@ -12257,7 +12286,8 @@ async def get_data_reference_sheet(
     # ships in the entry payload so the frontend can render
     # the multi-line tooltip on hover over the lock icon.
     from tools.data_reference_catalog import (
-        provenance_for_source,
+        classify_submission_scope, provenance_for_source,
+        SCOPE_LEGEND,
     )
 
     # Walk the catalog and build the categorised response.
@@ -12279,6 +12309,8 @@ async def get_data_reference_sheet(
                 "value": value if value is not None else "—",
                 "source": entry.source,
                 "is_locked": entry.is_locked,
+                "submission_scope": classify_submission_scope(
+                    entry.token, entry.source, entry.is_locked),
                 "last_verified": last_verified,
                 "document_locations": list(entry.document_locations),
                 "provenance": provenance,
@@ -12299,6 +12331,8 @@ async def get_data_reference_sheet(
             "value": value if value is not None else "—",
             "source": entry.source,
             "is_locked": entry.is_locked,
+            "submission_scope": classify_submission_scope(
+                entry.token, entry.source, entry.is_locked),
             "last_verified": last_verified_cache or "cache miss",
             "document_locations": list(entry.document_locations),
             # Per-strategy expansion is is_locked=False; no
@@ -12322,6 +12356,8 @@ async def get_data_reference_sheet(
             "value": value if value is not None else "—",
             "source": entry.source,
             "is_locked": entry.is_locked,
+            "submission_scope": classify_submission_scope(
+                entry.token, entry.source, entry.is_locked),
             "last_verified": last_verified_cache or "cache miss",
             "document_locations": list(entry.document_locations),
             "provenance": None,
@@ -12331,12 +12367,61 @@ async def get_data_reference_sheet(
         "entries": factor_rows,
     }
 
+    # ── Task 4 (June 27 2026) -- submission-scope summary ──────
+    # Tally every rendered entry across every category by its
+    # submission_scope so the sheet header can answer
+    # "is this figure part of the academic submission record?"
+    # at a glance.
+    scope_counts: dict[str, int] = {
+        "IN_SCOPE_LOCKED": 0,
+        "IN_SCOPE_CONSTANT": 0,
+        "IN_SCOPE_FULL_DATASET": 0,
+        "OUT_OF_SCOPE_LIVE": 0,
+    }
+    for _cat_key, cat in categories.items():
+        for entry in cat.get("entries", []):
+            scope = entry.get("submission_scope")
+            if scope in scope_counts:
+                scope_counts[scope] += 1
+    in_scope_total = (
+        scope_counts["IN_SCOPE_LOCKED"]
+        + scope_counts["IN_SCOPE_CONSTANT"]
+        + scope_counts["IN_SCOPE_FULL_DATASET"])
+    submission_scope_summary = {
+        "in_scope_total": in_scope_total,
+        "in_scope_locked": scope_counts["IN_SCOPE_LOCKED"],
+        "in_scope_constant": scope_counts["IN_SCOPE_CONSTANT"],
+        "in_scope_full_dataset": (
+            scope_counts["IN_SCOPE_FULL_DATASET"]),
+        "out_of_scope_live": scope_counts["OUT_OF_SCOPE_LIVE"],
+    }
+
+    # ── Task 4 -- freeze status surfaced at the sheet header ───
+    freeze_active = False
+    freeze_hash: str | None = None
+    try:
+        from tools.submission_freeze import get_freeze_config
+        freeze_config = await get_freeze_config()
+        freeze_active = bool(freeze_config.get("active"))
+        freeze_hash = (
+            freeze_config.get("freeze_hash")
+            if freeze_active else None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "data_reference_freeze_status_failed",
+            error=str(exc))
+
     return {
         "data_hash": strategy_hash,
         "platform_fingerprint": platform_fingerprint,
         "generated_at": datetime.now(
             timezone.utc).isoformat(),
         "categories": categories,
+        # Task 4 (June 27 2026) -- submission audit fields.
+        "freeze_active": freeze_active,
+        "freeze_hash": freeze_hash,
+        "submission_scope_summary": submission_scope_summary,
+        "submission_scope_legend": SCOPE_LEGEND,
     }
 
 

@@ -67,10 +67,11 @@ interface DraftSummary {
 
 
 type HashRowStatus =
-  | 'current'   // draft hash matches live hash
-  | 'stale'     // draft hash differs from live hash
-  | 'no_draft'  // no current draft of this type
-  | 'no_hash'   // draft exists but data_hash is null
+  | 'current'         // draft hash matches live hash (freeze inactive)
+  | 'current_frozen'  // freeze active and draft hash == freeze hash
+  | 'stale'           // draft hash differs from the comparison hash
+  | 'no_draft'        // no current draft of this type
+  | 'no_hash'         // draft exists but data_hash is null
 
 
 interface HashRow {
@@ -79,6 +80,18 @@ interface HashRow {
   draftHash:    string | null
   liveHash:     string | null
   status:       HashRowStatus
+}
+
+
+// June 27 2026 (Task 2) -- submission-freeze status shape returned
+// by GET /api/v1/admin/submission-status. We only consume the two
+// fields needed for the freeze-aware comparison; the endpoint also
+// returns frozen_documents + hash_drift + freeze_date which the
+// panel ignores here.
+interface FreezeStatus {
+  freeze_active:     boolean
+  freeze_hash:       string | null
+  current_live_hash: string
 }
 
 
@@ -100,9 +113,22 @@ function _classifyRow(
   draftHash: string | null,
   liveHash: string | null,
   hasDraft: boolean,
+  freezeStatus: FreezeStatus | null,
 ): HashRowStatus {
   if (!hasDraft) return 'no_draft'
   if (!draftHash) return 'no_hash'
+  // June 27 2026 (Task 2) -- under freeze, compare against the
+  // freeze hash, not the live hash. Without this, drafts that
+  // CORRECTLY carry the freeze hash were flagged 'stale' against
+  // the live hash, producing the misleading "N documents have
+  // stale data" warning + amber "Stale" pill.
+  if (freezeStatus?.freeze_active && freezeStatus.freeze_hash) {
+    if (draftHash === freezeStatus.freeze_hash) return 'current_frozen'
+    // A draft NOT matching the freeze hash IS genuinely stale --
+    // it was generated under the live hash and needs a regen
+    // against the frozen cache. Keep the 'stale' classification.
+    return 'stale'
+  }
   if (!liveHash) return 'no_hash'
   if (draftHash === liveHash) return 'current'
   return 'stale'
@@ -130,6 +156,13 @@ export default function LightRefreshButton(
   // post-refresh success message reflect the new hash.
   const [liveHash, setLiveHash] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<DraftSummary[]>([])
+  // June 27 2026 (Task 2) -- submission-freeze status. When freeze
+  // is active, the per-row comparison + summary callout copy +
+  // header urgency all change so the panel reflects the locked
+  // state rather than warning the user about drafts that are
+  // CORRECTLY on the freeze hash.
+  const [freezeStatus, setFreezeStatus]
+    = useState<FreezeStatus | null>(null)
   // Snapshot of every current draft's data_hash BEFORE the refresh
   // fires, keyed by document_type. Used post-refresh to tally how
   // many drafts the refresh actually updated (drafts whose hash
@@ -143,11 +176,19 @@ export default function LightRefreshButton(
     drafts:     DraftSummary[]
     liveHash:   string | null
   }> => {
-    const [draftsRes, liveRes] = await Promise.allSettled([
+    // June 27 2026 (Task 2) -- add the submission-status fetch
+    // alongside drafts + live-hash so the freeze state lands in
+    // the same allSettled batch. Any failure of the freeze fetch
+    // degrades to freeze_active=false (fail-open -- the panel
+    // shows the live-hash comparison, which is the legacy
+    // behaviour).
+    const [draftsRes, liveRes, freezeRes] = await Promise.allSettled([
       axios.get<{ drafts: DraftSummary[] }>(
         '/api/v1/documents/drafts'),
       axios.get<{ current_data_hash?: string | null }>(
         '/api/v1/audit/runs/latest'),
+      axios.get<FreezeStatus>(
+        '/api/v1/admin/submission-status'),
     ])
     const draftsOut: DraftSummary[]
       = draftsRes.status === 'fulfilled'
@@ -158,8 +199,13 @@ export default function LightRefreshButton(
       = liveRes.status === 'fulfilled'
         ? (liveRes.value.data?.current_data_hash ?? null)
         : null
+    const freezeOut: FreezeStatus | null
+      = freezeRes.status === 'fulfilled'
+        ? (freezeRes.value.data ?? null)
+        : null
     setDrafts(draftsOut)
     setLiveHash(liveOut)
+    setFreezeStatus(freezeOut)
     return { drafts: draftsOut, liveHash: liveOut }
   }, [])
 
@@ -259,7 +305,8 @@ export default function LightRefreshButton(
       label:        dl.label,
       draftHash,
       liveHash,
-      status:       _classifyRow(draftHash, liveHash, hasDraft),
+      status:       _classifyRow(
+        draftHash, liveHash, hasDraft, freezeStatus),
     }
   })
 
@@ -268,8 +315,14 @@ export default function LightRefreshButton(
   // the parent didn't pass a hash.
   const totalDrafts = hashRows.filter(
     (r) => r.status !== 'no_draft').length
+  // June 27 2026 (Task 2) -- 'current_frozen' counts as NOT
+  // stale. Under freeze, drafts on the freeze hash are EXACTLY
+  // what we want; the panel must not warn the user about them.
   const staleCount = hashRows.filter(
     (r) => r.status === 'stale' || r.status === 'no_hash').length
+  const frozenCurrentCount = hashRows.filter(
+    (r) => r.status === 'current_frozen').length
+  const freezeActive = Boolean(freezeStatus?.freeze_active)
 
   return (
     <section
@@ -341,7 +394,9 @@ export default function LightRefreshButton(
 
       <StaleSummaryCallout
         totalDrafts={totalDrafts}
-        staleCount={staleCount} />
+        staleCount={staleCount}
+        freezeActive={freezeActive}
+        frozenCurrentCount={frozenCurrentCount} />
 
       <TeamGate
         block
@@ -468,6 +523,22 @@ function StatusPill(
       </span>
     )
   }
+  // June 27 2026 (Task 2) -- under freeze, drafts on the freeze
+  // hash get a distinct pill: green like 'current' but with the
+  // 'freeze active' qualifier so the reader understands the
+  // status reflects the freeze hash, not the live hash.
+  if (status === 'current_frozen') {
+    return (
+      <span
+        data-testid="hash-status-pill-current-frozen"
+        className="inline-flex items-center gap-1 px-1.5 py-0.5
+                   rounded text-2xs font-medium bg-success/15
+                   border border-success/40 text-success">
+        <CheckCircle className="w-3 h-3" />
+        Current (freeze active)
+      </span>
+    )
+  }
   if (status === 'stale') {
     return (
       <span
@@ -504,9 +575,11 @@ function StatusPill(
 
 
 function StaleSummaryCallout(
-  { totalDrafts, staleCount }: {
-    totalDrafts: number
-    staleCount:  number
+  { totalDrafts, staleCount, freezeActive, frozenCurrentCount }: {
+    totalDrafts:         number
+    staleCount:          number
+    freezeActive:        boolean
+    frozenCurrentCount:  number
   },
 ): React.ReactElement {
   if (totalDrafts === 0) {
@@ -519,6 +592,28 @@ function StaleSummaryCallout(
         <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
         <span>
           No drafts generated yet. Generate documents first.
+        </span>
+      </div>
+    )
+  }
+  // June 27 2026 (Task 2) -- freeze-active branch. When all
+  // drafts are on the freeze hash, the panel reports a neutral
+  // locked state rather than the legacy "current" copy that
+  // implied liveness. The "Refresh analytics cache" wording
+  // omits the urgency framing -- Light Refresh remains
+  // available but is now an explicit operator choice, not a
+  // remediation for stale data.
+  if (freezeActive && staleCount === 0 && frozenCurrentCount > 0) {
+    return (
+      <div
+        data-testid="stale-summary-callout-frozen-current"
+        className="rounded border border-success/30
+                   bg-success/5 p-2.5 text-2xs text-success
+                   flex items-start gap-1.5">
+        <CheckCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+        <span>
+          All drafts locked to submission freeze hash. Refresh
+          analytics cache is optional.
         </span>
       </div>
     )
@@ -537,6 +632,17 @@ function StaleSummaryCallout(
       </div>
     )
   }
+  // June 27 2026 (Task 2) -- copy adapts to freeze state. Under
+  // freeze, "current hash" is the freeze hash and the stale
+  // drafts genuinely need regen to match it. Without freeze
+  // the legacy copy applies. Either way the user-facing
+  // problem is the same: drafts don't match the comparison
+  // hash and a regen-against-cache pass is needed.
+  const summaryText = freezeActive
+    ? `${staleCount} document(s) have drifted from the freeze `
+      + 'hash. Regenerate to lock them to the freeze cache.'
+    : `${staleCount} document(s) have stale data. Run Light `
+      + 'Refresh to update all drafts to the current hash.'
   return (
     <div
       data-testid="stale-summary-callout-stale"
@@ -545,8 +651,7 @@ function StaleSummaryCallout(
                  flex items-start gap-1.5">
       <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
       <span>
-        ⚠ {staleCount} document(s) have stale data. Run Light
-        Refresh to update all drafts to the current hash.
+        ⚠ {summaryText}
       </span>
     </div>
   )

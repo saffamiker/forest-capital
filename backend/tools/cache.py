@@ -153,6 +153,19 @@ async def get_monthly_returns() -> dict[str, list[Any]] | None:
 
     Shape: {"dates": [...], "equity": [...], "ig": [...], "hy": [...],
             "rf": [...]}. Returns None if the table is unavailable or empty.
+
+    SOFT LEAK 2 (post-submission backlog -- June 27 2026):
+    this read is not hash-aware. Under freeze, market_data_monthly
+    extends to May 2026 so STUDY_MONTHS=287 and rolling correlation
+    tokens reflect live data rather than the freeze date. Values
+    are academically correct (the study genuinely uses 287 months)
+    but the freeze boundary is not structurally enforced here.
+    Fix: make get_monthly_returns accept a data_hash arg and
+    filter rows by the hash's max_date from the market data
+    fingerprint. Tracked in audit findings dated 2026-06-27,
+    superseding the June 27 SOFT LEAK 2 docstring in
+    tools/academic_export.gather_document_data which made the
+    same observation.
     """
     if not _DB_AVAILABLE:
         return None

@@ -65,6 +65,140 @@ class TokenEntry:
     document_locations: tuple[str, ...]
 
 
+# ── Submission scope (Task 4 -- June 27 2026) ────────────────────
+#
+# Every Data Reference Sheet entry answers one question for Bob /
+# Molly: "Is this figure part of the academic submission record?"
+# The four scope values and their semantics are:
+#
+#   SCOPE_LOCKED         IN SCOPE -- locked to Dec 2025 freeze hash.
+#                        Strategy cache + historical analytics
+#                        tokens. Cannot change without a new freeze.
+#
+#   SCOPE_CONSTANT       IN SCOPE -- hardcoded methodology constant
+#                        in academic_deck.py. Immutable code value.
+#
+#   SCOPE_FULL_DATASET   IN SCOPE -- reflects the full 287-month
+#                        dataset through May 2026 rather than the
+#                        freeze date. Academically correct (the
+#                        study uses all available data).
+#
+#   SCOPE_LIVE           OUT OF SCOPE -- live platform state at
+#                        generation time. Intentionally current --
+#                        not a submission figure.
+#
+# Classification is DERIVED from existing (token, source, is_locked)
+# fields via classify_submission_scope below so the per-entry
+# CATALOG definitions stay unchanged. A future entry inherits the
+# correct scope automatically based on its source / token name.
+SCOPE_LOCKED        = "IN_SCOPE_LOCKED"
+SCOPE_CONSTANT      = "IN_SCOPE_CONSTANT"
+SCOPE_FULL_DATASET  = "IN_SCOPE_FULL_DATASET"
+SCOPE_LIVE          = "OUT_OF_SCOPE_LIVE"
+
+SCOPE_LEGEND: dict[str, dict[str, str]] = {
+    SCOPE_LOCKED: {
+        "label": "IN SCOPE -- LOCKED",
+        "description": (
+            "This figure is part of the academic submission record "
+            "and is guaranteed identical to the December 2025 "
+            "frozen dataset. It cannot change without a new freeze "
+            "hash."),
+        "applies_to": (
+            "All strategy cache tokens (Sharpe, drawdown, recovery, "
+            "CAGR, volatility, blend weights, factor loadings, cost "
+            "sensitivity, crisis performance, regime-conditional "
+            "metrics) keyed to c421fb895347f924."),
+    },
+    SCOPE_CONSTANT: {
+        "label": "IN SCOPE -- CONSTANT",
+        "description": (
+            "This figure is part of the academic submission record "
+            "and is a hardcoded methodology constant in "
+            "academic_deck.py. It is immutable."),
+        "applies_to": (
+            "OOS_SHARPE_BLEND (0.86), OOS_SHARPE_BENCHMARK (0.43), "
+            "BENCHMARK_MAX_DD (-52.6%), REGIME_SWITCHING_MAX_DD "
+            "(-29.7%), correlations (-0.05/+0.57), play-by-play "
+            "(2/9), OOS window (53 months)."),
+    },
+    SCOPE_FULL_DATASET: {
+        "label": "IN SCOPE -- FULL DATASET",
+        "description": (
+            "This figure is part of the academic submission record "
+            "but reflects the full 287-month dataset through May "
+            "2026, not capped at the freeze date. This is "
+            "academically correct -- the analysis uses all "
+            "available data."),
+        "applies_to": (
+            "STUDY_MONTHS (287), STUDY_END (May 2026), rolling "
+            "correlations (PRE/POST_2022_EQ_IG_CORR)."),
+    },
+    SCOPE_LIVE: {
+        "label": "OUT OF SCOPE -- LIVE",
+        "description": (
+            "This figure is NOT part of the frozen submission "
+            "record. It reflects live platform state at generation "
+            "time and will change as market conditions evolve. It "
+            "is intentionally current -- the platform's live CIO "
+            "recommendation is a feature, not a submission figure."),
+        "applies_to": (
+            "CURRENT_REGIME, REGIME_CONFIDENCE, CURRENT_EQUITY_PCT, "
+            "all allocation weights, all watchpoint tokens (VIX, "
+            "yield curve, credit spread, equity trend, ESS)."),
+    },
+}
+
+# Tokens whose semantics are FULL_DATASET regardless of source
+# field. Use a literal token set rather than source pattern
+# matching because STUDY_END is overridable via kwarg in
+# numeric_substitution and a future change to its source string
+# should not silently flip its scope.
+_FULL_DATASET_TOKENS: frozenset[str] = frozenset({
+    "{{STUDY_MONTHS}}", "{{STUDY_START}}", "{{STUDY_END}}",
+    "{{PRE_2022_EQ_IG_CORR}}", "{{POST_2022_EQ_IG_CORR}}",
+})
+
+# Source prefixes that indicate a LIVE platform read. These do
+# NOT honour the freeze hash by design -- per operator spec, live
+# CIO + regime watchpoint tokens are intentionally current.
+_LIVE_SOURCE_PREFIXES: tuple[str, ...] = (
+    "cio_recommendation.",
+    "regime_signals_cache.",
+    "data.live_signals.",
+    "data.cio_row.",
+)
+
+
+def classify_submission_scope(
+    token: str, source: str, is_locked: bool,
+) -> str:
+    """Derive a token's submission scope from its existing
+    catalog fields. See SCOPE_LEGEND for the four-category
+    semantics + which tokens fall into each.
+
+    Resolution order (first match wins):
+      1. Explicit FULL_DATASET token set (STUDY_*, rolling corr)
+      2. LIVE source prefix (cio_recommendation, regime_signals_,
+         live_signals, cio_row)
+      3. is_locked=True -> CONSTANT (hardcoded in academic_deck)
+      4. Fallthrough -> LOCKED (strategy cache, historical
+         analytics, factor loadings -- everything keyed to the
+         freeze hash)
+
+    The fallthrough captures the dominant category: every
+    strategy cache + historical analytics token is LOCKED, and
+    that's the design intent under freeze. CONSTANT and LIVE
+    are explicit exceptions; FULL_DATASET is a small named set."""
+    if token in _FULL_DATASET_TOKENS:
+        return SCOPE_FULL_DATASET
+    if any(source.startswith(p) for p in _LIVE_SOURCE_PREFIXES):
+        return SCOPE_LIVE
+    if is_locked:
+        return SCOPE_CONSTANT
+    return SCOPE_LOCKED
+
+
 # ── Per-strategy token stubs ─────────────────────────────────────
 #
 # Expanded at endpoint-call time to (strategy_name, TokenEntry)

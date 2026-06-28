@@ -40,12 +40,22 @@ interface LockedProvenance {
   locked_value:  string
 }
 
+// June 27 2026 (Task 4) -- submission scope enum mirroring
+// backend/tools/data_reference_catalog.SCOPE_* constants. The
+// chip rendering + scope summary block read these.
+type SubmissionScope =
+  | 'IN_SCOPE_LOCKED'
+  | 'IN_SCOPE_CONSTANT'
+  | 'IN_SCOPE_FULL_DATASET'
+  | 'OUT_OF_SCOPE_LIVE'
+
 interface DataReferenceEntry {
   token:               string
   label:               string
   value:               string
   source:              string
   is_locked:           boolean
+  submission_scope?:   SubmissionScope   // Task 4 -- new field
   last_verified:       string
   document_locations:  string[]
   provenance?:         LockedProvenance | null
@@ -56,11 +66,32 @@ interface DataReferenceCategory {
   entries:  DataReferenceEntry[]
 }
 
+// June 27 2026 (Task 4) -- submission scope legend + summary
+// shape returned alongside the categories block.
+interface ScopeLegendEntry {
+  label:        string
+  description:  string
+  applies_to:   string
+}
+
+interface SubmissionScopeSummary {
+  in_scope_total:         number
+  in_scope_locked:        number
+  in_scope_constant:      number
+  in_scope_full_dataset:  number
+  out_of_scope_live:      number
+}
+
 interface DataReferenceResponse {
-  data_hash:             string
-  platform_fingerprint:  string
-  generated_at:          string
-  categories:            Record<string, DataReferenceCategory>
+  data_hash:                  string
+  platform_fingerprint:       string
+  generated_at:               string
+  categories:                 Record<string, DataReferenceCategory>
+  // Task 4 (June 27 2026) -- submission audit fields.
+  freeze_active?:             boolean
+  freeze_hash?:               string | null
+  submission_scope_summary?:  SubmissionScopeSummary
+  submission_scope_legend?:   Record<SubmissionScope, ScopeLegendEntry>
 }
 
 
@@ -145,6 +176,7 @@ function downloadCsv(data: DataReferenceResponse): void {
   const lines: string[] = [
     [
       'category', 'token', 'label', 'value', 'source',
+      'submission_scope',  // Task 4 (June 27 2026)
       'is_locked', 'last_verified', 'document_locations',
     ].join(','),
   ]
@@ -158,6 +190,7 @@ function downloadCsv(data: DataReferenceResponse): void {
         csvEscape(entry.label),
         csvEscape(entry.value),
         csvEscape(entry.source),
+        csvEscape(entry.submission_scope ?? ''),
         entry.is_locked ? 'true' : 'false',
         csvEscape(entry.last_verified),
         csvEscape(entry.document_locations.join('; ')),
@@ -316,6 +349,160 @@ function ValidationPill({
       className="w-3 h-3 text-muted inline"
       aria-label="skipped"
       {...(title ? { title } : {})} />
+  )
+}
+
+
+// ── Task 4 (June 27 2026) -- submission scope chip ─────────────
+//
+// Compact pill rendering a token's submission_scope. Colour
+// scheme per operator spec:
+//   IN_SCOPE_LOCKED        green (parity with frozen confidence)
+//   IN_SCOPE_CONSTANT      slate (methodology constant; immutable)
+//   IN_SCOPE_FULL_DATASET  amber (in scope BUT review -- not
+//                          guaranteed frozen)
+//   OUT_OF_SCOPE_LIVE      blue (intentionally live; not part of
+//                          the frozen submission record)
+//
+// The amber variant must be visually distinct from green --
+// signals "in scope but review", not "guaranteed frozen".
+const SCOPE_CHIP_STYLES: Record<SubmissionScope, {
+  label: string
+  className: string
+  title: string
+}> = {
+  IN_SCOPE_LOCKED: {
+    label: 'LOCKED',
+    className: ('inline-flex items-center gap-1 px-1.5 py-0.5 '
+      + 'rounded text-2xs font-medium bg-success/15 '
+      + 'border border-success/40 text-success'),
+    title: 'In scope -- locked to Dec 2025 freeze hash.',
+  },
+  IN_SCOPE_CONSTANT: {
+    label: 'CONSTANT',
+    className: ('inline-flex items-center gap-1 px-1.5 py-0.5 '
+      + 'rounded text-2xs font-medium bg-slate-600/30 '
+      + 'border border-slate-500/40 text-slate-200'),
+    title: ('In scope -- hardcoded methodology constant in '
+      + 'academic_deck.py.'),
+  },
+  IN_SCOPE_FULL_DATASET: {
+    label: 'FULL DATASET',
+    className: ('inline-flex items-center gap-1 px-1.5 py-0.5 '
+      + 'rounded text-2xs font-medium bg-warning/15 '
+      + 'border border-warning/40 text-warning'),
+    title: ('Reflects full 287-month dataset through May 2026. '
+      + 'Academically correct but not capped at freeze date.'),
+  },
+  OUT_OF_SCOPE_LIVE: {
+    label: 'LIVE',
+    className: ('inline-flex items-center gap-1 px-1.5 py-0.5 '
+      + 'rounded text-2xs font-medium bg-electric/15 '
+      + 'border border-electric/40 text-electric'),
+    title: ('Intentionally live -- updates each generation. Not '
+      + 'part of frozen submission record.'),
+  },
+}
+
+
+function ScopeChip(
+  { scope }: { scope: SubmissionScope | undefined },
+): React.ReactElement {
+  if (!scope) return <span className="text-2xs text-muted">—</span>
+  const style = SCOPE_CHIP_STYLES[scope]
+  return (
+    <span
+      data-testid={`scope-chip-${scope.toLowerCase()}`}
+      title={style.title}
+      className={style.className}>
+      {style.label}
+    </span>
+  )
+}
+
+
+// ── Task 4 -- submission scope summary header ──────────────────
+function SubmissionScopeHeader({
+  freezeActive, freezeHash, summary, legend,
+}: {
+  freezeActive: boolean
+  freezeHash: string | null
+  summary: SubmissionScopeSummary | undefined
+  legend: Record<SubmissionScope, ScopeLegendEntry> | undefined
+}): React.ReactElement | null {
+  if (!summary || !legend) return null
+  const summaryLine = (
+    `${summary.in_scope_total} figures IN SCOPE `
+    + `(${summary.in_scope_locked} locked + `
+    + `${summary.in_scope_constant} constant + `
+    + `${summary.in_scope_full_dataset} full dataset) | `
+    + `${summary.out_of_scope_live} figures OUT OF SCOPE (live)`)
+  return (
+    <div
+      data-testid="submission-scope-header"
+      className="space-y-2 mb-3">
+      {freezeActive && freezeHash ? (
+        <div
+          data-testid="freeze-boundary-banner"
+          className="rounded border border-success/40
+                     bg-success/10 p-2.5 text-2xs text-success
+                     flex items-start gap-1.5">
+          <Lock className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>
+            <strong>Submission freeze active</strong> -- hash{' '}
+            <code className="text-2xs">
+              {freezeHash.slice(0, 8)}
+            </code>. Strategy performance figures (Sharpe,
+            drawdown, recovery, factor loadings, cost sensitivity)
+            are locked to December 2025 market data. Live regime
+            signal and watchpoint tokens are intentionally
+            current. Study period (287 months through May 2026)
+            reflects the full dataset used in the analysis.
+          </span>
+        </div>
+      ) : null}
+      <div
+        data-testid="submission-scope-summary"
+        className="rounded border border-slate-500/40
+                   bg-slate-700/20 p-2.5 text-2xs text-slate-200">
+        <div className="font-medium mb-1.5">Submission scope</div>
+        <div>{summaryLine}</div>
+      </div>
+      <details
+        data-testid="submission-scope-legend"
+        className="rounded border border-slate-500/40
+                   bg-slate-700/10 text-2xs text-slate-300">
+        <summary className="cursor-pointer px-2.5 py-1.5
+                            font-medium text-slate-200">
+          Legend (click to expand)
+        </summary>
+        <div className="px-2.5 pb-2.5 space-y-2">
+          {(['IN_SCOPE_LOCKED', 'IN_SCOPE_CONSTANT',
+             'IN_SCOPE_FULL_DATASET',
+             'OUT_OF_SCOPE_LIVE'] as SubmissionScope[]).map(
+            (sc) => {
+              const e = legend[sc]
+              if (!e) return null
+              return (
+                <div key={sc} className="flex items-start gap-2">
+                  <ScopeChip scope={sc} />
+                  <div className="flex-1">
+                    <div className="font-medium text-slate-100">
+                      {e.label}
+                    </div>
+                    <div className="leading-snug">
+                      {e.description}
+                    </div>
+                    <div className="text-muted leading-snug mt-0.5">
+                      Applies to: {e.applies_to}
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+        </div>
+      </details>
+    </div>
   )
 }
 
@@ -590,6 +777,11 @@ export default function DataReferenceSheetPanel() {
                   </>
                 )}
               </div>
+              <SubmissionScopeHeader
+                freezeActive={Boolean(data.freeze_active)}
+                freezeHash={data.freeze_hash ?? null}
+                summary={data.submission_scope_summary}
+                legend={data.submission_scope_legend} />
               {CATEGORY_ORDER.map((key) => {
                 const cat = data.categories[key]
                 if (!cat || cat.entries.length === 0) return null
@@ -631,6 +823,10 @@ export default function DataReferenceSheetPanel() {
                               <th className="py-1.5 pr-3 font-medium
                                             text-right">
                                 Value
+                              </th>
+                              <th className="py-1.5 pr-3 font-medium
+                                            w-24">
+                                Scope
                               </th>
                               <th className="py-1.5 pr-3 font-medium
                                             hidden md:table-cell">
@@ -700,6 +896,11 @@ export default function DataReferenceSheetPanel() {
                                                   whitespace-nowrap
                                                   align-top">
                                       {entry.value}
+                                    </td>
+                                    <td className="py-1.5 pr-3
+                                                  align-top">
+                                      <ScopeChip
+                                        scope={entry.submission_scope} />
                                     </td>
                                     <td className="py-1.5 pr-3
                                                   text-muted
