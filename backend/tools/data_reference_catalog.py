@@ -560,6 +560,16 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             is_locked=False,
             document_locations=(
                 "Brief footer", "Appendix footer", "Deck footer")),
+        # June 28 2026 -- months-before-2022 in the study
+        # period. Derived from STUDY_MONTHS minus the post-2022
+        # window; surfaces in regime/pre-2022 prose.
+        TokenEntry(
+            token="{{PRE_2022_MONTHS}}",
+            label="Months before 2022 in study period",
+            source="STUDY_MONTHS - post_2022_window_length",
+            is_locked=False,
+            document_locations=(
+                _BRIEF_S2, _BRIEF_S4, _APP_A)),
     )),
 
     # ── OOS window ---------------------------------------------------
@@ -731,6 +741,52 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             source="strategy_cache.CLASSIC_60_40.drawdown_recovery_days",
             is_locked=False,
             document_locations=(_BRIEF_S3, _APP_F)),
+        # June 28 2026 -- underscored-variant aliases. The
+        # Academic Writer prompt has historically emitted both
+        # "{{CLASSIC_6040_*}}" (canonical) and "{{CLASSIC_60_40_*}}"
+        # (with underscore between digits). Rather than fight the
+        # prompt, both names resolve to the same value via the
+        # substitution table. Same source, same lock state.
+        TokenEntry(
+            token="{{CLASSIC_60_40_RECOVERY}}",
+            label="Classic 60/40 recovery -- underscored alias",
+            source="strategy_cache.CLASSIC_60_40.drawdown_recovery_days",
+            is_locked=False,
+            document_locations=(_BRIEF_S3, _APP_F)),
+        TokenEntry(
+            token="{{CLASSIC_60_40_RECOVERY_MONTHS}}",
+            label="Classic 60/40 recovery months -- underscored alias",
+            source="strategy_cache.CLASSIC_60_40.drawdown_recovery_days",
+            is_locked=False,
+            document_locations=(_BRIEF_S3, _APP_F)),
+        TokenEntry(
+            token="{{CLASSIC_60_40_MAX_DD}}",
+            label="Classic 60/40 max drawdown -- underscored alias",
+            source="strategy_cache.CLASSIC_60_40.max_drawdown",
+            is_locked=False,
+            document_locations=(_BRIEF_S3, _APP_F)),
+        TokenEntry(
+            token="{{CLASSIC_60_40_SHARPE}}",
+            label="Classic 60/40 Sharpe -- underscored alias",
+            source="strategy_cache.CLASSIC_60_40.sharpe_ratio",
+            is_locked=False,
+            document_locations=(_BRIEF_S3, _APP_B)),
+        # June 28 2026 -- definitional 60/40 weight constants.
+        # By-construction strategy weights (not cache-derived);
+        # the structural-exemption rule balanced_allocation_weights
+        # covers the bare "60%/40%" form when prose prefers it.
+        TokenEntry(
+            token="{{CLASSIC_6040_WEIGHT_EQUITY}}",
+            label="Classic 60/40 equity weight (definitional)",
+            source="constant 60% (strategy definition)",
+            is_locked=True,
+            document_locations=(_BRIEF_S2, _BRIEF_S3, _APP_A)),
+        TokenEntry(
+            token="{{CLASSIC_6040_WEIGHT_BOND}}",
+            label="Classic 60/40 bond weight (definitional)",
+            source="constant 40% (strategy definition)",
+            is_locked=True,
+            document_locations=(_BRIEF_S2, _BRIEF_S3, _APP_A)),
     )),
 
     # ── Correlation regime -------------------------------------------

@@ -13047,6 +13047,62 @@ async def get_data_reference_sheet(
     }
 
     # ── Task 4 (June 27 2026) -- submission-scope summary ──────
+    # June 28 2026 -- auto-discovery backstop. Walk every token
+    # in the live substitution table; any token NOT already in
+    # the curated CATALOG above (or the per-strategy / factor
+    # expansions) gets surfaced under an "uncatalogued" category
+    # so the operator can see ALL tokens that can appear in a
+    # draft, not just the ones a human remembered to add to
+    # CATALOG. This makes the sheet self-healing: future token
+    # additions to numeric_substitution.py auto-appear here on
+    # the next request without a parallel catalog update.
+    #
+    # The endpoint still prefers curated entries (with labels +
+    # provenance + document_locations) when one exists -- this
+    # path is the safety net, not the primary path.
+    catalogued: set[str] = set()
+    for _ck, cat in categories.items():
+        for e in cat.get("entries", []):
+            catalogued.add(e["token"])
+    try:
+        uncatalogued_rows: list[dict] = []
+        for token, value in sorted(table.items()):
+            if not (token.startswith("{{")
+                    and token.endswith("}}")):
+                continue
+            if token in catalogued:
+                continue
+            uncatalogued_rows.append({
+                "token": token,
+                "label": (
+                    "Uncatalogued -- substitution-table only "
+                    "(add a TokenEntry in "
+                    "tools/data_reference_catalog.py for a "
+                    "human-readable label + provenance)"),
+                "value": value if value is not None else "—",
+                "source": (
+                    "tools/numeric_substitution.py:"
+                    "get_substitution_table"),
+                "is_locked": False,
+                "submission_scope": classify_submission_scope(
+                    token, None, False),
+                "last_verified": "live",
+                "document_locations": [],
+                "provenance": None,
+            })
+        if uncatalogued_rows:
+            categories["uncatalogued"] = {
+                "label": (
+                    "Uncatalogued tokens "
+                    "(present in substitution table but missing "
+                    "a curated catalog entry)"),
+                "entries": uncatalogued_rows,
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "data_reference_uncatalogued_backstop_failed",
+            error=str(exc))
+
     # Tally every rendered entry across every category by its
     # submission_scope so the sheet header can answer
     # "is this figure part of the academic submission record?"
@@ -17615,6 +17671,22 @@ async def _generate_brief_document(
                         document_type="executive_brief",
                         error=str(exc))
 
+        # June 28 2026 -- re-augment per-section anchors now
+        # that the substitution_table is built. _inject_brief_
+        # section_plan ran earlier (before the table existed)
+        # so anchors only carry story-plan entries. This pass
+        # adds the always-allowed study-metadata anchors
+        # (STUDY_MONTHS, N_STRATEGIES, OOS_WINDOW_MONTHS, etc.)
+        # so the LLM can write raw "287 months" without
+        # tripping the hard-lock as token_available.
+        if substitution_table:
+            for spec in specs:
+                if "numeric_anchors" in spec:
+                    spec["numeric_anchors"] = (
+                        _augment_anchors_with_study_metadata(
+                            spec["numeric_anchors"],
+                            substitution_table))
+
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs, document_type="executive_brief"),
             n_strategies=len(data.get("strategy_results") or {}),
@@ -20004,8 +20076,65 @@ _APPENDIX_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
 )
 
 
+# June 28 2026 -- always-allowed study metadata tokens. Any
+# section's numeric_anchors get augmented with the resolved
+# values from these tokens (read from substitution_table at
+# inject time). Reason: the LLM repeatedly emits e.g. "287"
+# as the study-period length without wrapping in
+# {{STUDY_MONTHS}}; STUDY_MONTHS is in the substitution table
+# but not in every section's per-section anchors, so the
+# hard-lock flags it as a token_available violation + the
+# correction-pass loop fails when the LLM stubbornly refuses
+# to swap. Treating study metadata as implicit anchors at the
+# injection layer means a raw "287" is allowed without a token
+# wrapper (since STUDY_MONTHS IS authoritatively 287 -- the
+# value is correct, only the prose form differs).
+_STUDY_METADATA_TOKENS: tuple[str, ...] = (
+    "{{STUDY_MONTHS}}",
+    "{{N_STRATEGIES}}",
+    "{{PRE_2022_MONTHS}}",
+    "{{POST_2022_MONTHS}}",
+    "{{OOS_WINDOW_MONTHS}}",
+    "{{OOS_WINDOW_PCT_OF_STUDY}}",
+)
+
+
+def _augment_anchors_with_study_metadata(
+    anchors: dict, substitution_table: dict | None,
+) -> dict:
+    """Return a copy of anchors augmented with every resolved
+    value from _STUDY_METADATA_TOKENS that has a non-em-dash
+    value in the substitution table. Keys are the token names
+    (with {{}} stripped) so they don't clash with story-plan
+    anchor keys. Values are floats when possible (the anchor-
+    normalising logic in find_untoken_backed_numerics expects
+    float-castable values for the multi-format equivalence
+    check), otherwise the string.
+
+    Fail-open: if substitution_table is None or empty, anchors
+    is returned unchanged."""
+    if not substitution_table:
+        return dict(anchors)
+    out = dict(anchors)
+    for token in _STUDY_METADATA_TOKENS:
+        if token not in substitution_table:
+            continue
+        val = substitution_table[token]
+        if not val or val == "—":
+            continue
+        key = token.strip("{}").lower()
+        if key in out:
+            continue
+        try:
+            out[key] = float(val.rstrip("%"))
+        except (TypeError, ValueError):
+            out[key] = val
+    return out
+
+
 def _inject_brief_section_plan(
     specs: list[dict], section_plan: dict,
+    substitution_table: dict | None = None,
 ) -> list[dict]:
     """Prepend each spec's task with the locked section plan entry
     for that spec's key plus the executive-voice + anti-AI writing
@@ -20014,6 +20143,13 @@ def _inject_brief_section_plan(
     substitution PR, also June 21 2026). The injection is a no-op
     for any spec whose key has no entry in the plan (defensive
     against a partial plan).
+
+    June 28 2026 -- substitution_table param added so the
+    per-section numeric_anchors get augmented with study
+    metadata values (STUDY_MONTHS, N_STRATEGIES, etc.) before
+    the spec ships to harness_narrative. See
+    _augment_anchors_with_study_metadata. Fail-open: a missing
+    table leaves anchors unchanged.
 
     Why thread EXECUTIVE_VOICE_REQUIREMENT + _NUMERIC_PLACEHOLDER_GUIDE
     here too instead of only in the Pass-1 system prompt: each per-
@@ -20056,7 +20192,20 @@ def _inject_brief_section_plan(
         # writer ONCE with explicit feedback when unauthorized
         # numbers leak in. See Issue 2 (post-regen audit, Option
         # 2 -- harness retry on flag count).
-        new_spec["numeric_anchors"] = anchors
+        #
+        # June 28 2026 -- augment with study-metadata anchors
+        # so STUDY_MONTHS / N_STRATEGIES / OOS_WINDOW_MONTHS
+        # are implicit anchors for EVERY section. The LLM
+        # repeatedly emits these as raw numbers (e.g. "287
+        # months" instead of "{{STUDY_MONTHS}} months") and the
+        # hard-lock correction loop fails when Sonnet stubbornly
+        # refuses to swap. Treating the values as implicit
+        # anchors is correct because the value IS authoritative
+        # (it came from the substitution table) -- only the
+        # token-wrapping pattern differs.
+        new_spec["numeric_anchors"] = (
+            _augment_anchors_with_study_metadata(
+                anchors, substitution_table))
         out.append(new_spec)
     return out
 

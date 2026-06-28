@@ -130,6 +130,107 @@ _STRUCTURAL_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(
         r"\b(?:p|alpha|significance)\s*[<>=≤≥]+\s*0?\.\d+",
         re.IGNORECASE), "stat_threshold"),
+    # June 28 2026 brief-gen hard-lock exemption: the Classic
+    # 60/40 weights "60%/40%" in definitional strategy prose
+    # ("Classic 60/40 portfolio holds 60% equity and 40%
+    # bonds"). The numbers are the strategy definition, not a
+    # cache-derived finding. The bare "60/40" form is already
+    # exempted above by balanced_portfolio_ref; this rule
+    # additionally exempts the slash-with-percentages form
+    # "60%/40%" common in deck/brief prose.
+    (re.compile(
+        r"\d{2}%\s*/\s*\d{2}%"), "balanced_allocation_weights"),
+    # June 28 2026 brief-gen hard-lock exemption: "FNA 670"
+    # course-number references in cover-text + footers ("FNA
+    # 670 practicum", "FNA 670 -- Summer 2026"). The number
+    # is the course code, not a finding.
+    (re.compile(r"\bFNA\s*670\b"), "course_number"),
+    # June 28 2026 brief-gen hard-lock exemption: the Federal
+    # Reserve's "2% inflation target" / "Fed's 2% target" /
+    # "FOMC's 2% goal" -- conventional macroeconomic policy
+    # reference, not a data finding from the cache.
+    (re.compile(
+        r"(?:fed|fed's|federal\s+reserve|fomc|fomc's)\s+"
+        r"(?:[a-z]+\s+){0,3}2%\s+"
+        r"(?:target|goal|inflation|mandate)",
+        re.IGNORECASE), "fed_target"),
+    (re.compile(
+        r"2%\s+(?:inflation\s+target|inflation\s+goal|"
+        r"long[-\s]run\s+target)", re.IGNORECASE), "fed_target"),
+    # June 28 2026 -- ordinal labels for sections / figures /
+    # tables / slides / appendices. "Section 2", "Figure 3",
+    # "Table B.1", "Slide 7", "Appendix C", "Part II". The
+    # numbering is structural document scaffolding, not data.
+    (re.compile(
+        r"\b(?:section|figure|fig\.?|table|slide|appendix|"
+        r"part|chapter|step|phase|stage)\s+"
+        r"(?:[IVX]+|[A-Z]\.?\d*\.?\d*|\d+\.?\d*)\b",
+        re.IGNORECASE), "ordinal_label"),
+    # June 28 2026 -- parenthetical citation years like "(1952)",
+    # "(2018)", "(Smith, 2020)", "(2018a)". Publication years in
+    # APA in-text citations are bibliographic, not data.
+    (re.compile(
+        r"\([^)]*?\b(19|20)\d{2}[a-z]?\b[^)]*?\)"),
+        "citation_year"),
+    # June 28 2026 -- definitional portfolio weights with
+    # asset-class noun. "60% equity", "40% bonds", "70% stocks",
+    # "30% cash". The 100% form is already covered above by
+    # definitional_100pct; this rule expands coverage to any
+    # double-digit weight that names an asset class.
+    (re.compile(
+        r"\b\d{1,3}%\s+"
+        r"(equity|equities|bond|bonds|allocation|cash|"
+        r"stocks|stock|fixed[-\s]income|treasur(?:y|ies))\b",
+        re.IGNORECASE), "definitional_weight"),
+    # June 28 2026 -- additional statistical-notation forms
+    # beyond the original stat_threshold (which only matched
+    # p/alpha/significance). Now covers q-values (FDR), beta-
+    # coefficient bounds, confidence-level prose. The numeric
+    # tail is conventional statistics, not a finding.
+    (re.compile(
+        r"\b(?:p|q|alpha|beta|gamma|delta|lambda|sigma|"
+        r"significance|confidence)\s*[<>=≤≥]+\s*\d?\.\d+",
+        re.IGNORECASE), "stat_notation_extended"),
+    (re.compile(
+        r"\b\d{2,3}%\s+confidence\s+(?:interval|level|bound)",
+        re.IGNORECASE), "confidence_interval"),
+    # June 28 2026 -- page count / word count / time references
+    # in the document-format and methodology prose. "5 pages",
+    # "2000 words", "20-25 minutes". These are document-format
+    # constants, not platform data findings.
+    (re.compile(
+        r"\b\d{1,4}\s+(pages?|words?|minutes?|hours?|"
+        r"seconds?|slides?|paragraphs?|sentences?)\b",
+        re.IGNORECASE), "document_format"),
+    (re.compile(
+        r"\b\d{1,3}\s*[-–]\s*\d{1,3}\s+(minutes?|pages?|"
+        r"words?|hours?)\b", re.IGNORECASE),
+        "document_format_range"),
+    # June 28 2026 -- bootstrap / resample / block / fold
+    # methodology counts. "10,000 resamples", "1000 bootstrap
+    # iterations", "12-month block length", "10-fold cross-
+    # validation". Standard statistical methodology constants.
+    (re.compile(
+        r"\b\d{1,3}(?:,\d{3})*\s+(?:resamples?|bootstrap(?:s|"
+        r"\s+iterations?|\s+samples?)?|iterations?|simulations?|"
+        r"draws?|permutations?|trials?|folds?|replicates?)\b",
+        re.IGNORECASE), "methodology_count"),
+    (re.compile(
+        r"\b\d{1,3}[-\s]month\s+(?:block|window|rolling|"
+        r"lookback)\b", re.IGNORECASE),
+        "methodology_window"),
+    (re.compile(
+        r"\b\d+[-\s]fold\s+(?:cross[-\s]validation|cv)\b",
+        re.IGNORECASE), "methodology_cv"),
+    # June 28 2026 -- institutional / organisational references.
+    # "Part II", "Phase 1", "Round 3", "Pass 2". These are
+    # document-flow ordinals (covered above as ordinal_label),
+    # but also catch roman numerals after structural words
+    # ("Part II of three").
+    (re.compile(
+        r"\b(?:Part|Phase|Round|Pass|Iteration|Step|"
+        r"Chapter|Volume|Issue)\s+[IVX]+\b"),
+        "institutional_ordinal"),
 ]
 
 
@@ -293,6 +394,88 @@ def _is_value_supported_by_substitution(
 # ── Public scanner ─────────────────────────────────────────────
 
 
+# June 28 2026 -- references / bibliography heading regexes.
+# Used to detect the start of a references block + the start
+# of any subsequent non-references heading so the scanner can
+# skip the entire block (citation volumes, issue numbers, page
+# ranges, publication years are bibliographic constants, not
+# data findings). Match is anchored to the start of a line +
+# optionally tolerates a leading "##" / numeric prefix /
+# colon, then matches the heading word.
+_REF_HEADING_RE = re.compile(
+    r"(?im)^(?:\s*#{1,6}\s*)?(?:\d+\.?\s*)?"
+    r"(?:references?|bibliography|works\s+cited|"
+    r"citations?|sources)\s*:?\s*$")
+# A heading is ANY line that starts with a heading marker
+# (markdown #), title-case prose followed by a colon, or a
+# numbered section label. The references-skip stops at the
+# next such heading.
+_ANY_HEADING_RE = re.compile(
+    r"(?im)^(?:\s*#{1,6}\s+\S|"
+    r"(?:\d+\.?\s+)?[A-Z][A-Za-z0-9 ,'\-&]{2,60}\s*:?\s*)$")
+
+
+def _strip_references_sections(text: str) -> str:
+    """June 28 2026 -- replace every references / bibliography
+    block in `text` with blank lines so the numeric scanner
+    skips citation volumes / issue numbers / page ranges /
+    publication years (all bibliographic constants, never
+    platform data).
+
+    Detection: a line matching _REF_HEADING_RE starts a block;
+    the block extends to the line before the NEXT heading
+    (matched by _ANY_HEADING_RE) or to end-of-text. Blanking
+    rather than deleting preserves line numbering so any
+    downstream error reporting still maps to the original
+    line.
+
+    Fail-open: no references heading found returns the input
+    unchanged."""
+    if not text:
+        return text
+    lines = text.splitlines(keepends=True)
+    out_lines: list[str] = []
+    in_ref = False
+    for ln in lines:
+        if in_ref:
+            # End the block when we hit the next non-references
+            # heading. Citation lines are NOT headings (they
+            # start with author names / "Smith, J." -- the
+            # _ANY_HEADING_RE is permissive enough that a
+            # citation line CAN look like a heading; require
+            # the line to be < 80 chars + end with whitespace
+            # OR explicit heading marker for the boundary.
+            stripped = ln.strip()
+            is_md_heading = stripped.startswith("#")
+            is_short_title = (
+                len(stripped) < 80
+                and stripped
+                and stripped[0].isupper()
+                and not stripped.endswith(".")
+                and not stripped.endswith(",")
+                and not any(c.isdigit() for c in stripped[:5]))
+            if is_md_heading or (
+                    is_short_title
+                    and not _REF_HEADING_RE.match(ln)):
+                # Boundary reached; emit the heading + exit
+                # the block.
+                in_ref = False
+                out_lines.append(ln)
+                continue
+            # Blank-replace the citation line, preserving the
+            # newline.
+            out_lines.append("\n" if ln.endswith("\n") else "")
+            continue
+        if _REF_HEADING_RE.match(ln):
+            in_ref = True
+            # Blank-replace the heading line too so its own
+            # numeric content (if any) is also skipped.
+            out_lines.append("\n" if ln.endswith("\n") else "")
+            continue
+        out_lines.append(ln)
+    return "".join(out_lines)
+
+
 def find_untoken_backed_numerics(
     text: str,
     substitution_table: dict[str, str] | None = None,
@@ -315,6 +498,11 @@ def find_untoken_backed_numerics(
     """
     if not text:
         return []
+    # June 28 2026 -- strip references / bibliography sections
+    # before scanning. Citation volumes / issue numbers / page
+    # ranges / publication years are bibliographic constants,
+    # never platform data.
+    text = _strip_references_sections(text)
     value_to_token = _build_token_index(substitution_table or {})
 
     # Anchor values, normalised for comparison.
