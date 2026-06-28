@@ -89,6 +89,70 @@ class TestFindUntokenBackedNumerics:
         assert viols == []
 
 
+# ── Structural-prose exemptions (June 28 2026) ────────────────
+
+
+class TestStructuralProseExemptions:
+
+    def test_sp_500_index_name_not_flagged(self):
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        text = ("The S&P 500 benchmark returned over the "
+                "study period.")
+        viols = find_untoken_backed_numerics(text, {})
+        assert viols == []
+
+    def test_definitional_100pct_equity_not_flagged(self):
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        text = ("The benchmark holds 100% equity throughout "
+                "the period.")
+        viols = find_untoken_backed_numerics(text, {})
+        assert viols == []
+
+    def test_60_40_strategy_reference_not_flagged(self):
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        text = "The 60/40 portfolio is the academic baseline."
+        viols = find_untoken_backed_numerics(text, {})
+        assert viols == []
+
+    def test_statistical_threshold_not_flagged(self):
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        for line in [
+            "The result is significant at p < 0.005.",
+            "p = 0.001 across all strategies.",
+            "alpha = 0.05 for the FDR correction.",
+            "Below the p <= 0.10 threshold.",
+        ]:
+            viols = find_untoken_backed_numerics(line, {})
+            assert viols == [], f"flagged: {line!r}"
+
+    def test_substitution_table_value_NEVER_exempted(self):
+        """Operator constraint: 'Do not exempt any value that
+        appears in the substitution table.' Even if the value
+        coincidentally appears inside a structural pattern, if
+        a token would produce it the LLM must swap, not skip."""
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        # 0.005 inside a structural p-value pattern AND in the
+        # substitution table -- must still flag as
+        # token_available so the LLM swaps the literal.
+        text = "The result is significant at p < 0.005."
+        viols = find_untoken_backed_numerics(
+            text,
+            substitution_table={"{{P_VALUE_THRESHOLD}}": "0.005"})
+        assert len(viols) == 1
+        assert viols[0].severity == "token_available"
+        assert viols[0].suggested_token == "{{P_VALUE_THRESHOLD}}"
+
+
 class TestBuildCorrectionPrompt:
 
     def test_swap_lines_present_when_token_available(self):
@@ -176,3 +240,25 @@ class TestHarnessLoopWired:
         # Look for the protected-set declaration body.
         assert '"executive_brief"' in src
         assert '"analytical_appendix"' in src
+
+    def test_hard_lock_scans_raw_text_not_substituted(self):
+        """REGRESSION pin -- the hard-lock MUST scan the raw
+        pre-substitution text (looked up via the
+        _raw_per_substituted stash) rather than the substituted
+        final_text. Otherwise legitimate substituted values
+        (e.g. '+0.57' from {{POST_2022_EQ_IG_CORR}}) flag as
+        untoken-backed numerics and the lock recommends
+        swapping for the very token that already produced them
+        -- an infinite loop until the 3-pass cap raises."""
+        import inspect
+        from tools.academic_export import harness_narrative
+        src = inspect.getsource(harness_narrative)
+        # The hard-lock loop must reference the raw stash AND
+        # pass raw_for_scan (not final_text) to the scanner.
+        assert "_raw_per_substituted.get(" in src
+        assert "raw_for_scan = _raw_per_substituted.get(" in src
+        assert "raw_for_scan," in src
+        # Inverse pin -- the scanner call must NOT pass
+        # final_text directly (legacy buggy form).
+        # The scanner call after raw_for_scan setup uses
+        # raw_for_scan, not final_text.
