@@ -143,25 +143,154 @@ class TestBare0005StatThresholdExemption:
         viols = find_untoken_backed_numerics(text, {})
         assert viols == []
 
-    def test_sub_table_priority_preserved_over_bare_exempt(
+    def test_sub_table_priority_preserved_for_non_overridden_values(
             self):
-        """When {{BH_SIGNIFICANCE_THRESHOLD}} IS in the table,
-        bare 0.005 must still flag as token_available so the
-        LLM gets the swap suggestion (sub-table-priority
-        constraint)."""
+        """June 28 2026 -- 0.005 is now in
+        _ALWAYS_EXEMPT_BARE_VALUES (Issue A override). For
+        every value NOT in the override set the sub-table-
+        priority constraint still holds: a value in the table
+        flags as token_available so the LLM gets the swap
+        suggestion. Test uses a non-overridden value (0.86)."""
         from tools.untoken_numeric_check import (
             find_untoken_backed_numerics,
         )
-        text = "The 0.005 threshold is the standard."
+        text = "The 0.86 figure is the headline Sharpe."
+        viols = find_untoken_backed_numerics(
+            text,
+            substitution_table={
+                "{{OOS_SHARPE_BLEND}}": "0.86"})
+        assert len(viols) >= 1
+        assert any(
+            v.suggested_token == "{{OOS_SHARPE_BLEND}}"
+            for v in viols)
+
+
+# ── Issue A: always-exempt bare 0.005 ─────────────────────
+
+
+class TestAlwaysExemptBare0005Override:
+    """0.005 IS in the substitution table as
+    {{BH_SIGNIFICANCE_THRESHOLD}}. The first occurrence in any
+    section gets substituted correctly. Correction-pass retries
+    regenerate fresh prose with bare 0.005 (paraphrased without
+    the operator) and Sonnet stubbornly refuses to swap. The
+    override fires BEFORE the sub-table-priority gate so the
+    bare form is allowed through this specific failure mode.
+    """
+
+    def test_set_exists_and_includes_0005(self):
+        from tools.untoken_numeric_check import (
+            _ALWAYS_EXEMPT_BARE_VALUES,
+        )
+        assert "0.005" in _ALWAYS_EXEMPT_BARE_VALUES
+
+    def test_bare_0005_passes_when_in_sub_table(self):
+        """The load-bearing semantic: bare 0.005 with
+        {{BH_SIGNIFICANCE_THRESHOLD}} in the table must NOT
+        flag (operator-blessed override of sub-table-priority
+        for this specific value)."""
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        text = "Sonnet rewrote: 'the 0.005 threshold for BH-FDR.'"
         viols = find_untoken_backed_numerics(
             text,
             substitution_table={
                 "{{BH_SIGNIFICANCE_THRESHOLD}}": "0.005"})
-        # Sub-table priority -- 0.005 flags as available.
-        assert len(viols) >= 1
+        assert all(
+            v.raw_value != "0.005" for v in viols), (
+            f"0.005 leaked despite always-exempt override: "
+            f"{[v.raw_value for v in viols]}")
+
+    def test_other_values_still_respect_sub_table_priority(
+            self):
+        """Sub-table-priority preserved for every value NOT in
+        _ALWAYS_EXEMPT_BARE_VALUES -- the override is targeted,
+        not a general gate weakening."""
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+        )
+        text = "The Sharpe is 0.86 over the period."
+        viols = find_untoken_backed_numerics(
+            text,
+            substitution_table={
+                "{{OOS_SHARPE_BLEND}}": "0.86"})
+        # 0.86 NOT in the override set -- still flags as
+        # token_available.
         assert any(
-            v.suggested_token == "{{BH_SIGNIFICANCE_THRESHOLD}}"
+            v.raw_value == "0.86"
+            and v.severity == "token_available"
             for v in viols)
+
+
+# ── Issue B: brief_key_findings correlation token guidance ─
+
+
+class TestBriefKeyFindingsCorrelationTokenGuidance:
+
+    def test_prompt_directs_to_use_correlation_tokens(self):
+        import main as _main
+        with open(
+                _main.__file__, encoding="utf-8") as f:
+            src = f.read()
+        kf_idx = src.find('"brief_key_findings"')
+        assert kf_idx > -1
+        slice_ = src[kf_idx:kf_idx + 6000]
+        # Required tokens for the correlation regime
+        # description.
+        assert "{{PRE_2022_EQ_IG_CORR}}" in slice_
+        assert "{{POST_2022_EQ_IG_CORR}}" in slice_
+        # And an explicit guard against the bare +0.5 form.
+        assert "+0.5" in slice_, (
+            "prompt should explicitly call out the +0.5 "
+            "approximation as forbidden")
+        # CORRELATION REGIME framing.
+        assert "CORRELATION REGIME" in slice_
+
+
+# ── Soft-fail on hard-lock cap (NEW) ──────────────────────
+
+
+class TestHardLockSoftFail:
+    """Operator-directed change for the June 30 deadline:
+    [DATA PENDING] in any section is a hard submission blocker;
+    a flagged numeric is recoverable via human review of the
+    audit_warnings banner. The hard-lock 3-pass cap now soft-
+    fails -- logs a warning + persists the best-attempt
+    narrative instead of raising UntokenNumericLockError.
+    """
+
+    def test_harness_does_not_raise_on_lock_cap(self):
+        """Source-pin: the hard-lock cap branch must NOT call
+        the UntokenNumericLockError constructor. The class
+        name may still appear in comments / imports describing
+        the prior behaviour; the load-bearing semantic is the
+        absence of the constructor call."""
+        import inspect
+        from tools.academic_export import harness_narrative
+        src = inspect.getsource(harness_narrative)
+        # The constructor call form is
+        # `raise UntokenNumericLockError(` -- distinguishes
+        # the actual raise statement from textual mentions in
+        # docstrings / inline comments.
+        assert (
+            "raise UntokenNumericLockError("
+            not in src), (
+            "soft-fail violated: the cap branch raises "
+            "UntokenNumericLockError instead of breaking "
+            "out with best-attempt prose")
+
+    def test_soft_fail_log_event_present(self):
+        """Source-pin: the cap branch logs untoken_lock_soft_fail
+        with the remaining-violations count + sample offenders
+        so the operator can grep Render logs for affected
+        sections."""
+        import inspect
+        from tools.academic_export import harness_narrative
+        src = inspect.getsource(harness_narrative)
+        assert "untoken_lock_soft_fail" in src
+        assert "remaining_violations" in src
+        assert "sample_offenders" in src
 
 
 # ── Issue 6: brief_final_recommendations token guidance ────

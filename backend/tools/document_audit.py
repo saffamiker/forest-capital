@@ -964,6 +964,64 @@ def check_unresolved_placeholders(
     return flags
 
 
+def check_unverified_tags(
+    content_text: str,
+) -> list[dict[str, Any]]:
+    """June 28 2026 -- detect <unverified>...</unverified> tags
+    inserted by the hard-lock soft-fail path in
+    tools/academic_export.harness_narrative.
+
+    Each tag wraps a raw numeric that survived all 3 correction
+    passes -- the Sonnet writer couldn't be driven to swap it
+    for the corresponding {{TOKEN}} OR to rephrase the prose to
+    remove it. Operator's June 28 directive: persist the best-
+    attempt narrative with the offenders tagged inline + surface
+    each tag as an audit flag so Bob + Molly review before
+    submission.
+
+    Each tag fires one flag. Empty output is the green state.
+
+    Severity: 'high' -- raw numerics in a submission document
+    require human sign-off before the brief leaves the platform.
+    """
+    if not content_text:
+        return []
+    import re as _re
+    flags: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    pattern = _re.compile(
+        r"<unverified>(.*?)</unverified>", _re.DOTALL)
+    for m in pattern.finditer(content_text):
+        raw_value = m.group(1).strip()
+        if not raw_value or raw_value in seen:
+            continue
+        seen.add(raw_value)
+        # Snippet of surrounding context (60 chars each side).
+        start = max(0, m.start() - 60)
+        end = min(len(content_text), m.end() + 60)
+        snippet = content_text[start:end].replace("\n", " ")
+        flags.append({
+            "type":      "unverified_numeric",
+            "value":     raw_value,
+            "severity":  "high",
+            "snippet":   snippet,
+            "message": (
+                f"Unverified raw numeric '{raw_value}' wrapped by "
+                "the hard-lock soft-fail path -- the Sonnet writer "
+                "could not be driven to swap this value for a "
+                "{{TOKEN}} placeholder or to rephrase the sentence "
+                "to remove it after 3 correction passes. Bob / "
+                "Molly: review the surrounding prose, replace the "
+                "<unverified>...</unverified> wrapper with either "
+                "(a) the correct {{TOKEN}} from the data reference "
+                "sheet, or (b) a rephrased sentence that does not "
+                "claim a specific numeric value. The brief MUST NOT "
+                "be submitted while any <unverified> tag remains in "
+                "the document body."),
+        })
+    return flags
+
+
 # ── CHECK 9 — Raw numeric in body (substitution architecture) ──────────
 #
 # A complementary signal to check_unresolved_placeholders: the
@@ -1749,6 +1807,27 @@ def audit_document(
             result.skipped["unresolved_placeholders"] = str(exc)
     else:
         result.skipped["unresolved_placeholders"] = (
+            "not_a_substitution_document")
+
+    # Check 8b -- <unverified>...</unverified> tags
+    # (June 28 2026). Inserted by the hard-lock soft-fail path
+    # in tools/academic_export.harness_narrative when the
+    # 3-pass correction loop can't drive Sonnet to swap a
+    # surviving raw numeric. Each tag is a human-review hook
+    # for Bob + Molly to either swap to a {{TOKEN}} or accept
+    # as-is before submission. Routed for the substitution
+    # documents (same gate as Check 8).
+    if is_substitution_doc:
+        try:
+            result.flags_by_check["unverified_tags"] = (
+                check_unverified_tags(text or ""))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "document_audit_check8b_failed",
+                error=str(exc))
+            result.skipped["unverified_tags"] = str(exc)
+    else:
+        result.skipped["unverified_tags"] = (
             "not_a_substitution_document")
 
     # Check 9 -- raw numeric in body (substitution bypass signal).
