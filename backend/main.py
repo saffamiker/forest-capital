@@ -134,6 +134,58 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("cost_tracking_baseline_failed", error=str(exc))
+
+        # June 28 2026 -- platform-config startup seed for the
+        # DEFER_SUBSTITUTION_TO_EXPORT flag.
+        #
+        # Operator-confirmed root cause of Phase 2 deferral
+        # silently no-op-ing on drafts 74 / 77 (despite PRs
+        # #470 / #471 / #473 / #474): the platform_config row
+        # keys 'defer_substitution_to_export' kept disappearing
+        # on Render restarts. Without the row,
+        # platform_flags._read_flag returns its default of
+        # False, the deferral swap never fires, content_json
+        # gets resolved values, and the upgrade pass finds
+        # nothing to convert to token_value nodes.
+        #
+        # ON CONFLICT DO NOTHING means: if the row already
+        # exists (anyone has set it to true OR false via
+        # admin), respect that value -- never overwrite. The
+        # seed only inserts when the row is MISSING. Idempotent
+        # across restarts.
+        #
+        # Fail-open: a DB write failure logs + boot continues;
+        # the flag defaults to OFF in that case (legacy
+        # behaviour preserved).
+        try:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            async with AsyncSessionLocal() as ses:  # type: ignore[union-attr]
+                # CAST as JSONB so the column type matches.
+                res = await ses.execute(text(
+                    "INSERT INTO platform_config (key, value) "
+                    "VALUES (:k, CAST(:v AS JSONB)) "
+                    "ON CONFLICT (key) DO NOTHING"),
+                    {
+                        "k": "defer_substitution_to_export",
+                        "v": '{"enabled": true}',
+                    })
+                await ses.commit()
+                # rowcount > 0 -> we just inserted; == 0 ->
+                # row already existed (the ON CONFLICT path).
+                inserted = (res.rowcount or 0) > 0
+            log.info(
+                "platform_config_defer_substitution_seed",
+                inserted=inserted,
+                key="defer_substitution_to_export",
+                seeded_value=(
+                    '{"enabled": true}' if inserted else (
+                        "<existing row preserved>")))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "platform_config_defer_substitution_seed_failed",
+                error=str(exc))
+
         try:
             from tools.academic_context import refresh_academic_context
             await refresh_academic_context()
