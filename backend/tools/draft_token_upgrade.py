@@ -84,97 +84,93 @@ except ImportError:
     log = logging.getLogger(__name__)  # type: ignore[assignment]
 
 
-# ── Numeric-value matcher ────────────────────────────────────────
+# ── Token-placeholder matcher (June 28 2026 fix) ────────────────
+#
+# CRITICAL FIX: the original PR-DM-Lite matcher walked text nodes
+# looking for occurrences of the resolved-value strings from
+# value_manifest (reverse-lookup). That produced systemic false
+# positives -- any prose number "2" / "10" / "15" / "20" that
+# happened to match a manifest value (PLAY_BY_PLAY_VALUE_ADD,
+# N_STRATEGIES, etc) got wrongly tagged. Reference citation years,
+# ticker symbols, section numbers, sensitivity-bp figures all
+# got over-matched.
+#
+# Per operator directive (June 28): matching is now EXCLUSIVELY on
+# {{TOKEN_NAME}} placeholders that survive in the text node. Only
+# unsubstituted token strings can produce a token_value node. The
+# reverse lookup is never used.
+#
+# ARCHITECTURAL CONSEQUENCE: if generation-time substitution baked
+# every {{TOKEN}} into a resolved value before writing content_json,
+# the upgrade pass will produce 0 token_value nodes (there are no
+# token placeholders left to find). The dual-mode upgrade only
+# fires where {{TOKEN}} placeholders survive to content_json --
+# e.g. figure captions or tables where the substitution layer
+# defers to export-time _apply_substitutions. Operator path to
+# verify after deploy: re-run upgrade-all-drafts; nodes_upgraded
+# in the response shows how many places had unsubstituted tokens
+# in content_json.
 
-
-def _build_value_pattern(values: list[str]) -> re.Pattern:
-    """Compile a single regex that matches any of the resolved
-    value strings as a word-boundary match. Sorting by length
-    descending ensures longer values (e.g. "+98.0%") match
-    before shorter prefixes ("+98") that might be substrings.
-
-    Word boundary semantics:
-      - Numeric values like "0.86" / "-29.7%" / "287" must NOT
-        match inside larger numeric strings ("10.86", "0.860",
-        "2870").
-      - We can't use \\b directly because "." and "%" aren't word
-        characters -- "0.86\\b" would match "0.86" at the start
-        but the "0" is a word char, so "10.86" would NOT match
-        only the "0.86" portion (good), but "0.860" would
-        successfully match at position 0 (BAD -- "0.86" matches
-        the first 4 chars of "0.860").
-      - Use a negative lookahead + lookbehind for digits / dots:
-        (?<![\\d.])value(?![\\d.])
-    """
-    parts: list[str] = []
-    for v in sorted(values, key=len, reverse=True):
-        if not v:
-            continue
-        parts.append(re.escape(v))
-    if not parts:
-        # An empty manifest -- match nothing. Pattern never fires.
-        return re.compile(r"$.^")  # impossible
-    body = "|".join(parts)
-    # Lookbehind: reject when the value starts mid-number (e.g.
-    # "0.86" matched inside "10.86" / ".86"). Includes "." so
-    # "X.0.86" doesn't match the inner "0.86".
-    # Lookahead: reject ONLY when the next char is a digit
-    # (e.g. "0.86" inside "0.860"). Sentence-ending dot, comma,
-    # space, etc are fine -- they're punctuation, not number
-    # continuation.
-    return re.compile(
-        r"(?<![\d.])(" + body + r")(?!\d)")
-
-
-# ── Text-node splitting ──────────────────────────────────────────
+# Recognised token pattern: {{UPPERCASE_TOKEN_WITH_UNDERSCORES_AND_DIGITS}}
+_TOKEN_PATTERN = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
 
 
 def _split_text_node(
     text: str,
-    pattern: re.Pattern,
-    value_to_entry: dict[str, dict[str, Any]],
+    valid_tokens: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]] | None:
-    """Walks `text` for any match of `pattern`. Returns a list
-    of TipTap node dicts (text + token_value alternating) when
-    at least one match was found, or None when no matches (so
-    the caller can keep the original node untouched).
+    """Walks `text` for any {{TOKEN_NAME}} placeholder whose
+    name matches an entry in the supplied token-to-manifest
+    map. Returns a list of TipTap node dicts (text + token_value
+    alternating) when at least one match was found, or None when
+    no matches (so the caller can keep the original node
+    untouched).
 
-    Each token_value node carries the manifest entry's token,
-    data_hash, and generated_at as its attrs.resolved /
-    attrs.token / attrs.data_hash / attrs.resolved_at fields."""
-    matches = list(pattern.finditer(text))
+    valid_tokens is a {token_literal: manifest_entry} dict where
+    token_literal is the full '{{TOKEN_NAME}}' string and
+    manifest_entry carries token + value + data_hash +
+    generated_at (the same shape returned by build_value_manifest,
+    but rebuilt by the caller so each token is the lookup key
+    rather than the value).
+
+    Tokens found in text but NOT in valid_tokens are LEFT INTACT
+    as plain text. This is the safety contract: a stray
+    {{UNKNOWN_TOKEN}} in prose never gets wrapped, never gets
+    a fabricated cache hash."""
+    matches = list(_TOKEN_PATTERN.finditer(text))
     if not matches:
+        return None
+    # Filter to matches whose token literal is in valid_tokens.
+    valid_matches = [
+        m for m in matches if m.group(0) in valid_tokens
+    ]
+    if not valid_matches:
         return None
     out: list[dict[str, Any]] = []
     cursor = 0
-    for m in matches:
+    for m in valid_matches:
         start, end = m.span()
         if start > cursor:
             out.append({
                 "type": "text",
                 "text": text[cursor:start],
             })
-        value = m.group(0)
-        entry = value_to_entry.get(value)
-        if entry is None:
-            # Defensive -- the pattern was built from
-            # value_to_entry keys, so this shouldn't happen. If
-            # it does (collision in regex alternation), keep the
-            # original text rather than dropping it.
-            out.append({
-                "type": "text",
-                "text": value,
-            })
-        else:
-            out.append({
-                "type": "token_value",
-                "attrs": {
-                    "token":       entry.get("token", ""),
-                    "resolved":    value,
-                    "data_hash":   entry.get("data_hash", ""),
-                    "resolved_at": entry.get("generated_at", ""),
-                },
-            })
+        token_literal = m.group(0)
+        entry = valid_tokens[token_literal]
+        out.append({
+            "type": "token_value",
+            "attrs": {
+                "token":       token_literal,
+                # The resolved value comes from the manifest
+                # entry (the key in value_manifest was the
+                # resolved string at generation time). Falls
+                # back to empty if the manifest schema is
+                # malformed.
+                "resolved":    str(entry.get("resolved", "")),
+                "data_hash":   entry.get("data_hash", ""),
+                "resolved_at": entry.get("generated_at", ""),
+            },
+        })
         cursor = end
     if cursor < len(text):
         out.append({
@@ -189,15 +185,19 @@ def _split_text_node(
 
 def _walk_and_upgrade(
     node: Any,
-    pattern: re.Pattern,
-    value_to_entry: dict[str, dict[str, Any]],
+    valid_tokens: dict[str, dict[str, Any]],
     stats: dict[str, int],
 ) -> Any:
     """Recursive walk. Returns the (possibly-modified) node.
     Mutations only happen for type='text' leaves whose text
-    matches the pattern -- everything else is preserved
-    verbatim including marks, attrs, and unknown node types
-    (e.g. token_value nodes from a re-run)."""
+    contains one or more {{TOKEN_NAME}} placeholders whose
+    token literal is in valid_tokens -- everything else is
+    preserved verbatim including marks, attrs, and unknown node
+    types (e.g. token_value nodes from a re-run).
+
+    valid_tokens shape: {token_literal: manifest_entry} where
+    token_literal is '{{NAME}}' and entry carries resolved /
+    data_hash / generated_at."""
     if not isinstance(node, dict):
         return node
     ntype = node.get("type")
@@ -210,17 +210,13 @@ def _walk_and_upgrade(
         text = node.get("text") or ""
         if not text:
             return node
-        # Don't apply substitution to text nodes with marks
-        # that wrap whole sentences (italic prose etc) where a
+        # Marks (bold/italic/etc) wrap whole text spans -- a
         # mid-mark token_value would awkwardly split the mark.
-        # In practice the substitution-time values land in
-        # unmarked text nodes (numbers don't have bold/italic
-        # marks typically), so this is rare; preserve marked
-        # text untouched as a safety net.
+        # In practice token placeholders live in unmarked spans;
+        # preserve marked text untouched as a safety net.
         if node.get("marks"):
             return node
-        replaced = _split_text_node(
-            text, pattern, value_to_entry)
+        replaced = _split_text_node(text, valid_tokens)
         if replaced is None:
             return node
         # Split produced 1+ token_value nodes; count them.
@@ -239,7 +235,7 @@ def _walk_and_upgrade(
         new_content: list[Any] = []
         for child in content:
             walked = _walk_and_upgrade(
-                child, pattern, value_to_entry, stats)
+                child, valid_tokens, stats)
             if (isinstance(walked, dict)
                     and "__splice__" in walked):
                 new_content.extend(walked["__splice__"])
@@ -307,18 +303,39 @@ def upgrade_content_json_to_token_values(
         log.info("draft_token_upgrade_skipped_no_manifest")
         return content_json, stats
     stats["manifest_entries"] = len(value_manifest)
-    # Build the value-string -> entry index once.
-    value_to_entry: dict[str, dict[str, Any]] = {}
-    for value_key, entry in value_manifest.items():
-        if isinstance(entry, dict) and isinstance(value_key, str):
-            value_to_entry[value_key] = entry
-    if not value_to_entry:
+    # June 28 2026 -- token-placeholder matcher. Build a
+    # {token_literal: entry} index where token_literal is the
+    # full '{{NAME}}' string. The manifest is keyed by RESOLVED
+    # VALUE; we invert + carry the value as entry["resolved"]
+    # so the token_value node attrs get populated correctly
+    # (token, resolved, data_hash, resolved_at).
+    valid_tokens: dict[str, dict[str, Any]] = {}
+    for resolved_value, entry in value_manifest.items():
+        if not (isinstance(entry, dict)
+                and isinstance(resolved_value, str)):
+            continue
+        token_literal = entry.get("token")
+        if not isinstance(token_literal, str):
+            continue
+        if not (token_literal.startswith("{{")
+                and token_literal.endswith("}}")):
+            continue
+        # Last-write-wins on collision (rare -- two manifest
+        # entries claiming the same token name shouldn't happen
+        # because build_value_manifest writes one entry per
+        # value+token pair). The resolved value the upgrade
+        # writes is the one from the chosen entry.
+        valid_tokens[token_literal] = {
+            "resolved":     resolved_value,
+            "data_hash":    entry.get("data_hash", ""),
+            "generated_at": entry.get("generated_at", ""),
+        }
+    if not valid_tokens:
         log.warning(
-            "draft_token_upgrade_skipped_empty_manifest_index")
+            "draft_token_upgrade_skipped_empty_token_index")
         return content_json, stats
-    pattern = _build_value_pattern(list(value_to_entry.keys()))
     new_content_json = _walk_and_upgrade(
-        content_json, pattern, value_to_entry, stats)
+        content_json, valid_tokens, stats)
     stats["upgraded"] = stats["nodes_upgraded"] > 0
     log.info(
         "draft_token_upgrade_complete",

@@ -2,6 +2,12 @@
 
 Tests the dual-mode token storage upgrade pass + the post-
 upgrade rewriter + the review summary builder.
+
+June 28 2026 (post-hotfix) -- matching is now exclusively on
+{{TOKEN_NAME}} placeholders surviving in text nodes. Reverse-
+lookup on resolved values was removed (it produced systemic
+false positives on short integer manifest values like 2 / 10
+/ 15 / 20 matching unrelated prose numbers).
 """
 from __future__ import annotations
 
@@ -13,72 +19,107 @@ import pytest
 os.environ.setdefault("ENVIRONMENT", "test")
 
 
-# ── Word-boundary pattern ────────────────────────────────────────
+# ── Token-placeholder splitting (replaces value-pattern tests) ──
 
 
-class TestValuePatternBoundaries:
+class TestSplitTextNodeOnTokenPlaceholders:
 
-    def test_does_not_match_substring_inside_longer_number(self):
-        """The classic case: '0.86' must NOT match inside
-        '10.86' or '0.860'. Word-boundary regex uses a negative
-        lookbehind + lookahead for digit-or-dot characters."""
-        from tools.draft_token_upgrade import _build_value_pattern
-        pattern = _build_value_pattern(["0.86"])
-        assert pattern.search("0.86") is not None
-        assert pattern.search("Sharpe 0.86 vs") is not None
-        assert pattern.search("10.86") is None
-        assert pattern.search("0.860") is None
-        assert pattern.search("100.86%") is None
-
-    def test_matches_signed_values(self):
-        from tools.draft_token_upgrade import _build_value_pattern
-        pattern = _build_value_pattern(["-29.7%"])
-        assert pattern.search("drawdown -29.7%") is not None
-
-    def test_matches_integer_values(self):
-        from tools.draft_token_upgrade import _build_value_pattern
-        pattern = _build_value_pattern(["287"])
-        assert pattern.search("287 months") is not None
-        assert pattern.search("2870") is None
-        assert pattern.search("1287") is None
-
-
-# ── Text node splitting ──────────────────────────────────────────
-
-
-class TestSplitTextNode:
-
-    def test_single_match_splits_into_three(self):
-        from tools.draft_token_upgrade import (
-            _build_value_pattern, _split_text_node,
-        )
-        manifest = {
-            "0.86": {"token": "{{X}}", "data_hash": "h",
-                     "generated_at": "t"},
+    def test_single_token_splits_into_three(self):
+        """A text node with one {{TOKEN}} placeholder splits
+        into [text-before, token_value, text-after]."""
+        from tools.draft_token_upgrade import _split_text_node
+        valid_tokens = {
+            "{{OOS_SHARPE_BLEND}}": {
+                "resolved": "0.86",
+                "data_hash": "c421fb89",
+                "generated_at": "2026-06-21T12:00:00Z",
+            },
         }
-        pattern = _build_value_pattern(["0.86"])
         result = _split_text_node(
-            "Sharpe 0.86 vs benchmark", pattern, manifest)
+            "Sharpe {{OOS_SHARPE_BLEND}} vs benchmark",
+            valid_tokens)
         assert result is not None
         assert len(result) == 3
         assert result[0]["type"] == "text"
         assert result[0]["text"] == "Sharpe "
         assert result[1]["type"] == "token_value"
-        assert result[1]["attrs"]["token"] == "{{X}}"
+        assert result[1]["attrs"]["token"] == (
+            "{{OOS_SHARPE_BLEND}}")
         assert result[1]["attrs"]["resolved"] == "0.86"
+        assert result[1]["attrs"]["data_hash"] == "c421fb89"
         assert result[2]["type"] == "text"
         assert result[2]["text"] == " vs benchmark"
 
     def test_no_match_returns_none(self):
-        from tools.draft_token_upgrade import (
-            _build_value_pattern, _split_text_node,
-        )
-        pattern = _build_value_pattern(["0.86"])
+        """A text node with no {{TOKEN}} placeholders returns
+        None so the caller keeps the original node untouched."""
+        from tools.draft_token_upgrade import _split_text_node
         result = _split_text_node(
-            "Sharpe 0.43 vs benchmark", pattern,
-            {"0.86": {"token": "{{X}}", "data_hash": "h",
-                      "generated_at": "t"}})
+            "Sharpe 0.86 vs benchmark",
+            {"{{OOS_SHARPE_BLEND}}": {
+                "resolved": "0.86",
+                "data_hash": "h", "generated_at": "t"}})
         assert result is None
+
+    def test_unknown_token_left_intact(self):
+        """Token literal NOT in valid_tokens is preserved as
+        plain text -- never wrapped, never given a fabricated
+        cache hash. Safety contract."""
+        from tools.draft_token_upgrade import _split_text_node
+        result = _split_text_node(
+            "Has {{UNKNOWN_TOKEN}} and that's it",
+            {"{{OTHER_TOKEN}}": {
+                "resolved": "x", "data_hash": "h",
+                "generated_at": "t"}})
+        assert result is None
+
+    def test_short_resolved_value_in_prose_never_matched(self):
+        """REGRESSION pin -- the buggy version matched any
+        prose '2' against PLAY_BY_PLAY_VALUE_ADD's resolved
+        value '2'. The fixed matcher matches only on
+        {{TOKEN}} placeholders, so prose digits are never
+        touched. This pin defends against any future revert
+        to reverse-lookup matching."""
+        from tools.draft_token_upgrade import _split_text_node
+        valid_tokens = {
+            "{{PLAY_BY_PLAY_VALUE_ADD}}": {
+                "resolved": "2",
+                "data_hash": "h", "generated_at": "t"},
+            "{{N_STRATEGIES}}": {
+                "resolved": "10",
+                "data_hash": "h", "generated_at": "t"},
+        }
+        # Prose with naked digits that previously over-matched:
+        # citation years, sensitivity bps, sentence-leading
+        # numbers, decimal-leading digits.
+        prose_lines = [
+            "Smith (2020) found 10% returns",
+            "At 10bp the Sharpe was 2.5",
+            "Section 2 covers 15 strategies",
+            "Volatility was 2.86 across 20 windows",
+        ]
+        for line in prose_lines:
+            result = _split_text_node(line, valid_tokens)
+            assert result is None, (
+                f"Plain prose line was incorrectly upgraded: "
+                f"{line!r}")
+
+    def test_two_tokens_in_same_text(self):
+        from tools.draft_token_upgrade import _split_text_node
+        valid_tokens = {
+            "{{A}}": {
+                "resolved": "1.0", "data_hash": "h",
+                "generated_at": "t"},
+            "{{B}}": {
+                "resolved": "2.0", "data_hash": "h",
+                "generated_at": "t"},
+        }
+        result = _split_text_node(
+            "Values {{A}} and {{B}} here.", valid_tokens)
+        assert result is not None
+        tv_count = sum(
+            1 for n in result if n["type"] == "token_value")
+        assert tv_count == 2
 
 
 # ── Full upgrade pass on a representative doc ────────────────────
@@ -87,6 +128,10 @@ class TestSplitTextNode:
 class TestUpgradeContentJson:
 
     def test_minimal_brief_upgrade(self):
+        """When content_json carries an unsubstituted {{TOKEN}}
+        placeholder + value_manifest has an entry whose token
+        matches, the placeholder gets wrapped in a token_value
+        node."""
         from tools.draft_token_upgrade import (
             upgrade_content_json_to_token_values,
         )
@@ -95,10 +140,12 @@ class TestUpgradeContentJson:
             "content": [
                 {"type": "paragraph", "content": [
                     {"type": "text",
-                     "text": "The blend Sharpe is 0.86."},
+                     "text": "Sharpe {{OOS_SHARPE_BLEND}}."},
                 ]},
             ],
         }
+        # value_manifest is keyed by VALUE (preserves the
+        # production schema). The upgrade pass inverts it.
         manifest = {
             "0.86": {"token": "{{OOS_SHARPE_BLEND}}",
                      "data_hash": "c421fb89",
@@ -109,12 +156,55 @@ class TestUpgradeContentJson:
                 content_json, manifest))
         assert stats["nodes_upgraded"] == 1
         assert stats["upgraded"] is True
-        # Paragraph now has 3 children: text -> token_value -> text
         para = new_json["content"][0]
         assert len(para["content"]) == 3
         assert para["content"][1]["type"] == "token_value"
         assert para["content"][1]["attrs"]["token"] == (
             "{{OOS_SHARPE_BLEND}}")
+        assert para["content"][1]["attrs"]["resolved"] == "0.86"
+
+    def test_pre_substituted_prose_produces_zero_upgrades(self):
+        """When generation-time substitution baked values into
+        content_json (no {{TOKEN}} placeholders survive), the
+        upgrade pass produces 0 nodes_upgraded -- correct
+        behaviour after the June 28 fix. The buggy version
+        would have over-matched on the resolved value strings."""
+        from tools.draft_token_upgrade import (
+            upgrade_content_json_to_token_values,
+        )
+        content_json = {
+            "type": "doc",
+            "content": [
+                {"type": "paragraph", "content": [
+                    {"type": "text",
+                     "text": "Blend Sharpe is 0.86. "
+                             "Benchmark is 0.43. "
+                             "Across 2 of 9 events."},
+                ]},
+            ],
+        }
+        manifest = {
+            "0.86": {"token": "{{OOS_SHARPE_BLEND}}",
+                     "data_hash": "h",
+                     "generated_at": "t"},
+            "0.43": {"token": "{{OOS_SHARPE_BENCHMARK}}",
+                     "data_hash": "h",
+                     "generated_at": "t"},
+            "2":    {"token": "{{PLAY_BY_PLAY_VALUE_ADD}}",
+                     "data_hash": "h",
+                     "generated_at": "t"},
+            "9":    {"token": "{{PLAY_BY_PLAY_EVENTS}}",
+                     "data_hash": "h",
+                     "generated_at": "t"},
+        }
+        new_json, stats = (
+            upgrade_content_json_to_token_values(
+                content_json, manifest))
+        # No {{TOKEN}} placeholders in the text -- zero upgrades.
+        assert stats["nodes_upgraded"] == 0
+        assert stats["upgraded"] is False
+        # Content is unchanged.
+        assert new_json == content_json
 
     def test_null_manifest_no_op(self):
         from tools.draft_token_upgrade import (
@@ -128,6 +218,9 @@ class TestUpgradeContentJson:
         assert stats["upgraded"] is False
 
     def test_idempotent_re_run(self):
+        """Re-running on an already-upgraded document
+        produces 0 new nodes_upgraded; already_upgraded is
+        populated for the existing token_value nodes."""
         from tools.draft_token_upgrade import (
             upgrade_content_json_to_token_values,
         )
@@ -135,25 +228,51 @@ class TestUpgradeContentJson:
             "type": "doc",
             "content": [
                 {"type": "paragraph", "content": [
-                    {"type": "text", "text": "Value 0.86 here."},
+                    {"type": "text", "text": "Sharpe {{X}} here."},
                 ]},
             ],
         }
         manifest = {
-            "0.86": {"token": "{{X}}", "data_hash": "h",
-                     "generated_at": "t"},
+            "0.86": {"token": "{{X}}",
+                     "data_hash": "h", "generated_at": "t"},
         }
         once, _ = upgrade_content_json_to_token_values(
             content_json, manifest)
         twice, stats_twice = (
             upgrade_content_json_to_token_values(once, manifest))
-        # Second pass finds the token_value node + does not
-        # re-split it. nodes_upgraded == 0 + already_upgraded > 0.
         assert stats_twice["nodes_upgraded"] == 0
         assert stats_twice["already_upgraded"] >= 1
 
+    def test_unknown_token_in_text_left_intact(self):
+        """An {{UNKNOWN}} token literal in text whose manifest
+        entry doesn't exist stays as plain text."""
+        from tools.draft_token_upgrade import (
+            upgrade_content_json_to_token_values,
+        )
+        content_json = {
+            "type": "doc",
+            "content": [{"type": "paragraph", "content": [
+                {"type": "text",
+                 "text": "{{KNOWN}} and {{UNKNOWN}}"},
+            ]}],
+        }
+        manifest = {
+            "0.86": {"token": "{{KNOWN}}",
+                     "data_hash": "h", "generated_at": "t"},
+        }
+        new_json, stats = upgrade_content_json_to_token_values(
+            content_json, manifest)
+        assert stats["nodes_upgraded"] == 1
+        # The {{UNKNOWN}} text is preserved verbatim.
+        para = new_json["content"][0]
+        all_text = "".join(
+            c.get("text") or ""
+            for c in para["content"]
+            if c.get("type") == "text")
+        assert "{{UNKNOWN}}" in all_text
 
-# ── apply_token_updates ──────────────────────────────────────────
+
+# ── apply_token_updates (unchanged contract) ─────────────────────
 
 
 class TestApplyTokenUpdates:
@@ -215,7 +334,6 @@ class TestApplyTokenUpdates:
         }
         _, updates = apply_token_updates(
             content_json, {"{{X}}": "0.91"}, "h")
-        # Overridden node never auto-updates.
         assert len(updates) == 0
 
     def test_selected_tokens_gate(self):
@@ -239,7 +357,7 @@ class TestApplyTokenUpdates:
         assert updates[0]["token"] == "{{A}}"
 
 
-# ── Review summary ───────────────────────────────────────────────
+# ── Review summary (unchanged contract) ──────────────────────────
 
 
 class TestBuildReviewSummary:
@@ -273,6 +391,5 @@ class TestBuildReviewSummary:
         m = {e["token"]: e for e in out}
         assert m["{{MATCH}}"]["match"] is True
         assert m["{{MISMATCH}}"]["match"] is False
-        # Overridden node compares the override value to cache.
         assert m["{{OVERRIDE}}"]["current_value"] == "0.6291"
         assert m["{{OVERRIDE}}"]["overridden"] is True
