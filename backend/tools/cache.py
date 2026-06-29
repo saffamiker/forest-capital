@@ -85,6 +85,18 @@ async def get_strategy_cache(strategy_hash: str) -> dict[str, Any] | None:
     """
     Returns cached strategy results if the hash matches, else None.
     A miss means the pipeline input has changed and recomputation is needed.
+
+    June 29 2026 -- additionally projects the row's
+    `n_observations` column into the returned dict under the
+    `_n_observations` key so freeze-aware time-period token
+    derivation (OOS_WINDOW_MONTHS, OOS_WINDOW_PCT_OF_STUDY,
+    STUDY_END, etc.) can read the dataset size for THIS hash.
+    Without that field, get_substitution_table fell back to
+    a count of `monthly_returns` entries which may differ from
+    the canonical observation count. The underscore prefix
+    distinguishes the metadata field from per-strategy keys
+    (BENCHMARK / CLASSIC_60_40 / etc.) so downstream filters
+    that walk the dict by key never mistake it for a strategy.
     """
     if not _DB_AVAILABLE:
         return None
@@ -93,15 +105,21 @@ async def get_strategy_cache(strategy_hash: str) -> dict[str, Any] | None:
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
             row = await session.execute(
                 text(
-                    "SELECT results_json FROM strategy_results_cache "
+                    "SELECT results_json, n_observations "
+                    "FROM strategy_results_cache "
                     "WHERE strategy_hash = :h LIMIT 1"
                 ),
                 {"h": strategy_hash},
             )
             result = row.fetchone()
             if result:
-                log.info("strategy_cache_hit", strategy_hash=strategy_hash)
-                return dict(result[0])
+                log.info(
+                    "strategy_cache_hit",
+                    strategy_hash=strategy_hash)
+                payload = dict(result[0])
+                if result[1] is not None:
+                    payload["_n_observations"] = int(result[1])
+                return payload
     except Exception as exc:
         log.warning("strategy_cache_read_error", error=str(exc))
     return None

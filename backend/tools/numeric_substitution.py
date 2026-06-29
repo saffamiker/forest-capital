@@ -221,29 +221,41 @@ def _index_by_strategy(rows: list[dict] | None) -> dict[str, dict]:
 def _pre_2022_months(
     study_months: int | None,
     strategy_cache: dict | None,
+    post_2022_months: int | None = None,
 ) -> str:
     """June 28 2026 -- months in the study period BEFORE 2022.
 
-    Computed as study_months - post_2022_window_length where
-    post_2022_window_length is the number of months from Jan
-    2022 through STUDY_END (May 2026 = 53). Falls back to a
-    direct subtraction against the cached n_observations when
-    study_months is None, then to em-dash when neither source
-    resolves.
+    Computed as study_months - post_2022_months where the
+    post-2022 window length is freeze-aware (47 under Dec
+    2025 freeze, 53 under live with May 2026 end). Falls back
+    to the live constant 53 when post_2022_months is None
+    (legacy callers that don't supply the freeze-derived
+    value).
 
-    Used by brief / appendix prose that contrasts the pre- and
-    post-2022 correlation regimes."""
-    POST_2022_MONTHS = 53  # Jan 2022 -> May 2026 inclusive
+    Used by brief / appendix prose that contrasts the pre-
+    and post-2022 correlation regimes.
+
+    June 29 2026 -- post_2022_months parameter added so the
+    helper can use the freeze-aware OOS window length the
+    caller derived from the cache + monthly_returns instead
+    of the hardcoded 53."""
+    POST_2022_MONTHS_DEFAULT = 53  # Jan 2022 -> May 2026
+    p = (post_2022_months
+         if isinstance(post_2022_months, int)
+         and post_2022_months > 0
+         else POST_2022_MONTHS_DEFAULT)
     n = study_months
     if n is None and isinstance(strategy_cache, dict):
         n = strategy_cache.get("n_observations")
+        if n is None:
+            n = strategy_cache.get("_n_observations")
     try:
         n_int = int(n) if n is not None else None
     except (TypeError, ValueError):
         return "—"
-    if n_int is None or n_int <= POST_2022_MONTHS:
+    if n_int is None or n_int <= p:
         return "—"
-    return str(n_int - POST_2022_MONTHS)
+    return str(n_int - p)
 
 
 def _cost_scenario(
@@ -347,6 +359,48 @@ def build_substitution_table(
                 "must be loaded via the hash-aware path "
                 "(get_cached_for_hash + get_regime_snapshot_for_hash) "
                 "for freeze-correct substitution. See PR fix(freeze)."))
+    # June 29 2026 -- freeze-aware time-period derivation. The
+    # strategy_results_cache row anchors the dataset (n_obs +
+    # last_date in monthly_returns); under freeze, this row's
+    # n_obs differs from live by ~6 months. Derive the time-
+    # period kwargs from the cache when callers didn't supply
+    # them so EVERY get_substitution_table call site picks up
+    # the freeze-aware values without per-site updates.
+    try:
+        from tools.academic_export import (
+            compute_freeze_aware_window_metrics,
+        )
+        _derived = compute_freeze_aware_window_metrics(
+            strategy_cache)
+        if _derived is not None:
+            # Only override defaults; respect explicit kwargs
+            # from callers that already passed correct values.
+            if study_months is None:
+                study_months = _derived["study_months"]
+            if study_end == "May 2026":
+                study_end = _derived["study_end"]
+            if oos_window_months == 53:
+                oos_window_months = _derived["oos_window_months"]
+            if oos_window_pct_of_study is None:
+                oos_window_pct_of_study = (
+                    _derived["oos_window_pct_of_study"])
+            if oos_window_definition == (
+                    "January 2022 through May 2026"):
+                oos_window_definition = (
+                    f"January 2022 through "
+                    f"{_derived['study_end']}")
+            log.info(
+                "substitution_table_freeze_aware_window",
+                data_hash=str(data_hash)[:8],
+                study_months=study_months,
+                study_end=study_end,
+                oos_window_months=oos_window_months,
+                oos_window_pct_of_study=(
+                    oos_window_pct_of_study))
+    except Exception as _exc:  # noqa: BLE001
+        log.warning(
+            "substitution_table_freeze_window_derive_failed",
+            error=str(_exc))
     benchmark = _get_strategy(strategy_cache, "BENCHMARK")
     classic = _get_strategy(strategy_cache, "CLASSIC_60_40")
     regime = _get_strategy(strategy_cache, "REGIME_SWITCHING")
@@ -639,7 +693,8 @@ def build_substitution_table(
         # window length (when available); falls back to em-dash
         # when either is null.
         "{{PRE_2022_MONTHS}}": _pre_2022_months(
-            study_months, strategy_cache),
+            study_months, strategy_cache,
+            post_2022_months=oos_window_months),
 
         # June 28 2026 (Fix 4) -- transaction-cost sensitivity
         # tier constants. The Limitations section's cost

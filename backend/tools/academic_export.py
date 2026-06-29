@@ -144,6 +144,112 @@ class StrategyCacheMissingForHashError(RuntimeError):
         self.data_hash = data_hash
 
 
+# June 29 2026 -- freeze-aware time-period anchors. Under
+# submission freeze (Dec 2025), the strategy_results_cache row
+# anchors a 281-month dataset (Jul 2002 -> Dec 2025); under
+# live, it's 287 months (-> May 2026). The brief / appendix
+# token surface previously hardcoded:
+#   OOS_WINDOW_MONTHS         = 53     # Jan 2022 -> May 2026
+#   OOS_WINDOW_PCT_OF_STUDY   = 18.5   # 53 / 287
+#   STUDY_END                 = "May 2026"
+# Under freeze these values are wrong by ~6 months. Correct
+# freeze values:
+#   OOS_WINDOW_MONTHS         = 47     # Jan 2022 -> Dec 2025
+#   OOS_WINDOW_PCT_OF_STUDY   = 16.7   # 47 / 281
+#   STUDY_END                 = "December 2025"
+#
+# The helper below derives all four time-period anchors from
+# the live strategy_results_cache row + threads them to
+# get_substitution_table via the existing kwargs the function
+# already accepts. Returns None when the cache payload is
+# malformed; callers fall through to the hardcoded defaults
+# in build_substitution_table for that case.
+_OOS_WINDOW_START_YEAR  = 2022
+_OOS_WINDOW_START_MONTH = 1     # January 2022 = OOS window open
+
+
+def compute_freeze_aware_window_metrics(
+    strategy_results: dict | None,
+) -> dict | None:
+    """Derive freeze-aware time-period token values from a
+    strategy_results_cache payload.
+
+    Inputs:
+      strategy_results -- the dict returned by
+        get_strategy_cache(hash). Expected to carry per-
+        strategy entries with `monthly_returns` arrays AND a
+        `_n_observations` field projected from the row's
+        n_observations column (added June 29 2026 to
+        cache.get_strategy_cache).
+
+    Returns a dict
+      {study_months, study_end, oos_window_months,
+       oos_window_pct_of_study, post_2022_months,
+       last_year, last_month}
+    OR None when the cache is empty / missing the required
+    fields. Callers thread the dict's values to
+    get_substitution_table as kwargs.
+
+    Date derivation: takes the last entry of any non-metadata
+    strategy's `monthly_returns` array (BENCHMARK /
+    CLASSIC_60_40 / REGIME_SWITCHING all share the same date
+    axis). Each entry shape is [date_iso, value]; date_iso
+    parses as YYYY-MM-DD.
+    """
+    if not isinstance(strategy_results, dict):
+        return None
+    n_obs = strategy_results.get("_n_observations")
+    if not isinstance(n_obs, int) or n_obs <= 0:
+        return None
+    last_iso: str | None = None
+    for key, val in strategy_results.items():
+        if (not isinstance(key, str)
+                or key.startswith("_")
+                or not isinstance(val, dict)):
+            continue
+        mr = val.get("monthly_returns")
+        if isinstance(mr, list) and mr:
+            tail = mr[-1]
+            if isinstance(tail, (list, tuple)) and len(tail) >= 1:
+                cand = tail[0]
+                if isinstance(cand, str) and len(cand) >= 7:
+                    last_iso = cand
+                    break
+    if last_iso is None:
+        return None
+    try:
+        last_year  = int(last_iso[0:4])
+        last_month = int(last_iso[5:7])
+    except (ValueError, TypeError):
+        return None
+    # OOS window length (inclusive): months from
+    # _OOS_WINDOW_START_YEAR-_MONTH to last_year-last_month.
+    oos_months = (
+        (last_year - _OOS_WINDOW_START_YEAR) * 12
+        + (last_month - _OOS_WINDOW_START_MONTH + 1))
+    if oos_months <= 0:
+        return None
+    pct_of_study = round(
+        oos_months / max(n_obs, 1) * 100, 1)
+    _MONTH_NAMES = (
+        "January", "February", "March", "April", "May",
+        "June", "July", "August", "September", "October",
+        "November", "December")
+    study_end = (
+        f"{_MONTH_NAMES[last_month - 1]} {last_year}"
+        if 1 <= last_month <= 12
+        else f"{last_year}")
+    return {
+        "study_months":            n_obs,
+        "study_end":               study_end,
+        "oos_window_months":       oos_months,
+        "oos_window_pct_of_study": pct_of_study,
+        "post_2022_months":        oos_months,
+        "last_year":               last_year,
+        "last_month":              last_month,
+    }
+
+
 async def gather_document_data(
     data_hash: str | None = None,
 ) -> dict[str, Any]:
