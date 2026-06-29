@@ -165,9 +165,23 @@ absence may be expected for some project shapes).
 """
 
 
-def _build_user_message(findings: dict[str, str]) -> str:
-    """Builds the plain-text findings block the reviewer sees. NO
-    platform context — just the headline claims, in order."""
+def _build_user_message(
+    findings: dict[str, str],
+    primary_document: str | None = None,
+) -> str:
+    """Builds the plain-text findings block the reviewer sees.
+
+    June 25 2026 -- primary_document optional kwarg. When supplied,
+    the full document text is appended after the extracted findings
+    so the independent reviewer reads the SAME source the peers do.
+    Previously the reviewer saw only the five extracted findings
+    (~1K tokens of input), which made the 'independent' label
+    misleading -- it was assessing extracted snippets, not the
+    document. With the primary document the reviewer can cite
+    discrepancies between what the document claims and what the
+    findings extractor surfaced, sharpening the second-opinion
+    layer.
+    """
     lines = [
         "Key findings from the primary academic review:",
         "",
@@ -179,6 +193,29 @@ def _build_user_message(findings: dict[str, str]) -> str:
         for body_line in body.split("\n"):
             lines.append(f"    {body_line}")
         lines.append("")
+
+    # Append the primary document content when available. 80K char
+    # cap (~13K tokens / ~20K words) covers every deliverable in the
+    # suite -- the brief is ~3.5K words, the appendix ~6K words, the
+    # script ~3K words. Gemini-2.5-pro context is 2M tokens so the
+    # full doc is well within budget.
+    if primary_document and primary_document.strip():
+        cap = 80_000
+        doc = primary_document.strip()
+        truncated = ""
+        if len(doc) > cap:
+            doc = doc[:cap]
+            truncated = (
+                "\n…[document truncated after 80,000 chars; "
+                "review the visible portion only]")
+        lines.append("")
+        lines.append(
+            "=== PRIMARY DOCUMENT CONTENT (for cross-checking the "
+            "extracted findings above) ===")
+        lines.append("")
+        lines.append(doc + truncated)
+        lines.append("")
+
     lines.append(
         "Assess each finding (in the order given) and return the JSON "
         "object specified in your system prompt."
@@ -486,9 +523,16 @@ def extract_key_findings(
 # ── Run the second-opinion call ──────────────────────────────────────────────
 
 
-def run_independent_review(findings: dict[str, str]) -> dict[str, Any]:
+def run_independent_review(
+    findings: dict[str, str],
+    primary_document: str | None = None,
+) -> dict[str, Any]:
     """Single Gemini call against the findings block. Synchronous —
     the orchestrator wraps in asyncio.to_thread.
+
+    primary_document -- June 25 2026, optional full document text
+    appended to the user message so the reviewer reads the same
+    source the peers did. See _build_user_message docstring.
 
     FAIL-OPEN — every failure path returns a stub Concerns verdict
     with a reasoning string naming the cause, so the SSE stream
@@ -499,7 +543,8 @@ def run_independent_review(findings: dict[str, str]) -> dict[str, Any]:
     if not os.getenv("GOOGLE_API_KEY"):
         return _stub_verdict("GOOGLE_API_KEY is not set")
 
-    user_message = _build_user_message(findings)
+    user_message = _build_user_message(
+        findings, primary_document=primary_document)
     try:
         # max_output_tokens=8192 (May 26 2026). The 5-finding JSON
         # response was truncating after the first per_finding entry

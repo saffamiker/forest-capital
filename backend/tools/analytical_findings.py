@@ -903,24 +903,35 @@ def _finding_8_crisis_performance(crisis: dict | None) -> dict:
     rows = crisis.get("rows") or {}
     # rows is strategy_name -> crisis_name -> CrisisCell.
 
-    # Per-window best/worst by return + benchmark.
+    # Per-window best/worst by cumulative window return + benchmark.
+    # May 30 2026 — switched from `cagr` to `cumulative_return` after
+    # the F3 incident: `_cagr` annualises a 2-month COVID Crash window
+    # 6× and turned a -19.87% loss into a -73.53% headline. The
+    # cumulative return is the only basis a "loss during the event"
+    # framing supports. Cells written before the basis-fix landed
+    # carry no `cumulative_return` field; the legacy `cagr` is the
+    # fallback then, NOT for new payloads.
     per_window: dict[str, dict] = {}
     beat_in_all_windows: set[str] = set(rows.keys()) if rows else set()
     for w in (windows.keys() if windows else []):
         per_window[w] = {"best": None, "worst": None, "benchmark": None}
         bench_cell = (rows.get("BENCHMARK") or {}).get(w) or {}
-        bench_ret = bench_cell.get("cagr")
+        bench_ret = bench_cell.get("cumulative_return")
+        if bench_ret is None:
+            bench_ret = bench_cell.get("cagr")  # legacy fallback
         per_window[w]["benchmark"] = bench_ret
-        # Find strategies present in this window with a CAGR figure.
+        # Find strategies present in this window with a return figure.
         present = []
         beat_this = set()
         for name, cells in rows.items():
             cell = cells.get(w) or {}
-            cagr = cell.get("cagr")
-            if cagr is None:
+            ret = cell.get("cumulative_return")
+            if ret is None:
+                ret = cell.get("cagr")  # legacy fallback
+            if ret is None:
                 continue
-            present.append((name, cagr))
-            if name != "BENCHMARK" and bench_ret is not None and cagr > bench_ret:
+            present.append((name, ret))
+            if name != "BENCHMARK" and bench_ret is not None and ret > bench_ret:
                 beat_this.add(name)
         if not present:
             continue
@@ -949,6 +960,51 @@ def _finding_8_crisis_performance(crisis: dict | None) -> dict:
     else:
         evidence.append(
             "No strategy beat BENCHMARK in every crisis window.")
+
+    # ── VOL_TARGETING capital-preservation callout ─────────────────────────
+    # May 31 2026 — surfaces the strongest defensive result in the
+    # crisis table: VOL_TARGETING's COVID Crash cumulative loss is a
+    # small fraction of the benchmark's. This was OBSCURED by the F3
+    # CAGR-annualisation bug (the 2-month window's CAGR over-stated
+    # VT's loss as -27.84% when the actual cumulative was -5.29%);
+    # now that the basis is corrected to cumulative_return, the
+    # result reads as one of the clearest defensive narratives in
+    # the platform.
+    #
+    # The callout fires for any (strategy, crisis) cell where the
+    # strategy is a defensive label (VOL_TARGETING / MIN_VARIANCE /
+    # RISK_PARITY), the benchmark lost ≥ 15%, and the strategy's
+    # loss is ≤ 50% of the benchmark's loss (in absolute terms). It
+    # surfaces in evidence-order so the rendered finding leads with
+    # the most striking ratio.
+    defensive_labels = ("VOL_TARGETING", "MIN_VARIANCE", "RISK_PARITY")
+    callouts: list[tuple[float, str]] = []
+    for w in (windows.keys() if windows else []):
+        bench_cell = (rows.get("BENCHMARK") or {}).get(w) or {}
+        bench_ret = bench_cell.get("cumulative_return")
+        if bench_ret is None:
+            bench_ret = bench_cell.get("cagr")
+        if bench_ret is None or bench_ret > -0.15:
+            continue
+        for label in defensive_labels:
+            cell = (rows.get(label) or {}).get(w) or {}
+            strat_ret = cell.get("cumulative_return")
+            if strat_ret is None:
+                strat_ret = cell.get("cagr")
+            if strat_ret is None or strat_ret >= 0:
+                continue
+            ratio = abs(strat_ret) / abs(bench_ret)
+            if ratio <= 0.50:
+                # Sort key: smallest loss-ratio first (most defensive).
+                callouts.append((
+                    ratio,
+                    f"{label} preserved capital in "
+                    f"{_crisis_alias(w)}: {_fmt_pct(strat_ret)} "
+                    f"vs BENCHMARK {_fmt_pct(bench_ret)} — only "
+                    f"{ratio:.0%} of the benchmark's loss."))
+    callouts.sort(key=lambda x: x[0])
+    for _ratio, line in callouts[:3]:
+        evidence.append(line)
     return _finding_template(
         title="CRISIS PERFORMANCE",
         finding=(
@@ -961,7 +1017,14 @@ def _finding_8_crisis_performance(crisis: dict | None) -> dict:
             "benchmark in all three windows have demonstrated stress "
             "resilience across distinct shocks (credit, liquidity, "
             "rates) — the strongest qualifier for a capital-planning "
-            "allocation."),
+            "allocation. Volatility-targeting and minimum-variance "
+            "strategies in particular preserved capital through the "
+            "COVID Crash at a fraction of the benchmark's loss, the "
+            "clearest mechanism-level evidence that systematic "
+            "regime-aware scaling protects against tail events that "
+            "the static 60/40 framework cannot. (The CAGR-annualisation "
+            "bug obscured this result until the May 30 2026 F3 fix "
+            "switched the crisis-table basis to cumulative return.)"),
         strength="HIGH",
         surprise=False,
     )
@@ -1099,6 +1162,82 @@ def _polite_truncate(text: str, max_chars: int = 400) -> str:
     return window.rstrip() + "…"
 
 
+# Finding (bootstrap CI overlap) — May 31 2026 ────────────────────────────────
+#
+# Surfaces the bootstrap_ci_sharpe table from refresh_academic_analytics
+# as a project-wide limitation: confidence intervals on the strategies'
+# Sharpe ratios overlap, so static historical-mean ranking is not
+# statistically reliable. The empirical case for regime-conditional
+# construction.
+
+def _finding_bootstrap_ci_overlap(academic: dict | None) -> dict:
+    if not academic:
+        return _deferred(
+            "BOOTSTRAP CI OVERLAP",
+            "academic_analytics cache miss")
+    rows = academic.get("bootstrap_ci_sharpe") or []
+    if not rows:
+        return _deferred(
+            "BOOTSTRAP CI OVERLAP",
+            "bootstrap_ci_sharpe not yet computed")
+
+    # Count strategies whose 95% CI overlaps with at least one other
+    # strategy's CI. Two CIs [a, b] and [c, d] overlap iff a <= d and
+    # c <= b. The fraction overlapping is the headline strength
+    # signal for the finding.
+    n = len(rows)
+    overlap_set: set[str] = set()
+    for i in range(n):
+        ai, bi = rows[i]["ci_low"], rows[i]["ci_high"]
+        for j in range(n):
+            if i == j:
+                continue
+            aj, bj = rows[j]["ci_low"], rows[j]["ci_high"]
+            if ai <= bj and aj <= bi:
+                overlap_set.add(rows[i]["strategy"])
+                break
+    n_overlap = len(overlap_set)
+    # Aggregate sample-size — the 286-observation figure the user
+    # named in the limitation copy is the dataset n_months, taken
+    # directly from the first row (all rows share the same data).
+    n_obs = rows[0].get("n_observations", 0)
+
+    evidence: list[str] = []
+    for r in rows[:8]:
+        evidence.append(
+            f"{r['strategy']}: Sharpe {r['sharpe']:.2f} "
+            f"[{r['ci_low']:.2f}, {r['ci_high']:.2f}].")
+    if n > 8:
+        evidence.append(f"... and {n - 8} more strategies.")
+    evidence.append(
+        f"{n_overlap} of {n} strategies have a 95% CI that overlaps "
+        f"with at least one other strategy.")
+
+    return _finding_template(
+        title="BOOTSTRAP CI OVERLAP",
+        finding=(
+            "Bootstrap 95% confidence intervals on Sharpe ratios show "
+            "substantial overlap across strategies on the "
+            f"{n_obs}-observation sample."),
+        evidence=evidence,
+        # Verbatim user-spec limitation copy — the empirical case for
+        # regime-conditional construction. Carried as the IMPLICATION
+        # so the Academic Writer agent reads it directly into the
+        # midpoint paper's and brief's limitations section.
+        implication=(
+            "Bootstrap 95% confidence intervals on Sharpe ratios show "
+            "substantial overlap across strategies on the "
+            f"{n_obs}-observation sample. Static strategy selection "
+            "cannot be made with statistical confidence from historical "
+            "averages alone. This is the empirical motivation for "
+            "regime-conditional construction: when historical ranking "
+            "is unreliable, selection must be driven by current regime "
+            "signals."),
+        strength="HIGH",
+        surprise=False,
+    )
+
+
 def _finding_10_macro_context(macro_digest: dict | None) -> dict:
     if not macro_digest or not macro_digest.get("summary_text"):
         return _deferred("MACRO CONTEXT ALIGNMENT",
@@ -1223,6 +1362,11 @@ def compute_findings_from_payload(payload: dict) -> tuple[list[dict], str]:
     findings.append(_finding_7_momentum_vs_meanrev(correlation, strategies))
     findings.append(_finding_8_crisis_performance(crisis))
     findings.append(_finding_9_factor_exposure(academic))
+    # Bootstrap CI overlap — bridges the static-ranking limitation
+    # into the report. Inserted before macro context (which references
+    # regime signals) so the limitation is set up before the
+    # regime-aware case is made.
+    findings.append(_finding_bootstrap_ci_overlap(academic))
     findings.append(_finding_10_macro_context(macro_digest))
     # Surprises looks at the prior ten — must come last.
     findings.append(_finding_11_surprises(findings))

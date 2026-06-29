@@ -21,8 +21,11 @@
  * that catches the 422 detail when a stale frontend lets the click
  * through.
  */
-import { useEffect, useMemo } from 'react'
-import { AlertTriangle, CheckCircle2, ShieldAlert, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  AlertTriangle, CheckCircle2, Loader2, RefreshCw, ShieldAlert, X,
+} from 'lucide-react'
+import axios from 'axios'
 import {
   readinessBlockerLabels,
   useReportReadinessStore,
@@ -115,20 +118,47 @@ export function ReportReadinessBanner() {
  * identically.
  */
 export function ReportBlockingModal({
-  open, onClose, blockers, message,
+  open, onClose, blockers, message, coldCaches,
 }: {
   open: boolean
   onClose: () => void
   blockers: string[]
   message?: string
+  // Bridge #91 — when the 422 carries error="caches_not_warm" the
+  // caller passes the cold-cache list through; the modal then
+  // renders a Warm Caches action button alongside Close.
+  coldCaches?: string[]
 }) {
   // Reload readiness when the modal opens so the list is fresh —
   // a blocker the team has just resolved in another tab should not
   // continue to appear here.
   const reload = useReportReadinessStore((s) => s.reload)
+  const [warming, setWarming] = useState(false)
+  const [warmError, setWarmError] = useState<string | null>(null)
+  const cacheGate = (coldCaches && coldCaches.length > 0)
+    || (!!message && /caches are not warm/i.test(message))
   useEffect(() => {
     if (open) void reload()
   }, [open, reload])
+
+  const onWarmClick = async () => {
+    setWarming(true)
+    setWarmError(null)
+    try {
+      await axios.post('/api/v1/admin/warm-analytics-cache')
+      // Refresh readiness so the next Generate click clears the gate.
+      await reload()
+      onClose()
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.data as { detail?: string })?.detail
+            ?? err.message
+        : 'Warm failed — try again.'
+      setWarmError(String(msg))
+    } finally {
+      setWarming(false)
+    }
+  }
 
   // Esc-to-close — the modal is non-destructive, so unconditional
   // dismiss is safe.
@@ -190,12 +220,64 @@ export function ReportBlockingModal({
             </ul>
           </div>
         )}
+        {/* Cold-cache list -- when the gate fires with caches_not_warm
+            the 422 detail carries a cold_caches array. Surfacing each
+            cache by name tells the user exactly which warm to trigger
+            (a generic "warm the caches" instruction was previously
+            the only signal). The Warm Caches action below addresses
+            them all at once; the list is purely informational. */}
+        {coldCaches && coldCaches.length > 0 && (
+          <div className="rounded border border-amber-500/40 bg-amber-500/5
+                          px-3 py-2"
+               data-testid="report-blocking-cold-caches">
+            <p className="text-2xs text-amber-200 leading-relaxed mb-1
+                          font-semibold">
+              Brief generation requires the following caches to be warm:
+            </p>
+            <ul className="text-2xs text-amber-100 leading-relaxed
+                           space-y-0.5 list-disc list-inside">
+              {coldCaches.map((c, idx) => (
+                <li key={idx}
+                    data-testid={`report-cold-cache-${idx}`}>
+                  {c}
+                </li>
+              ))}
+            </ul>
+            <p className="text-2xs text-amber-300 leading-relaxed mt-1.5">
+              Trigger a warm and retry.
+            </p>
+          </div>
+        )}
         <p className="text-2xs text-muted leading-relaxed">
-          Each item must be acknowledged, marked intentional, or
-          revoked on the QA Audit tab before report generation is
-          re-enabled.
+          {cacheGate
+            ? ('Warm the analytics caches before generating -- a cold '
+               + 'cache produces a [DATA PENDING] placeholder in the '
+               + 'generated document.')
+            : ('Each item must be acknowledged, marked intentional, '
+               + 'or revoked on the QA Audit tab before report '
+               + 'generation is re-enabled.')}
         </p>
-        <div className="flex justify-end pt-1">
+        {warmError && (
+          <p className="text-2xs text-danger leading-relaxed">
+            Warm failed — {warmError}
+          </p>
+        )}
+        <div className="flex justify-end gap-2 pt-1">
+          {cacheGate && (
+            <button
+              type="button"
+              onClick={() => void onWarmClick()}
+              disabled={warming}
+              data-testid="report-blocking-modal-warm-caches"
+              className="px-3 py-1.5 rounded text-xs font-medium
+                         bg-electric text-white hover:bg-blue-500
+                         disabled:opacity-60 disabled:cursor-wait
+                         transition-colors flex items-center gap-1.5">
+              {warming
+                ? <><Loader2 className="w-3 h-3 animate-spin" /> Warming…</>
+                : <><RefreshCw className="w-3 h-3" /> Warm Caches</>}
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -226,6 +308,12 @@ export function useReportReadinessGate() {
     is_ready: readiness?.is_ready ?? null,
     blocking_count: readiness?.blocking_count ?? 0,
     blockerLabels: labels,
+    // June 21 2026 -- surfaced from the readiness payload so the
+    // Presentation Script card can flip its button state without
+    // a second round-trip. null = unknown (endpoint failed or not
+    // loaded yet); the card falls back to the disabled state then.
+    deck_story_plan_available:
+      readiness?.deck_story_plan_available ?? null,
     reload,
   }
 }

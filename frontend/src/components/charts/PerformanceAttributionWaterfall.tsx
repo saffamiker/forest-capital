@@ -12,12 +12,16 @@ import type { AttributionResult } from '../../types/charts'
 import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
 import ChartExportButton from '../ChartExportButton'
 import InfoIcon from '../InfoIcon'
+import { useChartTheme } from '../../lib/useChartTheme'
+import type { ChartTheme } from '../../lib/exportTheme'
 
 interface Props {
   attribution: Record<string, AttributionResult>
 }
 
-function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult }) {
+function WaterfallSmall({
+  name, attr, chartTheme,
+}: { name: string; attr: AttributionResult; chartTheme: ChartTheme }) {
   const components = [
     { label: 'Alloc',  metric: 'Allocation effect', value: attr.allocation },
     { label: 'Select', metric: 'Selection effect',  value: attr.selection },
@@ -41,7 +45,10 @@ function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult 
   const zeroY = PAD_TOP + innerH / 2
 
   return (
-    <div className="bg-navy-800/60 rounded p-2 border border-border/40">
+    <div
+      className="rounded p-2 border border-border/40"
+      style={{ background: chartTheme.background }}
+    >
       <div className="text-2xs mb-1 text-center flex items-center justify-center gap-1.5">
         <span className="text-muted">{prettyName(name)}</span>
         {badgeColor && (
@@ -58,7 +65,7 @@ function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult 
         )}
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
-        <line x1={PAD_X} x2={W - PAD_X} y1={zeroY} y2={zeroY} stroke="#1e3a5c" strokeWidth={1} />
+        <line x1={PAD_X} x2={W - PAD_X} y1={zeroY} y2={zeroY} stroke={chartTheme.gridStroke} strokeWidth={1} />
         {components.map((c, i) => {
           const x = PAD_X + i * (barW + 6) + 3
           const h = Math.abs(c.value / absMax) * (innerH / 2)
@@ -73,14 +80,14 @@ function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult 
               />
               <text
                 x={x + barW / 2} y={H - 10}
-                fill="#64748b" fontSize="9" textAnchor="middle"
+                fill={chartTheme.textSecondary} fontSize="9" textAnchor="middle"
               >
                 {c.label}
               </text>
               <text
                 x={x + barW / 2}
                 y={c.value >= 0 ? y - 2 : y + h + 9}
-                fill="#cbd5e1" fontSize="8" textAnchor="middle"
+                fill={chartTheme.textPrimary} fontSize="8" textAnchor="middle"
               >
                 {(c.value * 100).toFixed(1)}
               </text>
@@ -94,6 +101,7 @@ function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult 
 
 export default function PerformanceAttributionWaterfall({ attribution }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const chartTheme = useChartTheme()
   const entries = Object.entries(attribution)
   if (entries.length === 0) {
     return (
@@ -140,7 +148,7 @@ export default function PerformanceAttributionWaterfall({ attribution }: Props) 
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         {sorted.map(([name, attr]) => (
-          <WaterfallSmall key={name} name={name} attr={attr} />
+          <WaterfallSmall key={name} name={name} attr={attr} chartTheme={chartTheme} />
         ))}
       </div>
     </div>

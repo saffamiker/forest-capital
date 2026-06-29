@@ -52,8 +52,34 @@ export interface ReportReadiness {
     unresolved_warnings: MethodologyBlocker[]
     unresolved_failures: MethodologyBlocker[]
   }
+  // Bridge #91 — analytics-cache warmth verdict. caches_warm=false
+  // gates generation pre-flight so the user doesn't burn an LLM run
+  // on cold caches that would emit [DATA PENDING].
+  caches_warm?: boolean
+  cold_caches?: string[]
+  warm_status?: 'idle' | 'warming' | 'warm' | 'failed' | 'unknown'
+  // June 21 2026 — true when story_plans has a real (non-fallback)
+  // row for (current_data_hash, 'deck'). The Presentation Script
+  // card on the Reports page flips its button state on this flag:
+  // true → "Download Script" enabled; false → "Generate Deck First"
+  // disabled with a helper line.
+  deck_story_plan_available?: boolean
+  // Layer 3b (June 21 2026) -- per-document export_verification status.
+  // Populated server-side from each draft's export_verification JSONB
+  // column. Drives the status pill rendered next to each card on the
+  // Reports page. Maps document_type -> one of 'verified' | 'warned'
+  // | 'failed' | 'not_exported'. Optional for back-compat with
+  // environments that haven't deployed Layer 3b.
+  export_verification?: {
+    executive_brief?: ExportVerificationStatus
+    presentation_deck?: ExportVerificationStatus
+    analytical_appendix?: ExportVerificationStatus
+  }
   checked_at: string
 }
+
+export type ExportVerificationStatus =
+  | 'verified' | 'warned' | 'failed' | 'not_exported'
 
 const TTL_MS = 60 * 1000
 

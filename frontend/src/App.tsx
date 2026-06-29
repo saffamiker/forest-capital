@@ -13,6 +13,7 @@ import Analytics from './pages/Analytics'
 import PerformanceRecord from './pages/PerformanceRecord'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
+import AdminHealth from './pages/AdminHealth'
 
 // Lazy-load the heavy editor + secondary analytics pages — they
 // carry the Konva canvas, the TipTap RichTextEditor, and the
@@ -30,10 +31,6 @@ const SectionEditor = lazy(() =>
   import('./pages/SectionEditor'))
 const DocumentEditor = lazy(() =>
   import('./pages/DocumentEditor'))
-const ReportWriter = lazy(() =>
-  import('./pages/ReportWriter'))
-const PeerReview = lazy(() =>
-  import('./pages/PeerReview'))
 
 
 /** Minimal page-load fallback. Keeps the route mount measurable in
@@ -46,6 +43,7 @@ function _PageLoadingFallback() {
   )
 }
 import { BrandProvider } from './context/BrandContext'
+import { ThemeProvider } from './context/ThemeContext'
 import { UIProvider } from './context/UIContext'
 import { SessionProvider } from './context/SessionContext'
 import { trackLogout } from './lib/activityLogger'
@@ -268,7 +266,8 @@ export default function App() {
     <AuthProvider>
       <SessionProvider>
         <BrandProvider>
-          <UIProvider>
+          <ThemeProvider>
+            <UIProvider>
             <Routes>
               <Route path="/login" element={<LoginPage />} />
               <Route path="/auth/verify" element={<AuthVerify />} />
@@ -297,34 +296,9 @@ export default function App() {
                 <Route path="performance-record" element={<PerformanceRecord />} />
                 <Route path="council" element={<CouncilDebate />} />
                 <Route path="qa" element={<QAHub />} />
-                <Route path="peer-review"
-                  element={
-                    /* PeerReview is lazy-imported (line 34) but was
-                       previously mounted bare — without a Suspense
-                       boundary, React's reconciler hit the lazy
-                       promise and the next render mounted the
-                       resolved component for the first time. The
-                       hooks-count delta between the two renders
-                       fired React's #426 "rendered more hooks than
-                       previous render" guard, surfacing as a blank
-                       page that recovered only on a hard reload
-                       (the eager import path). Every other lazy
-                       route in this Routes block is Suspense-
-                       wrapped; this one was the lone exception.
-                       Fix: same Suspense pattern as the rest.
-                       May 24 2026 UAT. */
-                    <Suspense fallback={<_PageLoadingFallback />}>
-                      <PeerReview />
-                    </Suspense>
-                  } />
                 <Route path="reports" element={<Reports />} />
                 <Route path="settings" element={<Settings />} />
-                <Route path="reports/writer"
-                  element={
-                    <Suspense fallback={<_PageLoadingFallback />}>
-                      <ReportWriter />
-                    </Suspense>
-                  } />
+                <Route path="admin/health" element={<AdminHealth />} />
                 <Route path="reports/storyboard"
                   element={
                     <Suspense fallback={<_PageLoadingFallback />}>
@@ -345,7 +319,8 @@ export default function App() {
                   } />
               </Route>
             </Routes>
-          </UIProvider>
+            </UIProvider>
+          </ThemeProvider>
         </BrandProvider>
       </SessionProvider>
     </AuthProvider>

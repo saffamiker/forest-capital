@@ -1,9 +1,9 @@
 """
 tools/academic_docx.py
 
-Assembles the two Word (.docx) deliverables — the midpoint submission
-paper and the executive brief — from a data bundle and a set of
-pre-generated narrative sections.
+Assembles the executive brief Word (.docx) deliverable from a data
+bundle and a set of pre-generated narrative sections. (PR-B June 2026
+retired build_midpoint_paper alongside the midpoint endpoint.)
 
 These builders are pure document assembly: no LLM calls, no database
 reads. The endpoint in main.py gathers the data (tools/academic_export.
@@ -16,7 +16,7 @@ Formatting follows the FNA 670 brief: 12 pt Times New Roman, double
 line spacing, 1-inch margins, page numbers in the footer, and the
 mandatory AI DRAFT banner repeated in the header of every page. The
 builder is unopinionated about page count — content length plus double
-spacing produces the ~3-page midpoint and ~5-page brief naturally.
+spacing produces the ~5-page brief naturally.
 """
 from __future__ import annotations
 
@@ -38,8 +38,10 @@ from docx.shared import Inches, Pt, RGBColor
 _VERIFY_RE = re.compile(r"(\[\[VERIFY.*?\]\])")
 
 from tools.academic_export import (
-    table_drawdown, table_factor_loadings, table_regime_conditional,
-    table_summary_statistics,
+    table_bootstrap_ci, table_cost_sensitivity, table_crisis_performance,
+    table_drawdown, table_factor_loadings, table_invariant_summary,
+    table_regime_conditional, table_statistical_tests,
+    table_strategy_performance_full, table_summary_statistics,
 )
 
 _BODY_FONT = "Times New Roman"
@@ -140,12 +142,298 @@ def _add_heading(doc: Document, text: str, *, size: int = 13) -> None:
     run.font.size = Pt(size)
 
 
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*(?P<inner>[^*\n]+)\*\*")
+
+
+# Brief markdown heading detection. The Academic Writer's
+# narratives occasionally emit `# Title`, `## Section N`, and
+# `### References` lines that fell through _add_body as literal
+# text (the `#` characters wrote into <w:t> instead of being
+# stripped and the paragraph styled as Heading N). This pattern
+# fires line-by-line in _add_brief_body; the scope is intentionally
+# narrow -- only brief narratives route through there.
+_MD_HEADING_LINE_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
+
+# June 28 2026 (Fix 1) -- LLM-generated section-restate headings
+# the brief narrative occasionally leads with. The outer brief
+# builder already emits Heading1 for each section
+# ("1. Executive Summary"); if the LLM also opens its narrative
+# with "## Section 1: Executive Summary" or "## Section 1: ...",
+# we get a duplicate heading rendering. Match the SECTION pattern
+# and skip the inline restate entirely.
+#
+# Tolerates the bold-wrapped form "## **Section 1: ...**" and
+# the bold-only form "**Section 1: ...**" without a markdown
+# heading prefix.
+#
+# June 28 2026 -- extended to match LETTER section labels too
+# ("Section A:", "Section B:", "Section H:") so the appendix's
+# A-H section restates are also stripped. The original regex
+# only matched DIGITS (\d+), which covered the brief's 1-5
+# sections but missed every appendix section restate.
+_SECTION_RESTATE_RE = re.compile(
+    r"^(?:\s*#{1,6}\s*)?(?:\*{0,2})\s*section\s*"
+    r"(?:\d+|[A-H])"
+    r"\s*[:\-\.]",
+    re.IGNORECASE)
+
+# June 28 2026 (Fix 2) -- strip leading/trailing markdown bold
+# markers from a heading line. The LLM occasionally wraps the
+# whole heading text in ** so the DOCX heading paragraph would
+# render with literal ** characters; the heading style
+# already applies bold weighting via its template setting.
+_HEADING_BOLD_WRAP_RE = re.compile(r"^\*{1,3}|\*{1,3}$")
+
+# June 28 2026 (Fix 10) -- APA references consolidation.
+# Each per-section narrative the LLM emits has its own inline
+# References / Bibliography block. APA format requires a SINGLE
+# consolidated References section at the end of the document.
+# These two helpers (a) split a section narrative into
+# (body, references_lines) and (b) collect / dedupe / sort
+# the citations across sections so the brief builder can emit
+# one consolidated block at the end.
+_REFS_HEADING_RE = re.compile(
+    r"(?im)^(?:\s*#{1,6}\s*)?(?:\d+\.?\s*)?\*{0,2}"
+    r"(?:references?|bibliography|works\s+cited|"
+    r"citations?|sources)"
+    r":?\*{0,2}\s*:?\s*$")
+# Author-prefix heuristic: a line starting with "Lastname,
+# F." or "Lastname, F.M." -- the APA citation pattern. Used
+# to filter out blank lines + non-citation noise inside a
+# references block.
+_CITATION_LINE_RE = re.compile(
+    r"^\s*([A-Z][a-z'\-]+(?:\s+[A-Z][a-z'\-]+)*),?\s*"
+    r"(?:[A-Z]\.\s*)?(?:[A-Z]\.\s*)?")
+
+
+def _extract_references(narrative: str) -> tuple[str, list[str]]:
+    """Split `narrative` into (body_text, citation_lines).
+    Body is the narrative with any References/Bibliography
+    block stripped. Citation lines are the non-blank citation
+    entries from the block, with leading bullets/numbering
+    trimmed.
+
+    Detection mirrors untoken_numeric_check._strip_references_
+    sections: a line matching _REFS_HEADING_RE starts a block;
+    the block extends to the next non-citation-shaped line OR
+    end-of-text. Fail-open: no references heading found
+    returns (narrative, [])."""
+    if not narrative:
+        return ("", [])
+    lines = narrative.splitlines()
+    body: list[str] = []
+    refs: list[str] = []
+    in_block = False
+    for ln in lines:
+        if in_block:
+            stripped = ln.strip()
+            if not stripped:
+                continue
+            # Stop the block when we hit another heading-shaped
+            # line that ISN'T a continuation of a citation.
+            if (stripped.startswith("#")
+                    or _REFS_HEADING_RE.match(stripped)):
+                in_block = False
+                if not _REFS_HEADING_RE.match(stripped):
+                    body.append(ln)
+                continue
+            # Trim leading "1. " / "- " / "* " bullet/numbering
+            # prefixes so citations dedupe by content.
+            cleaned = re.sub(
+                r"^\s*(?:[-*•]|\d+\.)\s+", "", stripped)
+            # Also strip the ** wrapper if the LLM bolded.
+            cleaned = _HEADING_BOLD_WRAP_RE.sub(
+                "", cleaned).strip()
+            if cleaned:
+                refs.append(cleaned)
+            continue
+        if _REFS_HEADING_RE.match(ln.strip()):
+            in_block = True
+            continue
+        body.append(ln)
+    return ("\n".join(body), refs)
+
+
+def _sort_apa_citations(citations: list[str]) -> list[str]:
+    """Deduplicate + alphabetically sort citation lines by
+    author last name (the first token before the comma).
+    Comparison is case-insensitive; dedupe key is the
+    whitespace-normalised lowercased + markdown-stripped full
+    line so trivial formatting differences (extra spaces,
+    trailing periods, ** wrappers, italic underscores)
+    collapse to one entry.
+
+    June 28 2026 (Fix 2) -- the LLM emits the same citation in
+    both markdown-italic form (e.g. *Benjamin et al., 2018*)
+    AND plain form across different sections. Without stripping
+    the asterisks + underscores before dedupe-keying, both
+    forms hashed to different keys and survived as duplicates
+    in the consolidated References block."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for c in citations:
+        # Strip markdown formatting (asterisks, underscores)
+        # from the key so a citation that appears in italic
+        # *...*  in one section + plain in another collapses
+        # to a single entry. Display form (passed through to
+        # `unique`) keeps whatever the FIRST occurrence had.
+        no_md = re.sub(r"[*_]+", "", c)
+        key = re.sub(
+            r"\s+", " ", no_md.lower().rstrip(". ")).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        # Strip markdown wrappers off the DISPLAY form too so
+        # the consolidated References section renders clean
+        # plain-text APA citations regardless of which form
+        # the LLM emitted first.
+        unique.append(re.sub(r"[*_]+", "", c).strip())
+
+    def _sort_key(line: str) -> str:
+        m = _CITATION_LINE_RE.match(line)
+        if m:
+            return m.group(1).lower()
+        return line.lower()
+    return sorted(unique, key=_sort_key)
+
+
+def _add_md_heading_paragraph(
+    doc: Document, text: str, level: int,
+) -> None:
+    """Append a Word Heading <level> style paragraph for the
+    brief markdown-heading conversion path. Level is clamped to
+    [1, 3] (Heading 4+ is not in scope for the brief). Falls back
+    to a plain bold paragraph in body font when the template
+    doesn't carry the named style -- shouldn't happen with
+    python-docx's default template, but the guard keeps the
+    builder from crashing on a custom .docx template that strips
+    the built-in heading styles."""
+    level = max(1, min(level, 3))
+    try:
+        para = doc.add_paragraph(style=f"Heading {level}")
+    except (KeyError, Exception):  # noqa: BLE001
+        # Custom template missing the Heading style -- fall back
+        # to a bold body paragraph so the heading still visually
+        # reads as one even without the outline-level structure.
+        para = doc.add_paragraph()
+    run = para.add_run(text)
+    run.bold = True
+    run.font.name = _BODY_FONT
+    # Heading 1 = 16pt; Heading 2 = 14pt; Heading 3 = 13pt. Sizes
+    # follow the brief's existing _add_heading defaults so the
+    # converted markdown headings sit visually correct next to
+    # any inline section headings the builder emits via
+    # _add_heading (Section 2/3/etc.).
+    run.font.size = Pt({1: 16, 2: 14, 3: 13}.get(level, 13))
+
+
+# Duplicate-cover-title detection. The LLM occasionally re-emits
+# the document title or subtitle at the top of the
+# executive_summary narrative even though the cover page already
+# carries them. _add_brief_body strips any leading H1/H2 whose
+# text contains any of these phrases verbatim. Defence-in-depth
+# alongside the prompt instruction that explicitly forbids the
+# duplication.
+_BRIEF_COVER_PHRASES: tuple[str, ...] = (
+    "executive brief",
+    "regime-conditional",
+    "regime conditional asset allocation",
+    "forest capital",
+    "fna 670",
+    "mccoll school",
+)
+
+
+def _add_brief_body(doc: Document, text: str) -> None:
+    """Body writer that converts markdown heading prefixes
+    (# / ## / ###) at the start of a block (or as a standalone
+    first line) into Word Heading 1 / 2 / 3 style paragraphs so
+    the document outline + navigation pane surface the structure
+    correctly. Non-heading content delegates to _add_body, which
+    still handles [[VERIFY: …]] markers and **markdown bold**
+    inline emphasis.
+
+    Originally brief-only (PR #424); routed from the appendix
+    too on 2026-06-25 so the appendix DOCX outline reflects its
+    section headings the same way the brief's does. Name kept
+    for stability across the existing callers.
+
+    Cover-title de-duplication: any leading markdown H1/H2 whose
+    lower-cased text contains a phrase in _BRIEF_COVER_PHRASES is
+    SKIPPED (not emitted). The LLM occasionally re-emits the
+    document title or subtitle at the top of the
+    executive_summary narrative; the cover page already carries
+    them and the duplication produces a visible eyesore on page
+    1. The skip is silent -- the rest of the block writes
+    normally."""
+    real_heading_seen = False
+    for block in (text or "").strip().split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        first_line, _, rest = block.partition("\n")
+        # June 28 2026 (Fix 1) -- the bare-bold restate form,
+        # e.g. "**Section 2: Methodology**" as a standalone
+        # paragraph with no markdown heading prefix. Skip the
+        # restate line + write any remainder.
+        if _SECTION_RESTATE_RE.match(first_line.strip()):
+            if rest.strip():
+                _add_body(doc, rest)
+                real_heading_seen = True
+            continue
+        m = _MD_HEADING_LINE_RE.match(first_line.strip())
+        if m is None:
+            _add_body(doc, block)
+            real_heading_seen = True
+            continue
+        level = len(m.group(1))
+        heading_text = m.group(2).strip()
+        # June 28 2026 (Fix 1) -- skip section-restate headings
+        # the LLM emits inline. The outer brief builder already
+        # rendered the section's Heading1; the LLM's
+        # "## Section N: Title" / "## **Section N: Title**" /
+        # "**Section N: Title**" prefix is a duplicate.
+        if _SECTION_RESTATE_RE.match(heading_text):
+            if rest.strip():
+                _add_body(doc, rest)
+                real_heading_seen = True
+            continue
+        # Cover-title duplicate detection -- the gate stays open
+        # until the first REAL (non-cover) heading lands, so a
+        # leading sequence of cover-dupe H1/H2 lines (the LLM
+        # occasionally emits both the title AND the subtitle as
+        # consecutive headings) all get stripped, not just the
+        # first.
+        if not real_heading_seen and level <= 2:
+            lowered = heading_text.lower()
+            if any(p in lowered for p in _BRIEF_COVER_PHRASES):
+                if rest.strip():
+                    _add_body(doc, rest)
+                    real_heading_seen = True
+                continue
+        # June 28 2026 (Fix 2) -- strip ** wrappers from the
+        # heading text. The heading style template already
+        # bolds; literal ** would render as visible characters.
+        heading_text = _HEADING_BOLD_WRAP_RE.sub(
+            "", heading_text).strip()
+        real_heading_seen = True
+        _add_md_heading_paragraph(doc, heading_text, level)
+        if rest.strip():
+            _add_body(doc, rest)
+
+
 def _add_body(doc: Document, text: str) -> None:
     """
     Renders blank-line-separated prose — one Word paragraph per block.
     Any [[VERIFY: …]] marker the Academic Writer emitted for an uncertain
     value is rendered bold with a yellow highlight, so it is unmissable
     to whoever refines the draft rather than a silently-trusted figure.
+
+    June 25 2026 -- also parses **markdown bold** runs. The brief's
+    Academic Writer agents emit ``**Finding 1**`` style emphasis;
+    before this change those rendered as literal asterisks. Bold
+    sequences are split out into their own run with run.bold=True so
+    they render correctly in the DOCX.
     """
     for block in (text or "").strip().split("\n\n"):
         block = block.strip()
@@ -155,12 +443,37 @@ def _add_body(doc: Document, text: str) -> None:
         for part in _VERIFY_RE.split(block):
             if not part:
                 continue
-            run = para.add_run(part)
-            run.font.name = _BODY_FONT
-            run.font.size = Pt(12)
             if _VERIFY_RE.fullmatch(part):
+                # The whole part is a [[VERIFY: ...]] marker --
+                # render as a single yellow-highlighted bold run
+                # and skip the markdown bold pass (markers don't
+                # contain ** by contract).
+                run = para.add_run(part)
+                run.font.name = _BODY_FONT
+                run.font.size = Pt(12)
                 run.bold = True
                 run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+                continue
+            # Split on **markdown bold** and emit one run per
+            # segment with the appropriate bold flag.
+            last_end = 0
+            for m in _MARKDOWN_BOLD_RE.finditer(part):
+                if m.start() > last_end:
+                    plain = part[last_end:m.start()]
+                    if plain:
+                        r = para.add_run(plain)
+                        r.font.name = _BODY_FONT
+                        r.font.size = Pt(12)
+                bold_run = para.add_run(m.group("inner"))
+                bold_run.font.name = _BODY_FONT
+                bold_run.font.size = Pt(12)
+                bold_run.bold = True
+                last_end = m.end()
+            tail = part[last_end:]
+            if tail:
+                r = para.add_run(tail)
+                r.font.name = _BODY_FONT
+                r.font.size = Pt(12)
 
 
 def _shade_cell(cell, hex_color: str) -> None:
@@ -449,90 +762,91 @@ def _add_audit_disclosure_appendix(
         )
 
 
-def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> bytes:
+def build_executive_brief(
+    data: dict[str, Any],
+    narratives: dict[str, str],
+    substitution_table: dict[str, str] | None = None,
+    verification_result: dict[str, Any] | None = None,
+) -> bytes:
     """
-    The three-page midpoint submission. Four sections per the FNA 670
-    brief: Data & Methodology, Preliminary Results (with the summary-
-    statistics and regime-conditional tables embedded), Roles & Division
-    of Labor, and Next Steps & Open Questions.
-    """
-    doc = _new_document()
+    The executive brief for a senior investment audience.
 
-    period = data.get("study_period", {})
-    _add_title_lines(doc, [
-        "Portfolio Intelligence System — Midpoint Submission",
-        "FNA 670 — Summer 2026",
-        "McColl School of Business",
-        date.today().strftime("%B %d, %Y"),
-    ])
-    _ai_draft_notice(doc)
-    _timestamp_line(doc)
-    _add_review_warning_box(doc)
+    Rewritten June 18 2026 to the FNA 670 rubric's six required sections,
+    in rubric order. Earlier (June 6) the brief led with "The Answer"
+    and embedded a "Five Human Decisions" section + a "Part II preview";
+    review against the rubric flagged the latter two as non-rubric
+    content and the section ordering as out-of-spec. Visuals are
+    referenced by name in the prose (per rubric §6) and supported by
+    the embedded table set; the platform's matplotlib chart surfaces
+    (cumulative return, implied asset allocation, efficient frontier)
+    are pointed to as live companion artifacts.
 
-    _add_heading(doc, "1. Data and Methodology")
-    _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
+      1. Executive Summary    -- verdict + headline figures
+      2. Methodology Overview -- HMM + OOS window + validation layers
+      3. Key Findings         -- three-strategy comparison + honest 2-of-9
+      4. Limitations & Risks  -- four mandatory limitations, no future-work
+      5. Final Recommendations -- investment conclusions from the OOS
+         Sharpe + diversification evidence; cached-regime fallback so the
+         section is data-independent and never renders empty
+      6. Visuals              -- four APA-formatted figures embedded inline
+         (cumulative return, rolling correlation, efficient frontier, OOS
+         Sharpe comparison) with APA Note. captions that resolve
+         {{DATA_HASH}}/{{OOS_SHARPE_BLEND}} etc against substitution_table.
+         Each figure is wrapped in a try/except so a missing chart renders
+         a placeholder paragraph rather than failing brief generation.
 
-    # Section 2 — Preliminary Results. The Academic Writer produces
-    # the analytical interpretation directly; previously a [[BOB]]
-    # callout sat below directing the team to rewrite the section
-    # in their own voice. Removed May 26 2026 — the writer's prose
-    # IS the interpretation the rubric requires; Bob edits for
-    # voice but does not write from scratch.
-    _add_heading(doc, "2. Preliminary Results")
-    _add_body(doc, narratives.get("results", "[DATA PENDING]"))
-    h, r = table_summary_statistics(data.get("summary_statistics", []))
-    _add_table(doc, "Table 1. Summary Statistics by Asset Class", h, r)
-    h, r = table_regime_conditional(data.get("regime_conditional", []))
-    _add_table(doc, "Table 2. Regime-Conditional Performance "
-                     "(Pre- vs Post-2022)", h, r)
-
-    # Section 3 — Roles and Division of Labor. Drafted from real
-    # Team Activity counts by the academic-writer midpoint_roles
-    # task; the prose is the deliverable's roles content.
-    _add_heading(doc, "3. Roles and Division of Labor")
-    _add_body(doc, narratives.get("roles", "[DATA PENDING]"))
-
-    # Section 4 — Next Steps and Open Questions. The Academic Writer
-    # produces the priorities directly from the Academic Review
-    # verdict's investigation section.
-    _add_heading(doc, "4. Next Steps and Open Questions")
-    _add_body(doc, narratives.get("next_steps", "[DATA PENDING]"))
-
-    period_note = doc.add_paragraph()
-    period_note.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
-    note_run = period_note.add_run(
-        f"Study period: {period.get('start', '—')} to "
-        f"{period.get('end', '—')} ({period.get('n_months', 0)} monthly "
-        "observations). Benchmark: 100% S&P 500. Factor model: Carhart "
-        "four-factor (MKT-RF, SMB, HML, MOM).")
-    note_run.italic = True
-    note_run.font.name = _BODY_FONT
-    note_run.font.size = Pt(9)
-    _set_run_color(note_run, "#64748b")
-
-    # Workstream D — Audit Disclosure Appendix at the end of the body,
-    # before the submission checklist. The report-readiness gate
-    # (workstream C) guarantees every WARN has been reviewed before
-    # this code runs, so the appendix records the team's complete
-    # disclosure response.
-    _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
-
-    _add_submission_checklist(doc)
-
-    buf = BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
-
-
-def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> bytes:
-    """
-    The five-page executive brief for a senior investment audience. A
-    title page, then Executive Summary, Methodology Overview, four Key
-    Findings (with the regime-conditional, summary-statistics and factor-
-    loadings tables embedded), Limitations and Risks, and Final
-    Recommendations.
+    Layer 3b (June 21 2026):
+      - substitution_table: the {token -> cache_value} dict the writer
+        consumed at narrative-generation time. Passed through so the
+        APA Note. text under each chart figure (Section 6) and the
+        verification-receipt page render verified values instead of
+        raw {{TOKEN}} placeholders. Fail-open: None leaves the tokens
+        unresolved (audit will flag them).
+      - verification_result: optional Layer-3a verify_export_against_cache
+        output. When present, the verification-receipt page (final page
+        before submission checklist) shows verified-values count + cache-
+        match status. When None the receipt still renders with a neutral
+        "Not yet verified" line so the page slot is structurally stable.
     """
     doc = _new_document()
+
+    # June 28 2026 (Phase 2 substitution deferral) -- when the
+    # substitution_table is supplied, pre-substitute every
+    # narrative section once so the 19 downstream
+    # _add_brief_body call sites all see resolved values.
+    # Under DEFER_SUBSTITUTION_TO_EXPORT=ON, narratives carry
+    # {{TOKEN}} placeholders; this resolves them at export
+    # time so the DOCX body prose renders the live values.
+    # Under flag OFF (or legacy generation) narratives already
+    # carry resolved values + the substitution is a harmless
+    # no-op (no {{TOKEN}} survives to replace).
+    if substitution_table:
+        narratives = {
+            k: _apply_substitutions(v, substitution_table)
+            if isinstance(v, str) else v
+            for k, v in narratives.items()
+        }
+
+    # June 28 2026 (Fix 10) -- APA references consolidation.
+    # Each section's narrative may include its own inline
+    # References / Bibliography block. APA format requires a
+    # SINGLE consolidated References section at the end of
+    # the document. Walk every narrative once, split each
+    # into (body, citations), and replace the dict value with
+    # the body (citations stripped). The accumulated citations
+    # are deduplicated + alphabetised + emitted as a
+    # single ## References section below Section 6 / Visuals.
+    _all_citations: list[str] = []
+    _stripped_narratives: dict[str, str] = {}
+    for _k, _v in narratives.items():
+        if isinstance(_v, str):
+            _body, _refs = _extract_references(_v)
+            _stripped_narratives[_k] = _body
+            _all_citations.extend(_refs)
+        else:
+            _stripped_narratives[_k] = _v
+    narratives = _stripped_narratives
+    _consolidated_refs = _sort_apa_citations(_all_citations)
 
     # ── Title page ────────────────────────────────────────────────────────
     for _ in range(3):
@@ -543,7 +857,7 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     doc.add_paragraph()
     _add_title_lines(doc, [
         "Executive Brief",
-        "FNA 670 — Summer 2026",
+        "FNA 670 -- Summer 2026",
         "Forest Capital / McColl School of Business",
         date.today().strftime("%B %d, %Y"),
     ])
@@ -552,91 +866,916 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     _add_review_warning_box(doc)
     doc.add_page_break()
 
-    _add_heading(doc, "Executive Summary")
-    _add_body(doc, narratives.get("exec_summary", "[DATA PENDING]"))
-    # Workstream D — one-line audit-readiness sentence appended to the
-    # AI-generated Executive Summary so an investment-audience reader
-    # sees the audit verdict without having to flip to the appendix.
-    # Deterministic — never AI-generated, identical across runs against
-    # the same audit state.
+    # Section 1 -- EXECUTIVE SUMMARY. Opens with the verdict + the
+    # headline numbers a senior investment reader expects on page 1.
+    # Drawdown comparison table embedded here so the 27-point number
+    # is visible alongside the prose claim.
+    _add_heading(doc, "1. Executive Summary")
+    _add_brief_body(
+        doc, narratives.get("executive_summary", "[DATA PENDING]"))
+    h, r = table_drawdown(data.get("drawdown_comparison", []))
+    _add_table(doc, "Table 1. Drawdown and Recovery by Strategy", h, r)
+
+    # Section 2 -- METHODOLOGY OVERVIEW. Moved from §3 to §2 to match
+    # the rubric ordering (methodology sets the stage before findings).
+    # Factor-loading table accompanies the validation prose.
+    _add_heading(doc, "2. Methodology Overview")
+    _add_brief_body(
+        doc, narratives.get("methodology", "[DATA PENDING]"))
+    h, r = table_factor_loadings(data.get("factor_loadings", []))
+    _add_table(doc, "Table 2. Carhart Four-Factor Loadings "
+                    "(* significant at p < .05)", h, r)
+
+    # Section 3 -- KEY FINDINGS AND INSIGHTS. The three-strategy
+    # comparison + honest 2-of-9 + FDR disclosure. Two tables anchor
+    # the findings (summary statistics + regime-conditional performance).
+    _add_heading(doc, "3. Key Findings and Insights")
+    _add_brief_body(
+        doc, narratives.get("key_findings", "[DATA PENDING]"))
+    # Audit-readiness one-liner -- surfaces the platform's audit
+    # verdict here (the validation context for the findings claims).
     from tools.audit_summary import audit_summary_sentence
     audit_line = audit_summary_sentence(data.get("audit_disclosures") or {})
     if audit_line:
-        _add_body(doc, audit_line)
+        _add_brief_body(doc, audit_line)
+    h, r = table_summary_statistics(data.get("summary_statistics", []))
+    _add_table(doc, "Table 3. Summary Statistics by Asset Class", h, r)
+    h, r = table_regime_conditional(data.get("regime_conditional", []))
+    _add_table(doc, "Table 4. Regime-Conditional Performance "
+                    "(Pre- vs Post-2022)", h, r)
 
-    _add_heading(doc, "Methodology Overview")
-    _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
-    # Workstream D — body paragraph framing the audit subsystem's
-    # role in the methodology. Same deterministic source.
+    # Section 4 -- LIMITATIONS AND RISKS. The four mandatory limitations
+    # only -- the previous "Part II preview" content was dropped (it
+    # was non-rubric "next steps" content the panel feedback explicitly
+    # called out as "putting out next steps rather than final
+    # recommendations"). Audit body paragraph anchors the validation
+    # surface as the closing limitation context.
+    _add_heading(doc, "4. Limitations and Risks")
+    _add_brief_body(
+        doc, narratives.get("limitations", "[DATA PENDING]"))
     from tools.audit_summary import audit_body_paragraph
     audit_para = audit_body_paragraph(data.get("audit_disclosures") or {})
     if audit_para:
-        _add_body(doc, audit_para)
+        _add_brief_body(doc, audit_para)
 
-    _add_heading(doc, "Key Findings and Insights")
+    # Section 5 -- FINAL RECOMMENDATIONS. Reframed as INVESTMENT
+    # CONCLUSIONS drawn from the OOS evidence, not a point-in-time
+    # portfolio position. The cached-regime fallback (assembled in
+    # gather_document_data -> _gather_live_recommendation) means the
+    # section can ALWAYS state the recommendation: live data when
+    # available, cached regime when the live build is degraded, with
+    # the staleness explicitly disclosed in the prose.
+    _add_heading(doc, "5. Final Recommendations")
+    _add_brief_body(
+        doc, narratives.get(
+            "final_recommendations", "[DATA PENDING]"))
 
-    _add_heading(doc, "Finding 1: The 2022 Correlation Break", size=12)
-    _add_body(doc, narratives.get("finding_1", "[DATA PENDING]"))
-    h, r = table_regime_conditional(data.get("regime_conditional", []))
-    _add_table(doc, "Table 1. Regime-Conditional Performance "
-                     "(Pre- vs Post-2022)", h, r)
+    # June 28 2026 (Fix 1) -- the Section 6 'Visuals to
+    # Demonstrate the Insights' heading + body emission was
+    # an orphan from the June 26 2026 spec removal: the
+    # brief_visuals agent was deleted from the generator's
+    # spec list (see main.py:17968-17976 comment) but this
+    # DOCX builder block was not removed. Result: every brief
+    # DOCX rendered with "[DATA PENDING]" under a Section 6
+    # heading the spec said should not exist. Brief now ends
+    # after Section 5; figures still place inline via
+    # _place_brief_figures_inline below, and any unplaced
+    # figure falls back via _embed_brief_figures (no Section 6
+    # heading needed for that fallback -- the figures stand on
+    # their own caption lines).
 
-    _add_heading(doc, "Finding 2: Static Allocation Results", size=12)
-    _add_body(doc, narratives.get("finding_2", "[DATA PENDING]"))
-    h, r = table_summary_statistics(data.get("summary_statistics", []))
-    _add_table(doc, "Table 2. Summary Statistics by Asset Class", h, r)
+    # June 25 2026 -- post-prose paragraph-level figure placement.
+    # All section prose is now in the doc; iterate paragraphs and
+    # move each figure to immediately after its anchor paragraph.
+    # Logs a 'figure_placement' event per figure (inline / fallback_
+    # append) so Render telemetry shows which anchors fired.
+    placement = _place_brief_figures_inline(
+        doc, data, substitution_table)
+    inline_placed = {
+        k for k, v in placement.items() if v == "inline"}
+    # Section 6 fallback append: any figure whose anchor paragraph
+    # could not be located in the prose still renders -- it gets
+    # appended at the end of the doc (after Section 6) instead of
+    # silently going missing.
+    _embed_brief_figures(
+        doc, data, substitution_table,
+        skip_keys=inline_placed)
 
-    _add_heading(doc, "Finding 3: Dynamic Allocation Results", size=12)
-    _add_body(doc, narratives.get("finding_3", "[DATA PENDING]"))
-    h, r = table_drawdown(data.get("drawdown_comparison", []))
-    _add_table(doc, "Table 3. Drawdown and Recovery by Strategy", h, r)
+    # June 28 2026 (Fix 10) -- consolidated APA References
+    # section. Every per-section narrative had its own inline
+    # References block stripped at the top of this function;
+    # all unique citations now emit as one ## References block
+    # right after Section 6, alphabetised by author last name
+    # per APA convention. Skip the block entirely when the
+    # brief carried zero citations (silent fail-open).
+    if _consolidated_refs:
+        _add_heading(doc, "References")
+        for _ref in _consolidated_refs:
+            doc.add_paragraph(_ref)
 
-    _add_heading(doc, "Finding 4: Factor Analysis", size=12)
-    _add_body(doc, narratives.get("finding_4", "[DATA PENDING]"))
-    h, r = table_factor_loadings(data.get("factor_loadings", []))
-    _add_table(doc, "Table 4. Carhart Four-Factor Loadings "
-                     "(* significant at p < .05)", h, r)
-
-    _add_heading(doc, "Limitations and Risks")
-    _add_body(doc, narratives.get("limitations", "[DATA PENDING]"))
-
-    _add_heading(doc, "Final Recommendations")
-    _add_body(doc, narratives.get("recommendations", "[DATA PENDING]"))
-
-    # Workstream D — Audit Disclosure Appendix. Mirrors the midpoint
-    # paper's appendix so the same disclosure record travels with both
-    # graded deliverables.
+    # Audit Disclosure Appendix carries the platform's audit trail.
     _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
 
     _add_submission_checklist(doc)
+
+    # Layer 3b (June 21 2026) -- verification receipt page. The last
+    # page of every brief: a small-font grey audit receipt naming the
+    # data hash + values verified + cache-match verdict. Reviewers can
+    # see at a glance that the export was confirmed against the
+    # platform analytics cache at generation time.
+    _add_verification_receipt(
+        doc, substitution_table, verification_result)
 
     buf = BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
 
+# ── Layer 3b helpers: chart embedding + verification receipt ───────────────
+
+
+# APA text for the four Section-6 figures. The {{TOKEN}} markers are
+# substituted at render time against substitution_table so figures
+# carry the same verified cache values the body prose does. Tokens
+# left unresolved (no substitution_table or token missing) survive
+# verbatim so the audit's check_unresolved_placeholders flags them.
+#
+# June 29 2026 -- caption accuracy audit. Every title + note text
+# verified against the chart_render function actually invoked:
+#   cumulative_returns -- plots growth-of-$1 across the FULL study
+#                         period; title + note accurate.
+#   rolling_correlation -- 12m rolling equity-bond correlation over
+#                          the full study period; series + dashed
+#                          line legend matches the actual renderer.
+#   efficient_frontier -- annualised vol vs annualised return scatter
+#                         over the full study period; series legend
+#                         matches the renderer.
+#   strategy_comparison -- renderer pulls POST_2022_SHARPE per
+#                          strategy (NOT OOS Sharpe in the
+#                          model-validation sense, even though
+#                          post-2022 IS the OOS window in this
+#                          study). Title + note retitled to
+#                          "Post-2022 Sharpe Ratio by Strategy"
+#                          so reader doesn't infer a different
+#                          methodology framing.
+_BRIEF_FIGURES: tuple[tuple[str, str, str], ...] = (
+    (
+        "Cumulative Portfolio Return, July 2002 Through May 2026",
+        "Growth of $1 invested at inception, plotted across the full "
+        "study period (July 2002 through May 2026). Generated by "
+        "AnalyticsDesk portfolio intelligence platform using "
+        "historical S&P 500, investment-grade bond, and high-yield "
+        "bond return data. Vertical dashed line marks the start of "
+        "the post-2022 out-of-sample validation window (January "
+        "2022). Transaction costs of 15 basis points applied per "
+        "rebalance event. Data hash: {{DATA_HASH}}.",
+        "cumulative_returns",
+    ),
+    (
+        "Rolling 12-Month Equity-Bond Correlation, July 2002 Through "
+        "May 2026",
+        "Rolling 12-month correlation between monthly returns of "
+        "equity (S&P 500) and bond series, plotted across the full "
+        "study period. Blue series = equity vs investment-grade "
+        "bonds. Green series = equity vs high-yield bonds. Dashed "
+        "vertical line marks the January 2022 correlation regime "
+        "break. Pre-2022 equity-IG mean = {{PRE_2022_EQ_IG_CORR}}; "
+        "post-2022 mean = {{POST_2022_EQ_IG_CORR}}. Data hash: "
+        "{{DATA_HASH}}.",
+        "rolling_correlation",
+    ),
+    (
+        "Risk-Return Efficient Frontier, Full Sample (July 2002 "
+        "Through May 2026)",
+        "Scatter plot of each strategy's annualised return (y-axis) "
+        "against its annualised volatility (x-axis), computed over "
+        "the full study period (July 2002 through May 2026). "
+        "Benchmark (S&P 500) shown in orange; regime-conditional "
+        "blend shown in green. Data hash: {{DATA_HASH}}.",
+        "efficient_frontier",
+    ),
+    (
+        "Post-2022 Sharpe Ratio Comparison by Strategy "
+        "(January 2022 Through May 2026)",
+        "Bar chart of each strategy's post-2022 Sharpe ratio, "
+        "computed on monthly returns over the {{OOS_WINDOW_MONTHS}}-"
+        "month post-2022 validation window. The post-2022 window "
+        "coincides with the model's out-of-sample period (training "
+        "data ended December 2021). Dashed reference line marks the "
+        "benchmark's post-2022 Sharpe ({{OOS_SHARPE_BENCHMARK}}); "
+        "the regime-conditional blend's post-2022 Sharpe is "
+        "{{OOS_SHARPE_BLEND}}. Data hash: {{DATA_HASH}}.",
+        "strategy_comparison",
+    ),
+)
+
+
+def _embed_brief_figures(
+    doc: Document,
+    data: dict[str, Any],
+    substitution_table: dict[str, str] | None,
+    *,
+    skip_keys: set[str] | None = None,
+) -> None:
+    """Layer 3b -- embed the four APA figures.
+
+    Each figure is added by _embed_brief_figure (see below). The
+    iteration is wrapped so a single renderer error never breaks the
+    whole loop: each figure stands or falls on its own and produces a
+    placeholder paragraph on failure.
+
+    skip_keys (June 25 2026) -- a set of renderer keys to skip in
+    this call. Used by the inline-placement path so figures already
+    embedded inline (e.g. cumulative_returns inside Section 3) are
+    not duplicated when Section 6 sweeps up any leftovers."""
+    skip = skip_keys or set()
+    for idx, (title, note, renderer_key) in enumerate(
+            _BRIEF_FIGURES, start=1):
+        if renderer_key in skip:
+            continue
+        _embed_brief_figure(
+            doc, idx, title, note, renderer_key, data, substitution_table)
+
+
+# June 25 2026 -- inline-placement triggers. The brief prose
+# references specific concepts that anchor each chart. When a
+# paragraph's plain text contains a trigger substring (case-
+# insensitive), the corresponding figure renders inline immediately
+# after that paragraph instead of being appended to Section 6.
+#
+# Each entry's trigger tuple is ordered from most-specific (the
+# canonical phrasing the Academic Writer is prompted to emit) to
+# least-specific (looser fallbacks that catch human-edited prose).
+# First match wins; a figure that already embedded inline won't
+# re-fire on a later paragraph.
+INLINE_FIGURE_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("cumulative_returns", (
+        # Specific anchor (the brief's canonical phrasing)
+        "cumulative_returns chart tells the story",
+        "cumulative return chart tells the story",
+        # Looser fallbacks
+        "cumulative return",
+        "cumulative portfolio return",
+        "cumulative_returns chart",
+    )),
+    ("rolling_correlation", (
+        # Specific anchor
+        "equity-to-ig-bond correlation moved from -0.05",
+        "equity-to-ig-bond correlation",
+        # Looser fallbacks
+        "equity-bond correlation",
+        "equity-ig correlation",
+        "correlation regime",
+        "correlation shift",
+        "regime break",
+    )),
+    ("efficient_frontier", (
+        # Specific anchors
+        "efficient frontier",
+        "volatility-return space",
+        # Looser fallbacks
+        "volatility-return",
+        "risk-return frontier",
+    )),
+    ("strategy_comparison", (
+        # Specific anchor (the OOS sharpe bench-vs-blend phrasing)
+        "0.86 (blend) versus 0.43 (benchmark)",
+        "0.86 (blend) vs 0.43 (benchmark)",
+        # Looser fallbacks
+        "oos sharpe",
+        "out-of-sample sharpe",
+        "0.86",   # the canonical OOS_SHARPE_BLEND
+    )),
+)
+
+
+def _place_brief_figures_inline(
+    doc: Document,
+    data: dict[str, Any],
+    substitution_table: dict[str, str] | None,
+) -> dict[str, str]:
+    """June 25 2026 -- post-prose paragraph-level figure placement.
+
+    The user-facing intent: each of the four APA figures should
+    appear immediately after the paragraph that first references
+    its concept, NOT at the end of the document in Section 6. The
+    previous implementation placed figures right after each
+    Section heading (Section 2 / 3 / 5), but the user wants
+    paragraph-level granularity so the visual lands next to the
+    sentence that motivated it.
+
+    Algorithm:
+      For each (renderer_key, triggers) in INLINE_FIGURE_TRIGGERS:
+        1. Iterate doc.paragraphs; find the first paragraph whose
+           text (lower-cased) contains any trigger phrase.
+        2. If found: snapshot len(doc.paragraphs), call
+           embed_brief_figure_by_key (which appends paragraphs at
+           the END of the doc), then move the appended paragraphs
+           to immediately after the anchor via XML addnext in
+           reverse order so their internal sequence is preserved.
+        3. If no anchor found: skip here; the caller's Section 6
+           _embed_brief_figures(skip_keys=<placed-inline-keys>)
+           appends the figure as a fallback.
+
+    Logs a structured 'figure_placement' event per figure with
+    placement in {'inline', 'fallback_append'} so the operator can
+    inspect Render logs to see whether the prose actually carried
+    the anchor phrases this generation.
+
+    Returns a dict mapping renderer_key -> 'inline' |
+    'fallback_append'. The caller passes the inline set to
+    _embed_brief_figures.skip_keys so the appended-at-end fallback
+    skips figures that already landed inline."""
+    import structlog as _structlog
+    _log = _structlog.get_logger(__name__)
+    placement: dict[str, str] = {}
+
+    for renderer_key, triggers in INLINE_FIGURE_TRIGGERS:
+        # 1. Locate the first paragraph whose text matches any
+        # trigger phrase. doc.paragraphs is a list of every top-
+        # level Paragraph; we scan in document order so 'first
+        # reference wins' even when a phrase repeats later.
+        anchor_para = None
+        matched_trigger: str | None = None
+        for p in doc.paragraphs:
+            text = (p.text or "").lower()
+            if not text.strip():
+                continue
+            for trig in triggers:
+                if trig in text:
+                    anchor_para = p
+                    matched_trigger = trig
+                    break
+            if anchor_para is not None:
+                break
+
+        if anchor_para is None:
+            placement[renderer_key] = "fallback_append"
+            _log.info(
+                "figure_placement",
+                figure=renderer_key,
+                placement="fallback_append")
+            continue
+
+        # 2. Snapshot the paragraph count, then call the embed
+        # helper which appends figure paragraphs at the END of the
+        # doc. We diff before/after to identify the new elements,
+        # then move them to immediately after the anchor.
+        before_count = len(doc.paragraphs)
+        ok = embed_brief_figure_by_key(
+            doc, renderer_key, data, substitution_table)
+        if not ok:
+            placement[renderer_key] = "fallback_append"
+            _log.info(
+                "figure_placement",
+                figure=renderer_key,
+                placement="fallback_append",
+                reason="embed_brief_figure_by_key returned False")
+            continue
+        new_paragraphs = doc.paragraphs[before_count:]
+
+        # 3. Move the new paragraphs to immediately after
+        # anchor_para. addnext inserts each element as the
+        # IMMEDIATE next sibling, so iterating in REVERSE order
+        # produces the correct final sequence:
+        #   anchor -> P1 -> P2 -> P3   (the desired order)
+        # is achieved by addnext(P3), addnext(P2), addnext(P1)
+        # against the anchor, since each addnext lands right after
+        # the anchor and pushes the prior insertion further right.
+        for new_p in reversed(new_paragraphs):
+            anchor_para._element.addnext(new_p._element)
+
+        placement[renderer_key] = "inline"
+        _log.info(
+            "figure_placement",
+            figure=renderer_key,
+            placement="inline",
+            matched_trigger=matched_trigger,
+            anchor_text=(anchor_para.text or "")[:120])
+
+    return placement
+
+
+def _figure_index_for_key(renderer_key: str) -> int:
+    """1-based index of the renderer_key within _BRIEF_FIGURES so
+    inline embeds preserve the canonical 'Figure N' numbering even
+    when figures appear out of declaration order in the document."""
+    for idx, (_, _, key) in enumerate(_BRIEF_FIGURES, start=1):
+        if key == renderer_key:
+            return idx
+    return 0
+
+
+def embed_brief_figure_by_key(
+    doc: Document,
+    renderer_key: str,
+    data: dict[str, Any],
+    substitution_table: dict[str, str] | None,
+) -> bool:
+    """Render and embed ONE brief figure identified by its
+    renderer_key. Returns True if the figure was found in
+    _BRIEF_FIGURES and the embed call ran (success or graceful
+    placeholder), False if the key was unknown. Caller is
+    responsible for tracking which keys have been embedded to
+    avoid duplicates."""
+    idx = _figure_index_for_key(renderer_key)
+    if idx == 0:
+        return False
+    title, note, key = _BRIEF_FIGURES[idx - 1]
+    _embed_brief_figure(
+        doc, idx, title, note, key, data, substitution_table)
+    return True
+
+
+def _embed_brief_figure(
+    doc: Document,
+    figure_number: int,
+    title: str,
+    note_template: str,
+    renderer_key: str,
+    data: dict[str, Any],
+    substitution_table: dict[str, str] | None,
+) -> None:
+    """Render one APA figure and embed it: picture + bold Figure N +
+    italic title + body Note. + spacer paragraph. Substitutes
+    {{TOKEN}} markers in title + note against substitution_table.
+
+    Fail-open contract: a renderer raise or a None PNG result inserts
+    a placeholder paragraph instead of the picture so brief generation
+    never crashes on a cold cache or a transient chart-render failure."""
+    import structlog as _structlog
+    _log = _structlog.get_logger(__name__)
+
+    table = substitution_table or {}
+
+    def _sub(text: str) -> str:
+        """Inline token replacement. Avoids the apply_substitutions
+        return-tuple unpacking so this helper has no dependency on
+        the numeric_substitution module at import time -- a circular
+        import would otherwise risk module-load order issues in
+        tools/academic_docx.py."""
+        out = text
+        for token, value in table.items():
+            if token in out:
+                out = out.replace(token, str(value))
+        return out
+
+    rendered_title = _sub(title)
+    rendered_note = _sub(note_template)
+
+    png: bytes | None = None
+    try:
+        from tools.chart_render import (
+            render_cumulative_returns,
+            render_efficient_frontier,
+            render_rolling_correlation,
+            render_strategy_comparison,
+        )
+        if renderer_key == "cumulative_returns":
+            png = render_cumulative_returns(data, period="post2022")
+        elif renderer_key == "rolling_correlation":
+            png = render_rolling_correlation(data)
+        elif renderer_key == "efficient_frontier":
+            blend_weights = data.get("blend_weights") or {}
+            png = render_efficient_frontier(
+                data, blend_weights=blend_weights or None)
+        elif renderer_key == "strategy_comparison":
+            png = render_strategy_comparison(data, strategy_type="dynamic")
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "chart_embed_failed",
+            figure_number=figure_number,
+            renderer=renderer_key,
+            error=str(exc))
+        png = None
+
+    if not png:
+        # Placeholder when the renderer returned None or raised.
+        _log.warning(
+            "chart_embed_failed",
+            figure_number=figure_number,
+            renderer=renderer_key,
+            reason="no_png")
+        placeholder = doc.add_paragraph()
+        placeholder.paragraph_format.line_spacing_rule = \
+            WD_LINE_SPACING.SINGLE
+        placeholder.paragraph_format.space_before = Pt(8)
+        run = placeholder.add_run(
+            f"[Figure {figure_number}: chart unavailable -- regenerate "
+            "to embed this visual]")
+        run.italic = True
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(11)
+        _set_run_color(run, "#92400e")
+        doc.add_paragraph()
+        return
+
+    # 1) Picture.
+    try:
+        doc.add_picture(BytesIO(png), width=Inches(6.0))
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "chart_embed_failed",
+            figure_number=figure_number,
+            renderer=renderer_key,
+            error=str(exc), stage="add_picture")
+        placeholder = doc.add_paragraph()
+        run = placeholder.add_run(
+            f"[Figure {figure_number}: chart unavailable -- regenerate "
+            "to embed this visual]")
+        run.italic = True
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(11)
+        _set_run_color(run, "#92400e")
+        doc.add_paragraph()
+        return
+
+    # 2) Bold "Figure N".
+    fig_para = doc.add_paragraph()
+    fig_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    fig_para.paragraph_format.space_before = Pt(4)
+    fig_run = fig_para.add_run(f"Figure {figure_number}")
+    fig_run.bold = True
+    fig_run.font.name = _BODY_FONT
+    fig_run.font.size = Pt(11)
+
+    # 3) Italic title.
+    title_para = doc.add_paragraph()
+    title_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    title_run = title_para.add_run(rendered_title)
+    title_run.italic = True
+    title_run.font.name = _BODY_FONT
+    title_run.font.size = Pt(11)
+
+    # 4) Italic "Note. " + plain note text body.
+    note_para = doc.add_paragraph()
+    note_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    note_label = note_para.add_run("Note. ")
+    note_label.italic = True
+    note_label.font.name = _BODY_FONT
+    note_label.font.size = Pt(10)
+    note_body = note_para.add_run(rendered_note)
+    note_body.font.name = _BODY_FONT
+    note_body.font.size = Pt(10)
+
+    # 5) Spacer paragraph.
+    doc.add_paragraph()
+
+
+def _add_verification_receipt(
+    doc: Document,
+    substitution_table: dict[str, str] | None,
+    verification_result: dict[str, Any] | None,
+) -> None:
+    """Layer 3b -- the verification receipt page that closes every
+    brief export. Small-font (9pt) muted-grey block carrying the
+    document name, generation timestamp, data hash (resolved from the
+    substitution table), values-verified count, cache-match verdict,
+    and a one-sentence reviewer note.
+
+    Both substitution_table and verification_result are optional. A
+    missing substitution_table leaves the {{TOKEN}} markers visible
+    (so the receipt still renders -- the audit will flag any
+    unresolved tokens). A missing verification_result renders a
+    neutral "Not yet verified" line so the receipt is structurally
+    stable across the in-editor export path that hasn't been threaded
+    with a verification result yet."""
+    table = substitution_table or {}
+
+    def _sub(text: str) -> str:
+        out = text
+        for token, value in table.items():
+            if token in out:
+                out = out.replace(token, str(value))
+        return out
+
+    # Page break so the receipt always lands on its own page.
+    doc.add_page_break()
+
+    # Title.
+    title_para = doc.add_paragraph()
+    title_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    title_para.paragraph_format.space_after = Pt(2)
+    title_run = title_para.add_run("DATA VERIFICATION RECEIPT")
+    title_run.bold = True
+    title_run.font.name = _BODY_FONT
+    title_run.font.size = Pt(10)
+    _set_run_color(title_run, "#475569")
+
+    # Divider.
+    div_para = doc.add_paragraph()
+    div_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    div_para.paragraph_format.space_after = Pt(2)
+    div_run = div_para.add_run("---------------------------------")
+    div_run.font.name = _BODY_FONT
+    div_run.font.size = Pt(9)
+    _set_run_color(div_run, "#475569")
+
+    generated_at = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M UTC")
+    exported_at = date.today().isoformat()
+    data_hash_line = _sub(
+        "Data hash:    {{DATA_HASH}} ({{STUDY_MONTHS}} monthly "
+        "observations, {{STUDY_START}} through {{STUDY_END}})")
+
+    # Cache match verdict.
+    cache_match_text = "Verified"
+    cache_match_color = "#475569"
+    if verification_result is not None:
+        if verification_result.get("data_hash_match") is False:
+            cache_match_text = "Stale (regenerate to refresh)"
+            cache_match_color = "#92400e"
+        elif verification_result.get("skipped"):
+            cache_match_text = "Not yet verified"
+
+    # Verification verdict.
+    n_verified = (verification_result or {}).get("n_values_verified")
+    n_missing = (verification_result or {}).get("n_values_missing", 0)
+    if verification_result is None:
+        verification_line = "Verification: Not yet verified"
+        verification_color = "#475569"
+        values_line = "Values verified: pending"
+    else:
+        n_manifest = (n_verified or 0) + int(n_missing or 0)
+        if verification_result.get("errors"):
+            verification_line = "Verification: Failed"
+            verification_color = "#b91c1c"
+        elif verification_result.get("warnings") or verification_result.get(
+                "skipped"):
+            verification_line = "Verification: Passed (with warnings)"
+            verification_color = "#92400e"
+        else:
+            verification_line = "Verification: Passed"
+            verification_color = "#475569"
+        values_line = (
+            f"Values verified: {int(n_verified or 0)} of {int(n_manifest)}")
+
+    lines: list[tuple[str, str]] = [
+        ("Document:     Executive Brief", "#475569"),
+        (f"Generated:    {generated_at}", "#475569"),
+        (f"Exported:     {exported_at}", "#475569"),
+        (data_hash_line, "#475569"),
+        (f"Cache match:  {cache_match_text}", cache_match_color),
+        (values_line, "#475569"),
+        (verification_line, verification_color),
+        ("Platform: analyticsdesk.app | FNA 670 Practicum", "#475569"),
+    ]
+    for text, colour in lines:
+        para = doc.add_paragraph()
+        para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        para.paragraph_format.space_after = Pt(0)
+        run = para.add_run(text)
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(9)
+        _set_run_color(run, colour)
+
+    # Reviewer note paragraph.
+    note_para = doc.add_paragraph()
+    note_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    note_para.paragraph_format.space_before = Pt(8)
+    note_run = note_para.add_run(
+        "Every numeric figure in this document was sourced from the "
+        "platform analytics cache and confirmed at export time. Human "
+        "review is required before final submission.")
+    note_run.italic = True
+    note_run.font.name = _BODY_FONT
+    note_run.font.size = Pt(9)
+    _set_run_color(note_run, "#475569")
+
+
 # ── Editor-content export ─────────────────────────────────────────────────────
 
 def _tiptap_text(node: Any) -> str:
-    """The concatenated plain text of a TipTap node and its descendants."""
+    """The concatenated plain text of a TipTap node and its descendants.
+
+    June 28 2026 (PR-DM-Lite) -- token_value nodes (dual-mode
+    storage) emit attrs.override or attrs.resolved as plain
+    text. The exported DOCX is clean: no token metadata, no
+    {{TOKEN}} placeholders, just the resolved number.
+
+    June 28 2026 (PR #479) -- unverified nodes render via the
+    3-state rule:
+      (1) attrs.accepted is True (operator accepted as-is via
+          editor_numeric_overrides) -> raw value, no marker.
+          The wrapper got removed by the editor save flow when
+          the override was logged; if any stragglers remain
+          we treat them as accepted-equivalent.
+      (2) attrs.replaced_with_token is set -> the operator
+          chose a token replacement; the wrapper is now a
+          token_value node, NOT an unverified node. Not
+          reachable in this branch.
+      (3) Default (still flagged, not yet resolved) -> render
+          "[UNVERIFIED: VALUE]" as a visible marker so the
+          DOCX export carries a clear flag for Bob + Molly's
+          review before submission."""
     if not isinstance(node, dict):
         return ""
+    if node.get("type") == "token_value":
+        attrs = node.get("attrs") or {}
+        return str(attrs.get("override") or attrs.get("resolved") or "")
+    if node.get("type") == "unverified":
+        attrs = node.get("attrs") or {}
+        value = str(attrs.get("value") or "")
+        if attrs.get("accepted"):
+            return value
+        return f"[UNVERIFIED: {value}]"
     if node.get("text"):
         return str(node["text"])
     return "".join(_tiptap_text(c) for c in (node.get("content") or []))
 
 
-def build_editor_docx(draft: dict[str, Any]) -> bytes:
+def _apply_substitutions(
+    text: str, substitution_table: dict[str, str] | None,
+) -> str:
+    """June 25 2026 -- straight string replace of every
+    {{TOKEN}} key in substitution_table against the input text.
+    Pre-2026-06-25 the editor export only applied substitution to
+    figure captions, so body prose like 'Across {{PLAY_BY_PLAY_
+    EVENTS}} named crisis events…' rendered with the literal token
+    in the DOCX. Routing every paragraph + heading + list-item
+    string through this helper resolves the token before any
+    text is written to the document."""
+    if not text or not substitution_table:
+        return text
+    out = text
+    for key, value in substitution_table.items():
+        if key in out:
+            out = out.replace(key, str(value))
+    return out
+
+
+def _apply_substitutions_to_runs(
+    runs: list[tuple[str, dict[str, bool]]],
+    substitution_table: dict[str, str] | None,
+) -> list[tuple[str, dict[str, bool]]]:
+    """Apply _apply_substitutions to each run's text while
+    preserving its marks dict. Used by the editor walker to
+    surface substituted values in body prose without losing
+    bold / italic formatting on the surrounding runs."""
+    if not substitution_table:
+        return runs
+    return [
+        (_apply_substitutions(t, substitution_table), m)
+        for t, m in runs
+    ]
+
+
+# Markdown-heading prefix detection. The Academic Writer + the
+# generators occasionally emit a paragraph whose text starts with
+# # / ## / ### markdown, which the TipTap editor preserves as a
+# plain paragraph (no heading node) because the user pasted or
+# typed the literal Markdown syntax. The editor export converts
+# these into the corresponding Word Heading style instead of
+# rendering the # marks as literal text.
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def _tiptap_runs(node: Any) -> list[tuple[str, dict[str, bool]]]:
+    """June 25 2026. Walks a TipTap node and emits a flat list of
+    (text, marks_dict) tuples preserving per-text-node formatting.
+    Each tuple's marks dict carries the inline marks the segment
+    should render with:
+
+        {"bold": True}     -> run.bold = True
+        {"italic": True}   -> run.italic = True
+        {"code": True}     -> monospace face
+
+    Used by the editor-export walker so a TipTap text node like
+        {"type": "text", "text": "Finding 1",
+         "marks": [{"type": "bold"}]}
+    becomes a bold run in the DOCX instead of plain text. The
+    previous walker (_tiptap_text) flattened to a plain string and
+    dropped marks entirely, so headings / verdict labels / Section
+    callouts that the generator emitted as bold lost their
+    emphasis in the editor export."""
+    if not isinstance(node, dict):
+        return []
+    # June 28 2026 (PR-DM-Lite) -- token_value nodes emit
+    # attrs.override or attrs.resolved as an unmarked run.
+    # Override semantics: an explicitly-overridden value still
+    # exports as plain text (no marks), so the reader can't
+    # distinguish auto-resolved from overridden in the exported
+    # file -- the override is purely an editor-side affordance.
+    if node.get("type") == "token_value":
+        attrs = node.get("attrs") or {}
+        text = str(attrs.get("override") or attrs.get("resolved") or "")
+        if not text:
+            return []
+        return [(text, {})]
+    # June 28 2026 (PR #479) -- unverified node render.
+    # 3-state per the operator's directive: accepted ->
+    # raw value plain; default -> [UNVERIFIED: VALUE]
+    # visible marker. The replaced-with-token state isn't
+    # reachable here because that path rewrites the node
+    # type to token_value.
+    if node.get("type") == "unverified":
+        attrs = node.get("attrs") or {}
+        value = str(attrs.get("value") or "")
+        if not value:
+            return []
+        if attrs.get("accepted"):
+            return [(value, {})]
+        # Bold the visible marker so the [UNVERIFIED: ...]
+        # flag is visually distinct in the exported file.
+        return [(f"[UNVERIFIED: {value}]", {"bold": True})]
+    if node.get("text"):
+        marks_list = node.get("marks") or []
+        marks: dict[str, bool] = {}
+        for m in marks_list:
+            if isinstance(m, dict) and isinstance(
+                    m.get("type"), str):
+                marks[str(m["type"])] = True
+        return [(str(node["text"]), marks)]
+    out: list[tuple[str, dict[str, bool]]] = []
+    for c in (node.get("content") or []):
+        out.extend(_tiptap_runs(c))
+    return out
+
+
+def _add_body_from_runs(
+    doc: Document,
+    runs: list[tuple[str, dict[str, bool]]],
+    *,
+    prefix: str = "",
+) -> None:
+    """Write one paragraph with per-segment runs that honour the
+    TipTap marks. Mirrors _add_body's [[VERIFY: ...]] yellow-bold
+    highlight pass on each segment so markers nested inside a
+    bolded text node still surface correctly. prefix is prepended
+    as a plain run -- used by the bulletList branch in the editor
+    walker to emit '•  ' before the first text node."""
+    if not runs:
+        return
+    para = doc.add_paragraph()
+    if prefix:
+        p = para.add_run(prefix)
+        p.font.name = _BODY_FONT
+        p.font.size = Pt(12)
+    for text, marks in runs:
+        if not text:
+            continue
+        for part in _VERIFY_RE.split(text):
+            if not part:
+                continue
+            run = para.add_run(part)
+            run.font.name = _BODY_FONT
+            run.font.size = Pt(12)
+            if _VERIFY_RE.fullmatch(part):
+                run.bold = True
+                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+            else:
+                if marks.get("bold"):
+                    run.bold = True
+                if marks.get("italic"):
+                    run.italic = True
+
+
+def build_editor_docx(
+    draft: dict[str, Any],
+    appendix_data: dict[str, Any] | None = None,
+    *,
+    brief_data: dict[str, Any] | None = None,
+    brief_substitution_table: dict[str, str] | None = None,
+) -> bytes:
     """
-    Renders an editor draft (a midpoint_paper or executive_brief) to a
-    .docx straight from its TipTap content_json — the document exactly as
-    the author has edited it in the in-platform editor.
+    Renders an editor draft (a midpoint_paper, executive_brief, or
+    analytical_appendix) to a .docx straight from its TipTap
+    content_json — the document exactly as the author has edited it in
+    the in-platform editor.
 
     Unlike build_midpoint_paper / build_executive_brief, this does not
-    regenerate narrative or embed data tables: it is a faithful export of
-    the current editor content. The AI DRAFT banner and submission
-    checklist are still applied; any [[VERIFY]] markers left in the text
-    are rendered highlighted by _add_body.
+    regenerate narrative: it is a faithful export of the current editor
+    content. The AI DRAFT banner and submission checklist are still
+    applied; any [[VERIFY]] markers left in the text are rendered
+    highlighted by _add_body.
+
+    Analytical-appendix special case (the appendix is table-heavy by
+    design): when document_type == "analytical_appendix" and
+    appendix_data is supplied, the eight evidence tables (A1-H1) are
+    re-injected after the prose nodes so the in-editor export carries
+    the full evidentiary record. The data is the same dict produced by
+    tools.academic_export.gather_analytical_appendix_data() and the
+    table builders are the same ones used by build_analytical_appendix
+    — no recomputation, no LLM calls. The caller is responsible for
+    fetching appendix_data on the async edge; this builder stays sync.
+
+    Executive-brief special case (June 25 2026): when
+    document_type == "executive_brief" and brief_data is supplied,
+    the four APA chart figures (Section 6 of the regenerated brief)
+    are appended after the editor prose by _embed_brief_figures. The
+    figures live in the build pipeline, not the TipTap content_json
+    persisted to editor_drafts, so the editor export had been
+    silently dropping them. The data is the same dict produced by
+    tools.academic_export.gather_document_data(); the caller is
+    responsible for fetching it on the async edge. substitution_table
+    is intentionally None here -- _embed_brief_figure handles missing
+    substitution values gracefully (the {{TOKEN}} placeholders in the
+    APA Note. text degrade to literal text, which the audit will flag
+    on the next regen rather than silently misreporting). When the
+    chart renderers raise or return None each figure falls through to
+    an italic '[Figure N: chart unavailable — regenerate to embed
+    this visual]' placeholder paragraph instead of crashing the
+    export.
     """
     doc = _new_document()
     _add_title_lines(doc, [
@@ -651,31 +1790,790 @@ def build_editor_docx(draft: dict[str, Any]) -> bytes:
 
     content = draft.get("content_json") or {}
     nodes = content.get("content", []) if isinstance(content, dict) else []
+
+    # June 25 2026 -- inline-figure trigger tracking for the brief
+    # editor export. As we walk paragraphs, check each one's plain
+    # text against INLINE_FIGURE_TRIGGERS. First trigger wins.
+    # Any figures NOT fired inline are appended at the end as a
+    # fallback so the export always carries all four images even
+    # when the author's edits drop the anchor phrases.
+    is_brief = (
+        draft.get("document_type") == "executive_brief"
+        and brief_data is not None)
+    embedded_figure_keys: set[str] = set()
+
+    def _maybe_embed_inline(plain_text: str) -> None:
+        if not is_brief or not plain_text:
+            return
+        lower = plain_text.lower()
+        for key, triggers in INLINE_FIGURE_TRIGGERS:
+            if key in embedded_figure_keys:
+                continue
+            for trig in triggers:
+                if trig in lower:
+                    if embed_brief_figure_by_key(
+                            doc, key, brief_data,
+                            brief_substitution_table):
+                        embedded_figure_keys.add(key)
+                    break
+
+    # June 25 2026 -- the editor's brief_substitution_table is now
+    # applied to BODY PROSE in addition to figure captions. Tokens
+    # like {{PLAY_BY_PLAY_EVENTS}} that appear in Section 1 ("Across
+    # {{PLAY_BY_PLAY_EVENTS}} named crisis events…") were rendering
+    # as literal placeholders because the walker only routed the
+    # substitution table to _embed_brief_figures. Plumbing it
+    # through to every run resolves the token before write.
+    sub_table = brief_substitution_table
+
+    def _add_heading_with_style(
+        runs: list[tuple[str, dict[str, bool]]], level: int,
+    ) -> None:
+        """Emit a Word Heading style paragraph (Heading 1/2/3...)
+        carrying per-run formatting + substitution. Replaces the
+        previous _add_heading(doc, ...) call -- the latter was a
+        bold-text paragraph at body font, which the user wanted
+        rendered with the proper Word heading style instead so
+        Word's outline + navigation pane reflect document
+        structure."""
+        level = max(1, min(level, 6))
+        try:
+            para = doc.add_paragraph(style=f"Heading {level}")
+        except Exception:  # noqa: BLE001
+            # Defensive fallback for the rare case where the
+            # template doesn't carry 'Heading N' (shouldn't happen
+            # with python-docx's default template).
+            para = doc.add_paragraph()
+        subbed = _apply_substitutions_to_runs(runs, sub_table)
+        for text, marks in subbed:
+            if not text:
+                continue
+            run = para.add_run(text)
+            if marks.get("bold"):
+                run.bold = True
+            if marks.get("italic"):
+                run.italic = True
+
+    # June 28 2026 (Issue 2 + 3) -- walker-level normalisations
+    # for the editor-export path. Mirror the build_executive_brief
+    # post-processing so the editor-exported DOCX matches the
+    # generation-time output:
+    #
+    #   Issue 2: skip "## Section N: ..." / "**Section N: ...**"
+    #            duplicate-restate lines that the LLM occasionally
+    #            opens each section with. The outer brief Heading1
+    #            is already in the editor's content_json from the
+    #            generator's section_blocks builder.
+    #
+    #   Issue 3: detect inline References / Bibliography blocks +
+    #            accumulate their citation paragraphs + skip the
+    #            block during main render + emit a SINGLE
+    #            consolidated APA References section at the end
+    #            of the document (alphabetised by author last name).
+    consolidated_refs: list[str] = []
+    in_refs_block = False
+
+    def _is_section_restate(text: str) -> bool:
+        return bool(
+            _SECTION_RESTATE_RE.match(text.strip()))
+
+    def _is_references_heading(text: str) -> bool:
+        return bool(
+            _REFS_HEADING_RE.match(text.strip()))
+
     for node in nodes:
         if not isinstance(node, dict):
             continue
         ntype = node.get("type")
         if ntype == "heading":
-            text = _tiptap_text(node).strip()
-            if text:
-                level = (node.get("attrs") or {}).get("level", 1)
-                _add_heading(doc, text, size=13 if level <= 1 else 12)
+            # TipTap heading node -> Word Heading style.
+            level = int(
+                (node.get("attrs") or {}).get("level", 1) or 1)
+            runs = _tiptap_runs(node)
+            heading_text = "".join(
+                t for t, _ in runs).strip()
+            if not heading_text:
+                continue
+            # Issue 3: a References heading enters the collection
+            # block. A non-references heading exits it.
+            if _is_references_heading(heading_text):
+                in_refs_block = True
+                continue
+            in_refs_block = False
+            # Issue 2: skip section restate.
+            if _is_section_restate(heading_text):
+                continue
+            _add_heading_with_style(runs, level)
         elif ntype == "paragraph":
-            text = _tiptap_text(node).strip()
-            if text:
-                _add_body(doc, text)
+            # June 25 2026 -- use the marks-aware walker so bold /
+            # italic text nodes (e.g. **Finding 1** the generator
+            # emits as inline marks) render with their formatting
+            # instead of dropping the marks via _tiptap_text.
+            # ALSO:
+            #   - skip '---' divider paragraphs entirely (the
+            #     generator's section dividers don't translate to
+            #     Word semantics)
+            #   - detect markdown heading prefixes (# / ## / ###)
+            #     that the editor kept as literal text and
+            #     re-route them to Word Heading styles
+            runs = _tiptap_runs(node)
+            joined = "".join(t for t, _ in runs).strip()
+            if not runs or not joined:
+                continue
+            if joined == "---" or joined.strip("-") == "":
+                # Markdown horizontal rule -- skip; Word would
+                # render a literal '---' line which adds noise.
+                continue
+            # Issue 3: paragraph inside a References block --
+            # collect as a citation, skip render.
+            if in_refs_block:
+                # Substitute tokens in the citation first so
+                # author names + years don't carry literal
+                # placeholders into the consolidated list.
+                _subbed_pairs = _apply_substitutions_to_runs(
+                    runs, sub_table)
+                _cite_text = "".join(
+                    t for t, _ in _subbed_pairs).strip()
+                # Drop leading "1. " / "- " bullets so dedup
+                # collapses formatting variants.
+                _cite_text = re.sub(
+                    r"^\s*(?:[-*•]|\d+\.)\s+", "", _cite_text)
+                _cite_text = _HEADING_BOLD_WRAP_RE.sub(
+                    "", _cite_text).strip()
+                if _cite_text:
+                    consolidated_refs.append(_cite_text)
+                continue
+            md_match = _MD_HEADING_RE.match(joined)
+            if md_match:
+                level = len(md_match.group(1))
+                stripped = md_match.group(2)
+                # Issue 3 + 2: same checks for the markdown-
+                # heading-in-paragraph path.
+                if _is_references_heading(stripped):
+                    in_refs_block = True
+                    continue
+                in_refs_block = False
+                if _is_section_restate(stripped):
+                    continue
+                # Issue 2: strip ** wrappers from the heading
+                # text. Heading style template already bolds.
+                stripped = _HEADING_BOLD_WRAP_RE.sub(
+                    "", stripped).strip()
+                # Re-emit as a single-run heading. Inline marks on
+                # an '## Heading' paragraph are vanishingly rare;
+                # collapse the marks dict on the surface text to
+                # avoid mis-splitting across the '## ' prefix.
+                _add_heading_with_style(
+                    [(stripped, {"bold": True})],
+                    max(1, min(level, 6)))
+                continue
+            # Issue 2: the bare-bold restate form
+            # ("**Section N: Title**" with no markdown prefix).
+            if _is_section_restate(joined):
+                continue
+            subbed = _apply_substitutions_to_runs(runs, sub_table)
+            _add_body_from_runs(doc, subbed)
+            _maybe_embed_inline(joined)
         elif ntype in ("bulletList", "orderedList"):
             for item in (node.get("content") or []):
-                text = _tiptap_text(item).strip()
-                if text:
-                    _add_body(doc, f"•  {text}")
+                runs = _tiptap_runs(item)
+                if not runs:
+                    continue
+                joined = "".join(t for t, _ in runs).strip()
+                if not joined:
+                    continue
+                # Issue 3: a citation inside a list under a
+                # References heading still collects.
+                if in_refs_block:
+                    _subbed_pairs = _apply_substitutions_to_runs(
+                        runs, sub_table)
+                    _cite_text = "".join(
+                        t for t, _ in _subbed_pairs).strip()
+                    _cite_text = re.sub(
+                        r"^\s*(?:[-*•]|\d+\.)\s+",
+                        "", _cite_text)
+                    _cite_text = _HEADING_BOLD_WRAP_RE.sub(
+                        "", _cite_text).strip()
+                    if _cite_text:
+                        consolidated_refs.append(_cite_text)
+                    continue
+                subbed = _apply_substitutions_to_runs(
+                    runs, sub_table)
+                _add_body_from_runs(doc, subbed, prefix="•  ")
+                _maybe_embed_inline(joined)
 
     # An empty draft still produces a structurally valid document.
     if not nodes:
         _add_body(doc, (draft.get("content_text")
                         or "[DATA PENDING] — the draft is empty.").strip())
 
+    # Analytical Appendix: re-inject the eight evidence tables after the
+    # author's prose so the in-editor export carries the full record.
+    if (draft.get("document_type") == "analytical_appendix"
+            and appendix_data is not None):
+        _add_appendix_tables(doc, appendix_data)
+
+    # Executive Brief: re-render the four APA chart figures. June 25
+    # 2026: each figure is FIRST attempted inline next to the prose
+    # that references it (see _maybe_embed_inline above in the
+    # walker). The remaining figures that didn't match any inline
+    # trigger are appended here as a fallback so the export always
+    # carries all four. skip_keys carries the set of inline-embedded
+    # keys so we don't double up.
+    if (draft.get("document_type") == "executive_brief"
+            and brief_data is not None):
+        _embed_brief_figures(
+            doc, brief_data,
+            substitution_table=brief_substitution_table,
+            skip_keys=embedded_figure_keys)
+
+    # June 28 2026 (Issue 3) -- emit consolidated APA References
+    # section if any citations were collected during the main
+    # walk. Dedupe + alphabetise by author last name. Skip
+    # entirely when zero refs collected (silent fail-open).
+    if consolidated_refs:
+        _sorted_refs = _sort_apa_citations(consolidated_refs)
+        if _sorted_refs:
+            _add_heading_with_style(
+                [("References", {"bold": True})], 1)
+            for _ref in _sorted_refs:
+                doc.add_paragraph(_ref)
+
     _add_submission_checklist(doc)
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _add_appendix_tables(
+    doc: Document, data: dict[str, Any],
+) -> None:
+    """Append the eight evidence tables (A1-H1) to the document. Shared
+    between build_analytical_appendix (full regenerated path) and the
+    in-editor export of an analytical_appendix draft, so the tables
+    appear identically in both surfaces. Pure assembly — no DB reads,
+    no LLM calls."""
+    _add_heading(doc, "Evidence Tables")
+
+    h, r = table_summary_statistics(data.get("summary_statistics", []))
+    _add_table(doc, "Table A1. Summary Statistics by Asset Class", h, r)
+
+    h, r = table_strategy_performance_full(
+        data.get("strategy_results") or {})
+    _add_table(doc, "Table B1. Full-Period Performance by Strategy "
+                    "(sorted by Sharpe)", h, r)
+
+    h, r = table_statistical_tests(data.get("strategy_results") or {})
+    _add_table(doc, "Table C1. Statistical Tests by Strategy "
+                    "(paired-t, FDR-corrected, DSR, PSR, SPA)", h, r)
+
+    h, r = table_bootstrap_ci(data.get("bootstrap_ci_sharpe") or [])
+    _add_table(doc, "Table D1. Sharpe Ratio with 95% Bootstrap CI "
+                    "(block bootstrap, length 12, 10,000 resamples)", h, r)
+
+    h, r = table_factor_loadings(data.get("factor_loadings", []))
+    _add_table(doc, "Table E1. Carhart Four-Factor Loadings by Strategy "
+                    "(* significant at p < .05)", h, r)
+
+    h, r = table_crisis_performance(data.get("crisis_performance"))
+    _add_table(doc, "Table F1. Cumulative Return by Strategy and "
+                    "Crisis Window", h, r)
+
+    h, r = table_cost_sensitivity(data.get("cost_sensitivity"))
+    _add_table(doc, "Table G1. Net-of-Cost Sharpe at 10/15/20 bps "
+                    "per Material Rebalance (OOS Window)", h, r)
+
+    h, r = table_invariant_summary(data.get("invariant_summary"))
+    _add_table(doc, "Table H1. Latest Warm Invariant Verdict "
+                    "(deterministic detection only — see "
+                    "docs/INVARIANTS.md)", h, r)
+
+
+# ── Analytical Appendix (June 2 2026) ─────────────────────────────────────────
+
+# The Analytical Appendix is the project's evidentiary record — the data
+# that backs every claim in the executive brief and the panel
+# presentation. It is intentionally table-heavy and rhetorically minimal:
+# each section opens with a short Academic Writer-generated paragraph
+# explaining what the data shows, then the data itself in an APA-style
+# table. The eight sections (A through H) map one-to-one to the eight
+# cache reads in tools.academic_export.gather_analytical_appendix_data.
+#
+# Pure assembly — no LLM calls or database reads inside this function.
+# The endpoint in main.py gathers the data and generates the narratives,
+# then hands both to build_analytical_appendix.
+
+
+_APPENDIX_SECTION_TITLES = [
+    "A. Data and Methodology",
+    "B. Full Strategy Performance",
+    "C. Statistical Tests",
+    "D. Bootstrap Confidence Intervals",
+    "E. Factor Loadings",
+    "F. Crisis Window Performance",
+    "G. Transaction Cost Sensitivity",
+    "H. Validation Audit Summary",
+]
+
+
+def _appendix_section_keys() -> list[str]:
+    """The narratives dict key for each appendix section. One key per
+    section letter — the endpoint generates one paragraph per key,
+    and the builder renders it under the matching heading."""
+    return ["appendix_a", "appendix_b", "appendix_c", "appendix_d",
+            "appendix_e", "appendix_f", "appendix_g", "appendix_h"]
+
+
+def _add_reproducibility_line(doc: Document, data_hash: str | None) -> None:
+    """The footer line carrying the data hash + generation timestamp.
+
+    The hash anchors every figure in the appendix to a specific
+    strategy_results_cache row. A reader investigating a number can
+    look the row up by hash and reconstruct the analytics on top of
+    it. Renders at the END of the appendix body (above the submission
+    checklist) so the trailing structure is: tables → reproducibility
+    line → audit disclosure → checklist."""
+    _add_heading(doc, "Reproducibility")
+    hash_display = (data_hash if data_hash else "[DATA PENDING]")
+    body = (
+        f"Data hash: {hash_display}\n"
+        f"Generated at: "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        "Every figure in this appendix traces to the strategy_results_cache "
+        "row identified by the hash above. The same hash on the analytics "
+        "metric rows confirms the bootstrap CIs, factor loadings, crisis "
+        "performance, and transaction-cost sensitivity were computed from "
+        "the same underlying data as the strategy table."
+    )
+    _add_body(doc, body)
+
+
+def build_analytical_appendix(
+    data: dict[str, Any], narratives: dict[str, str],
+    *,
+    substitution_table: dict[str, str] | None = None,
+) -> bytes:
+    """
+    The Analytical Appendix — the evidentiary record behind every
+    claim in the executive brief and the panel presentation. Eight
+    sections, each opening with a short Academic Writer paragraph
+    then the data in an APA-style table:
+
+      A. Data and Methodology          — study_period + summary_statistics
+      B. Full Strategy Performance     — strategy_results_cache
+      C. Statistical Tests             — strategy_results_cache (p-values)
+      D. Bootstrap Confidence Intervals — academic_analytics metric
+      E. Factor Loadings               — academic_analytics metric (Carhart)
+      F. Crisis Window Performance     — crisis_performance metric
+      G. Transaction Cost Sensitivity  — oos_cost_sensitivity metric
+      H. Validation Audit Summary      — invariant_summary metric +
+                                         audit_disclosures bundle
+
+    Trailing structure: Reproducibility line (data_hash + timestamp),
+    Audit Disclosure Appendix (statistical audit + methodology QA +
+    intentional overrides — the same renderer the brief uses), and
+    the standard Submission Checklist.
+
+    Pure assembly. No LLM calls. No database reads.
+    """
+    doc = _new_document()
+
+    # ── Title page ────────────────────────────────────────────────────────
+    for _ in range(3):
+        doc.add_paragraph()
+    _add_title_lines(doc, [
+        "Asset Allocation Strategies and Risk-Adjusted Performance",
+    ], big_first=True)
+    doc.add_paragraph()
+    _add_title_lines(doc, [
+        "Analytical Appendix",
+        "FNA 670 — Summer 2026",
+        "Forest Capital / McColl School of Business",
+        date.today().strftime("%B %d, %Y"),
+    ])
+    _ai_draft_notice(doc)
+    _timestamp_line(doc)
+    _add_review_warning_box(doc)
+    doc.add_page_break()
+
+    # June 28 2026 -- substitution-table-aware narrative reader.
+    # When a substitution_table is supplied (the post-Phase-1
+    # deferred-substitution path), narratives stored on the
+    # editor draft contain raw {{TOKEN}} placeholders that need
+    # resolving at export time. When None (legacy path), the
+    # narratives already carry resolved values from generation-
+    # time substitution and the helper is a no-op.
+    def _narrative(key: str) -> str:
+        raw_text = narratives.get(key, "[DATA PENDING]")
+        if substitution_table is None:
+            return raw_text
+        return _apply_substitutions(raw_text, substitution_table)
+
+    # ── Section A — Data and Methodology ──────────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[0])
+    _add_brief_body(doc, _narrative("appendix_a"))
+    h, r = table_summary_statistics(data.get("summary_statistics", []))
+    _add_table(doc, "Table A1. Summary Statistics by Asset Class", h, r)
+
+    # ── Section B — Full Strategy Performance ─────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[1])
+    _add_brief_body(doc, _narrative("appendix_b"))
+    h, r = table_strategy_performance_full(
+        data.get("strategy_results") or {})
+    _add_table(doc, "Table B1. Full-Period Performance by Strategy "
+                    "(sorted by Sharpe)", h, r)
+
+    # ── Section C — Statistical Tests ─────────────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[2])
+    _add_brief_body(doc, _narrative("appendix_c"))
+    h, r = table_statistical_tests(data.get("strategy_results") or {})
+    _add_table(doc, "Table C1. Statistical Tests by Strategy "
+                    "(paired-t, FDR-corrected, DSR, PSR, SPA)", h, r)
+
+    # ── Section D — Bootstrap Confidence Intervals ────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[3])
+    _add_brief_body(doc, _narrative("appendix_d"))
+    h, r = table_bootstrap_ci(data.get("bootstrap_ci_sharpe") or [])
+    _add_table(doc, "Table D1. Sharpe Ratio with 95% Bootstrap CI "
+                    "(block bootstrap, length 12, 10,000 resamples)", h, r)
+
+    # ── Section E — Factor Loadings ───────────────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[4])
+    _add_brief_body(doc, _narrative("appendix_e"))
+    h, r = table_factor_loadings(data.get("factor_loadings", []))
+    _add_table(doc, "Table E1. Carhart Four-Factor Loadings by Strategy "
+                    "(* significant at p < .05)", h, r)
+
+    # ── Section F — Crisis Window Performance ─────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[5])
+    _add_brief_body(doc, _narrative("appendix_f"))
+    h, r = table_crisis_performance(data.get("crisis_performance"))
+    _add_table(doc, "Table F1. Cumulative Return by Strategy and "
+                    "Crisis Window", h, r)
+    # June 28 2026 -- explicit footnote explaining the dagger
+    # symbol on partial-overlap cells (the title-parenthetical
+    # form was too easy to miss; operator reported every cell
+    # carrying † with no visible explanation).
+    _footnote = doc.add_paragraph()
+    _footnote_run = _footnote.add_run(
+        "Note. † indicates partial-overlap of the strategy's "
+        "available return history with the crisis window. "
+        "Strategies that began trading after a crisis window "
+        "opened, or had data gaps within the window, are "
+        "flagged so the cumulative-return figure is read with "
+        "that context.")
+    _footnote_run.italic = True
+    _footnote_run.font.size = Pt(9)
+
+    # ── Section G — Transaction Cost Sensitivity ──────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[6])
+    _add_brief_body(doc, _narrative("appendix_g"))
+    h, r = table_cost_sensitivity(data.get("cost_sensitivity"))
+    _add_table(doc, "Table G1. Net-of-Cost Sharpe at 10/15/20 bps "
+                    "per Material Rebalance (OOS Window)", h, r)
+
+    # ── Section H — Validation Audit Summary ──────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[7])
+    _add_brief_body(doc, _narrative("appendix_h"))
+    h, r = table_invariant_summary(data.get("invariant_summary"))
+    _add_table(doc, "Table H1. Latest Warm Invariant Verdict "
+                    "(deterministic detection only — see "
+                    "docs/INVARIANTS.md)", h, r)
+
+    # ── Inline-figure placement (June 25 2026) ────────────────────────────
+    # Mirrors _place_brief_figures_inline -- the appendix carries
+    # the same four canonical APA chart images near the prose
+    # that references them so the document is self-standing.
+    # Both builders share INLINE_FIGURE_TRIGGERS; the appendix
+    # narratives reference the same concepts so the anchors fire
+    # on the same trigger phrases. Any chart whose anchor isn't
+    # matched in the prose appends at the end via the fallback.
+    # Substitution table is None for the appendix path -- the
+    # {{TOKEN}} placeholders in the figure Note. text degrade to
+    # literal text the audit will flag on the next regen rather
+    # than silently misreporting.
+    appendix_placement = _place_brief_figures_inline(
+        doc, data, None)
+    appendix_inline_placed = {
+        k for k, v in appendix_placement.items() if v == "inline"}
+    _embed_brief_figures(
+        doc, data, None,
+        skip_keys=appendix_inline_placed)
+
+    # ── Reproducibility footer line ───────────────────────────────────────
+    _add_reproducibility_line(doc, data.get("data_hash"))
+
+    # ── Audit Disclosure Appendix (reuses the brief renderer) ─────────────
+    _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
+
+    _add_submission_checklist(doc)
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ── Presentation Script (June 21 2026) ───────────────────────────────────
+#
+# A rehearsal workbook that bundles the cached deck story plan's
+# full_script (Pass 2, Opus) and anticipated_questions (Pass 3, Grok)
+# into a single .docx. Pure cache read + format: no LLM call, no DB
+# write. The endpoint /api/v1/export/presentation-script reads
+# story_plans for (current_data_hash, 'deck') and hands the cached
+# plan dict to build_presentation_script -- this stays a pure
+# assembly function in the academic_docx contract.
+
+# Word-for-word script delimiter the deck Pass 2 emits. The full_script
+# blob looks like:
+#   [SLIDE 1: Does Diversification Beat 100% Equity?]
+#   <prose for slide 1>
+#
+#   [SLIDE 2: Static, Dynamic, or Benchmark?]
+#   <prose for slide 2>
+# Each marker becomes a bold sub-heading in the rendered script so the
+# presenter can flip to any slide on paper without scanning prose.
+_SLIDE_MARKER_RE = re.compile(r"^\s*\[SLIDE\s+(\d+):\s*(.+?)\]\s*$")
+
+# Hardcoded slide timings per the user spec for the 12-slide deck
+# (June 22 2026 -- agenda insert + AI/demo flip):
+#   slides 1, 3-9, 12 target 1.2-1.7 minutes each
+#   slide 2 (agenda) targets 0.5 minutes (structural walkthrough)
+#   slide 10 (AI methodology) targets 2.0 minutes
+#   slide 11 (AnalyticsDesk live demo) targets 3.5 minutes
+# Sum is approximately 18-20 minutes for the panel presentation.
+_SLIDE_TIMINGS_MIN: list[tuple[int, float, str]] = [
+    (1,  1.7, ""),
+    (2,  0.5, "Agenda"),
+    (3,  1.5, ""),
+    (4,  1.7, ""),
+    (5,  1.7, ""),
+    (6,  1.5, ""),
+    (7,  1.5, ""),
+    (8,  1.5, ""),
+    (9,  1.2, ""),
+    (10, 2.0, ""),
+    (11, 3.5, "Live demo"),
+    (12, 1.5, ""),
+]
+
+
+def _add_script_callout(doc: Document, body: str) -> None:
+    """Light-amber callout used for the 'how to use this script'
+    block + the Grok-attribution line. Reuses the shading helper
+    + the body-font register but renders a single paragraph (not the
+    bordered table the brief uses for human-input prompts)."""
+    para = doc.add_paragraph()
+    para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    para.paragraph_format.space_after = Pt(6)
+    run = para.add_run(body)
+    run.font.name = _BODY_FONT
+    run.font.size = Pt(11)
+    run.italic = True
+    _set_run_color(run, "#92400e")
+
+
+def _render_full_script(doc: Document, full_script: str) -> None:
+    """Walks the full_script line by line. Lines matching
+    [SLIDE N: title] become bold size-12 sub-headings on their own
+    paragraph (page-flippable on paper). Other lines flow as normal
+    body paragraphs, preserving blank-line separation."""
+    if not full_script or not full_script.strip():
+        _add_body(
+            doc,
+            "Presenter script not yet available. Ensure the deck "
+            "story plan has completed Pass 2 (Opus full-script).")
+        return
+
+    buffer: list[str] = []
+
+    def _flush_body() -> None:
+        if not buffer:
+            return
+        block = "\n".join(buffer).strip()
+        if block:
+            _add_body(doc, block)
+        buffer.clear()
+
+    for raw in full_script.splitlines():
+        marker = _SLIDE_MARKER_RE.match(raw)
+        if marker:
+            _flush_body()
+            slide_num, slide_title = marker.group(1), marker.group(2).strip()
+            heading_para = doc.add_paragraph()
+            heading_para.paragraph_format.line_spacing_rule = (
+                WD_LINE_SPACING.SINGLE)
+            heading_para.paragraph_format.space_before = Pt(12)
+            heading_para.paragraph_format.space_after = Pt(4)
+            heading_run = heading_para.add_run(
+                f"SLIDE {slide_num}: {slide_title}")
+            heading_run.bold = True
+            heading_run.font.name = _BODY_FONT
+            heading_run.font.size = Pt(13)
+            _set_run_color(heading_run, "#1e293b")
+        else:
+            buffer.append(raw)
+    _flush_body()
+
+
+def _render_anticipated_questions(
+    doc: Document, questions: list[dict] | None,
+) -> None:
+    """Walks the anticipated_questions list (Grok Pass 3 output).
+    Each entry is rendered as: difficulty badge + numbered question
+    (bold) + suggested answer (normal weight). On an empty or null
+    list, renders the spec'd fallback message instead of crashing."""
+    if not questions:
+        _add_body(
+            doc,
+            "Q&A preparation not yet available. Ensure the deck "
+            "story plan has completed all four passes.")
+        return
+
+    for idx, q in enumerate(questions, start=1):
+        if not isinstance(q, dict):
+            continue
+        question_text = str(q.get("question") or "").strip()
+        answer_text = str(
+            q.get("suggested_answer")
+            or q.get("answer") or "").strip()
+        if not question_text:
+            continue
+        difficulty_raw = str(q.get("difficulty") or "").strip().upper()
+        # Normalise to the two badges the spec calls out; anything else
+        # (LOW, EASY, blank) defaults to MEDIUM so the renderer always
+        # surfaces a badge -- the presenter scans for HARDs.
+        difficulty = "HARD" if difficulty_raw == "HARD" else "MEDIUM"
+
+        header_para = doc.add_paragraph()
+        header_para.paragraph_format.line_spacing_rule = (
+            WD_LINE_SPACING.SINGLE)
+        header_para.paragraph_format.space_before = Pt(10)
+        header_para.paragraph_format.space_after = Pt(2)
+        badge_run = header_para.add_run(f"Q{idx}  [{difficulty}]  ")
+        badge_run.bold = True
+        badge_run.font.name = _BODY_FONT
+        badge_run.font.size = Pt(11)
+        _set_run_color(
+            badge_run,
+            "#b91c1c" if difficulty == "HARD" else "#1e3a8a")
+        q_run = header_para.add_run(question_text)
+        q_run.bold = True
+        q_run.font.name = _BODY_FONT
+        q_run.font.size = Pt(12)
+
+        label_para = doc.add_paragraph()
+        label_para.paragraph_format.line_spacing_rule = (
+            WD_LINE_SPACING.SINGLE)
+        label_para.paragraph_format.space_after = Pt(2)
+        label_run = label_para.add_run("Suggested answer:")
+        label_run.italic = True
+        label_run.font.name = _BODY_FONT
+        label_run.font.size = Pt(11)
+        _set_run_color(label_run, "#475569")
+
+        _add_body(doc, answer_text)
+
+
+def _render_timing_reference(doc: Document) -> None:
+    """Four-column table: Slide | Title | Target Time | Notes. Title
+    column pulls verbatim from academic_deck.SLIDE_TITLES so the
+    reference stays in lockstep with the rendered deck."""
+    from tools.academic_deck import SLIDE_TITLES
+
+    table = doc.add_table(rows=1 + len(_SLIDE_TIMINGS_MIN), cols=4)
+    table.style = "Table Grid"
+    header_cells = table.rows[0].cells
+    for cell, label in zip(
+            header_cells,
+            ("Slide", "Title", "Target", "Notes")):
+        _shade_cell(cell, "#1e293b")
+        para = cell.paragraphs[0]
+        para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        run = para.add_run(label)
+        run.bold = True
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(11)
+        _set_run_color(run, "#ffffff")
+
+    for row_idx, (slide_n, mins, note) in enumerate(
+            _SLIDE_TIMINGS_MIN, start=1):
+        title = (SLIDE_TITLES[slide_n - 1]
+                 if slide_n - 1 < len(SLIDE_TITLES) else "")
+        row = table.rows[row_idx].cells
+        for cell, text in zip(
+                row,
+                (str(slide_n), title, f"{mins:.1f} min", note)):
+            para = cell.paragraphs[0]
+            para.paragraph_format.line_spacing_rule = (
+                WD_LINE_SPACING.SINGLE)
+            run = para.add_run(text)
+            run.font.name = _BODY_FONT
+            run.font.size = Pt(11)
+
+
+def build_presentation_script(
+    *,
+    full_script: str | None,
+    anticipated_questions: list[dict] | None,
+    computed_at: str | None,
+) -> bytes:
+    """Builds the Presentation Script .docx from the cached deck story
+    plan's Pass 2 output (full_script) and Pass 3 output
+    (anticipated_questions). Pure assembly: no LLM call, no DB read.
+
+    The endpoint reads story_plans WHERE (data_hash, document_type='deck')
+    and hands the cached values here. A null or empty full_script /
+    anticipated_questions degrades to a clear "not yet available"
+    note rather than producing a half-empty document.
+    """
+    doc = _new_document()
+
+    # ── Title page ──────────────────────────────────────────────────
+    today_display = date.today().strftime("%B %d, %Y")
+    prepared_line = (
+        f"Prepared: {today_display}"
+        if not computed_at else f"Prepared: {computed_at[:10]}")
+    _add_title_lines(doc, [
+        "Forest Capital — Presentation Script",
+        "FNA 670 Practicum — Queens University of Charlotte",
+        "McColl School of Business",
+        prepared_line,
+        _AI_DRAFT_BANNER_TEXT,
+    ], big_first=True)
+
+    # ── Section 1: How to use this script ───────────────────────────
+    _add_heading(doc, "HOW TO USE THIS SCRIPT")
+    _add_body(doc, (
+        "This script is the word-for-word spoken content for the "
+        "18-20 minute presentation. Each section is labelled by "
+        "slide number and title. Speaker notes in the PPTX file "
+        "match this script."))
+    _add_body(doc, (
+        "Read through the full script before rehearsing. Time each "
+        "slide section individually. Slides 1-8 and 10-11 target "
+        "1.2-1.7 minutes each. Slide 9 (live demo) targets 3.5 "
+        "minutes."))
+    _add_body(doc, (
+        "The Q&A section at the end contains the hardest questions "
+        "the panel is likely to ask, generated by the Grok "
+        "contrarian agent. Rehearse the suggested answers but use "
+        "your own words."))
+
+    # ── Section 2: Presenter Script ─────────────────────────────────
+    _add_heading(doc, "PRESENTER SCRIPT")
+    _render_full_script(doc, full_script or "")
+
+    # ── Section 3: Anticipated Q&A ──────────────────────────────────
+    _add_heading(doc, "ANTICIPATED COMMITTEE QUESTIONS")
+    _add_script_callout(doc, (
+        "Generated by Grok contrarian agent — these are the hardest "
+        "questions, not softballs."))
+    _render_anticipated_questions(doc, anticipated_questions)
+
+    # ── Section 4: Slide Timing Reference ───────────────────────────
+    _add_heading(doc, "SLIDE TIMING REFERENCE")
+    _render_timing_reference(doc)
+
     buf = BytesIO()
     doc.save(buf)
     return buf.getvalue()

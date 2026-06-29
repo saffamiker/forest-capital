@@ -33,6 +33,7 @@ import {
   GraduationCap, Loader2, X, ChevronDown, ChevronRight, AlertTriangle,
 } from 'lucide-react'
 import Markdown from './Markdown'
+import CriticFindingsPanel from './CriticFindingsPanel'
 import IndependentReviewCard from './IndependentReviewCard'
 import { useIsTeamMember } from '../hooks/usePermissions'
 import { trackFeature } from '../lib/activityLogger'
@@ -46,6 +47,9 @@ import {
   MacroAttributionFooter,
 } from './MacroCitation'
 import { useAcademicReviewStore } from '../stores/academicReviewStore'
+import CrossDocumentReviewConfirmModal
+  from './CrossDocumentReviewConfirmModal'
+import FocusBriefModal from './FocusBriefModal'
 
 
 // Peer agent id → display name for the accordion. Mirrors the
@@ -224,6 +228,19 @@ export default function AcademicReviewSection() {
   const clearStore  = useAcademicReviewStore((s) => s.clear)
 
   const [peersOpen, setPeersOpen] = useState(false)
+  // June 22 2026 -- confirmation gate before the expensive cross-
+  // document pass kicks off. onRun opens the modal; onConfirmRun
+  // is the modal's onConfirm callback that actually fires the SSE
+  // POST.
+  //
+  // June 27 2026 -- per the user spec, the focus-brief modal
+  // CHAINS AFTER the existing confirm modal (does NOT replace it).
+  // Flow: button -> CrossDocumentReviewConfirmModal -> user
+  // confirms -> FocusBriefModal -> Skip / Run Review -> SSE
+  // fires. focusBriefOpen tracks the second modal independently;
+  // both close on the actual SSE kickoff.
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [focusBriefOpen, setFocusBriefOpen] = useState(false)
 
   const running = phase === 'consulting' || phase === 'streaming'
   const hasResult = result !== null
@@ -233,13 +250,27 @@ export default function AcademicReviewSection() {
     && cachedHash !== dataHash
 
   const onRun = () => {
+    // Open the confirm modal -- DO NOT fire the SSE yet.
+    setConfirmOpen(true)
+  }
+
+  const onConfirmRun = () => {
+    // June 27 2026 -- confirm closes, focus-brief opens. SSE does
+    // NOT fire here -- it fires on Skip / Submit from the focus-
+    // brief modal so the chain is: confirm -> brief -> review.
+    setConfirmOpen(false)
+    setFocusBriefOpen(true)
+  }
+
+  // June 27 2026 -- shared kickoff used by both Skip (null brief)
+  // and Submit (typed brief). Centralises the trackFeature +
+  // clearStore + token-read so the two paths can't drift.
+  const _kickoffReview = (focusBrief: string | null) => {
+    setFocusBriefOpen(false)
     trackFeature('academic_review_trigger')
-    // Re-run path: clear first, then kick a fresh run. The store's
-    // runReview also clears its own internal result, so this clear
-    // is redundant in steady state but explicit for readability.
     clearStore()
     const token = localStorage.getItem('fc_session_token') ?? ''
-    void runReview(dataHash, token)
+    void runReview(dataHash, token, focusBrief)
   }
 
   // Auto-restore from cache on mount — purely a read; the
@@ -264,6 +295,14 @@ export default function AcademicReviewSection() {
 
   return (
     <div className="space-y-3">
+      <CrossDocumentReviewConfirmModal
+        open={confirmOpen}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={onConfirmRun} />
+      <FocusBriefModal
+        open={focusBriefOpen}
+        onSkip={() => _kickoffReview(null)}
+        onSubmit={(brief) => _kickoffReview(brief)} />
       {/* Trigger card — prominent border so the action is visible.
           Read content (verdict + peers) renders below; this card is
           the only team-gated surface. */}
@@ -273,15 +312,18 @@ export default function AcademicReviewSection() {
           <div className="min-w-0">
             <h3 className="text-white font-semibold text-sm flex items-center gap-1.5">
               <GraduationCap className="w-4 h-4 text-warning" />
-              Academic Review
+              Cross-Document Review
             </h3>
             {phase === 'idle' && !hasResult && (
               <p className="text-muted text-xs mt-1 leading-relaxed">
-                Five-section peer review of the portfolio research by
-                the Council's academic advisor panel — a
-                rubric-mapped verdict (Strong / Developing /
-                Needs Work). Run it before each deadline to see
-                exactly where the project stands.
+                Full council pass across all four deliverables --
+                brief, deck, appendix, and presentation script.
+                Rubric-mapped verdict (Strong / Developing /
+                Needs Work). Resource-intensive; run as a final
+                check after every document has been generated and
+                edited. For lighter feedback on a single document,
+                each editor's Writing Assistant has its own
+                per-document review.
               </p>
             )}
             {phase === 'idle' && hasResult && (
@@ -328,7 +370,9 @@ export default function AcademicReviewSection() {
                 : <GraduationCap className="w-4 h-4" />}
               {running
                 ? 'Reviewing…'
-                : (hasResult ? 'Re-run Academic Review' : 'Run Academic Review')}
+                : (hasResult
+                  ? 'Re-run Cross-Document Review'
+                  : 'Run Cross-Document Review')}
             </TeamActionButton>
           </div>
         </div>
@@ -409,6 +453,20 @@ export default function AcademicReviewSection() {
           SSE frame has landed. Never affects the primary score or
           gates. */}
       <IndependentReviewCard review={independentReview} />
+
+      {/* Concern 7 (revised) -- adversarial critic + debate-round
+          panel. Renders nothing if the SSE pass hasn't reached the
+          critic step yet; once the critic_findings frame lands the
+          panel surfaces the structured findings + the streamed
+          council response from debate_round_arbiter chunks. */}
+      <CriticFindingsPanel
+        criticResult={result?.criticResult ?? null}
+        debateRoundText={result?.debateRoundText ?? ''}
+        criticMinorOnly={result?.criticMinorOnly ?? false}
+        debateId={result?.debateId ?? null}
+        fixProposals={result?.fixProposals ?? {}}
+        documentType={
+          result?.criticResult?.document_scope ?? 'full_package'} />
 
       {/* Peer responses — supporting detail, collapsed by default. */}
       {peerEntries.length > 0 && (

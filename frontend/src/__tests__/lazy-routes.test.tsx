@@ -28,7 +28,6 @@ describe('App.tsx — lazy-route contract', () => {
     'StoryboardEditor',
     'SectionEditor',
     'DocumentEditor',
-    'ReportWriter',
   ]
 
   lazyRoutes.forEach((route) => {
@@ -55,7 +54,11 @@ describe('App.tsx — lazy-route contract', () => {
     // the suspended render. A simple count check: the file has
     // one Suspense per lazy route.
     const suspenseCount = (APP_TSX.match(/<Suspense /g) || []).length
-    expect(suspenseCount).toBeGreaterThanOrEqual(6)
+    // PR #338 retired the ReportWriter and PeerReview lazy routes;
+    // five lazy-loaded pages remain (StatisticalEvidence,
+    // RegimeAnalysis, StoryboardEditor, SectionEditor,
+    // DocumentEditor).
+    expect(suspenseCount).toBeGreaterThanOrEqual(5)
   })
 
   it('the cached page-load fallback exists', () => {

@@ -7,7 +7,7 @@ AI-generated narrative:
 
   POST /api/v1/export/midpoint-paper      → 3-page midpoint paper (.docx)
   POST /api/v1/export/executive-brief     → 5-page executive brief (.docx)
-  POST /api/v1/export/presentation-deck   → 10-slide final deck (.pptx)
+  POST /api/v1/export/presentation-deck   → 6-slide final deck (.pptx)
 
 Two tiers, the same pattern as test_export_package.py:
   - Endpoint-contract tests run everywhere including CI. In the test
@@ -52,6 +52,7 @@ SESSION_HEADERS = {"X-API-Key": generate_session_token(TEAM_EMAIL)}
 MIDPOINT = "/api/v1/export/midpoint-paper"
 BRIEF = "/api/v1/export/executive-brief"
 DECK = "/api/v1/export/presentation-deck"
+APPENDIX = "/api/v1/export/analytical-appendix"
 
 _DOCX_CT = "wordprocessingml"
 _PPTX_CT = "presentationml"
@@ -59,6 +60,161 @@ _PPTX_CT = "presentationml"
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+# ── Brief-grounding stub fixture (June 21 2026, PR #364) ──────────────────
+#
+# PR #364 added 409 gates on _generate_deck_document and
+# _generate_appendix_document requiring a brief draft (and for
+# the deck, also an appendix draft) to exist on the user's
+# account. CI runs against a fresh DB with no drafts seeded, so
+# the gates fire and the legitimate deck / appendix contract
+# tests fail.
+#
+# Fix: an autouse fixture that monkeypatches the two grounding
+# helpers to return stub payloads. The deck / appendix tests
+# don't actually need real drafts -- they exercise the
+# generator's downstream behaviour (PPTX assembly, eight-section
+# appendix shape, etc.). The stub payloads carry valid content
+# strings so the upstream Pass-1 Opus call composes a non-empty
+# system prompt; the deck Pass-1 call still hits the test-env
+# Anthropic short-circuit (which the existing tests already
+# tolerated via [DATA PENDING] fallbacks).
+#
+# The fixture is intentionally NOT applied at module scope --
+# pytest's monkeypatch fixture is function-scoped. Tests that
+# want to exercise the GATE (i.e. the brief-grounding tests in
+# test_brief_grounding.py) can stub the grounding helpers
+# directly without this fixture interfering.
+
+
+@pytest.fixture(autouse=True)
+def _stub_brief_appendix_grounding(monkeypatch):
+    """Stub brief + appendix grounding helpers so the 409 gates
+    in _generate_deck_document / _generate_appendix_document do
+    NOT fire during the document-generation contract tests. CI
+    runs against a fresh DB with no drafts seeded; the stub
+    bypasses the gate without requiring DB fixtures."""
+    async def _fake_brief():
+        return {
+            "content_text": (
+                "## Executive Summary\n\nThe blend outperforms "
+                "benchmark on OOS Sharpe.\n\n"
+                "## Methodology Overview\n\nWe use HMM regime "
+                "detection.\n\n"
+                "## Key Findings and Insights\n\nDrawdown "
+                "reduction of 50% versus benchmark.\n\n"
+                "## Limitations and Risks\n\nSample size 40 "
+                "months.\n\n"
+                "## Final Recommendations\n\nWe recommend the "
+                "regime-conditional blend.\n\n"
+                "## Visuals\n\nFour charts demonstrate the "
+                "findings.\n"),
+            "content_hash": "test_brief_hash",
+            "draft_id": 1,
+        }
+
+    async def _fake_appendix():
+        return {
+            "content_text": (
+                "## Data Sources and Methodology\n\nS&P 500 + "
+                "AGG + HYG.\n\n"
+                "## Portfolio Construction\n\nFull 10-strategy "
+                "rules.\n\n"
+                "## Calculations and Models\n\nFDR + Carhart + "
+                "bootstrap.\n\n"
+                "## Performance Metrics\n\n10-strategy table.\n\n"
+                "## Sensitivity and Robustness\n\n10/15/20bp "
+                "cost sensitivity.\n"),
+            "content_hash": "test_appendix_hash",
+            "draft_id": 2,
+        }
+
+    monkeypatch.setattr(
+        "tools.brief_grounding.get_brief_for_grounding",
+        _fake_brief)
+    monkeypatch.setattr(
+        "tools.brief_grounding.get_appendix_for_grounding",
+        _fake_appendix)
+
+    # June 21 2026 (PR #365) -- pre-flight cache gate on appendix
+    # generation 409s when strategy_results / bootstrap_ci_sharpe /
+    # factor_loadings / cost_sensitivity are empty. CI has cold
+    # caches so the gate fires and the legitimate appendix
+    # content tests fail with 409 instead of producing the
+    # artifact. Stub the data-gather fn so the gate sees populated
+    # caches; downstream behaviour (8-section assembly,
+    # reproducibility line, editor-draft creation) still
+    # exercises against the [DATA PENDING] fallbacks where the
+    # generators haven't been stubbed.
+    async def _fake_appendix_data(data_hash=None):
+        return {
+            "available": True,
+            "study_period": {"start": "2002-07-31",
+                             "end": "2026-05-31",
+                             "n_months": 287},
+            "summary_statistics": [],
+            "regime_conditional": [],
+            "drawdown_comparison": [],
+            "factor_loadings": [{"strategy": "STUB"}],
+            "cumulative_returns": {},
+            "rolling_correlation": {},
+            "strategy_results": {"STUB": {"sharpe_ratio": 0.5}},
+            "strategy_metadata": {},
+            "risk_free_rate": None,
+            "team_summary": {},
+            "last_review_text": None,
+            "academic_docs": [],
+            "audit_disclosures": None,
+            "bootstrap_ci_sharpe": [{"strategy": "STUB"}],
+            "crisis_performance": None,
+            "cost_sensitivity": {"net_sharpe_15bp": 0.5},
+            "invariant_summary": None,
+            "data_hash": "test_hash_for_appendix_fixture",
+        }
+
+    monkeypatch.setattr(
+        "tools.academic_export.gather_analytical_appendix_data",
+        _fake_appendix_data)
+    # The appendix call site re-imports from the same path inside
+    # the function, so the monkeypatch at the import name is
+    # sufficient.
+
+    # June 22 2026 (hash-match strictness PR) -- the appendix
+    # pre-flight gate now ALSO computes the canonical strategy
+    # hash via _compute_data_hash(n_rows, last_date, 10) and
+    # verifies strategy_results_cache + each analytics metric
+    # carries a row AT THAT HASH. Stub the inputs so the gate
+    # passes for these document-generation contract tests
+    # (which exercise downstream behaviour, not the gate).
+    import pandas as pd
+
+    async def _fake_history_async():
+        dates = pd.date_range(
+            end="2026-05-31", periods=287, freq="ME")
+        equity = pd.Series([1.0] * 287, index=dates)
+        return {"equity_monthly": equity}
+
+    monkeypatch.setattr(
+        "tools.data_fetcher.get_full_history_async",
+        _fake_history_async)
+
+    async def _fake_strategy_cache(_h):
+        return {"STUB": {"sharpe_ratio": 0.5}}
+
+    async def _fake_metric_by_hash(kind, _h):
+        if kind == "academic_analytics":
+            return {"bootstrap_ci_sharpe": [{"strategy": "STUB"}],
+                    "factor_loadings": [{"strategy": "STUB"}]}
+        if kind == "oos_cost_sensitivity":
+            return {"net_sharpe_15bp": 0.5}
+        return None
+
+    monkeypatch.setattr(
+        "tools.cache.get_strategy_cache", _fake_strategy_cache)
+    monkeypatch.setattr(
+        "tools.precomputed_analytics.get_metric_by_hash",
+        _fake_metric_by_hash)
 
 
 def _docx_text(content: bytes) -> str:
@@ -96,12 +252,19 @@ class TestDocumentGenerationContract:
     # CONTENT checks call the generation helpers directly — the
     # background task does not complete under Starlette's TestClient.
 
-    def test_midpoint_paper_returns_202_job(self):
+    def test_midpoint_paper_returns_410_gone_after_retirement(self):
+        # PR-B (June 2026) retired the midpoint pipeline. The endpoint
+        # is preserved as a 410 stub so existing clients receive a
+        # clear "this existed and is now gone" signal rather than a
+        # 404 connection error.
         resp = client.post(MIDPOINT, headers=SESSION_HEADERS)
-        assert resp.status_code == 202
+        assert resp.status_code == 410
         body = resp.json()
-        assert body["status"] == "pending"
-        assert body["job_id"]
+        assert body["error"] == "gone"
+        assert "Midpoint paper generation has been retired" \
+            in body["message"]
+        assert body["canonical_path"] == (
+            "/api/v1/export/executive-brief")
 
     def test_executive_brief_returns_202_job(self):
         resp = client.post(BRIEF, headers=SESSION_HEADERS)
@@ -115,47 +278,46 @@ class TestDocumentGenerationContract:
         assert resp.json()["status"] == "pending"
         assert resp.json()["job_id"]
 
-    def test_midpoint_document_is_a_valid_docx_with_headings(self):
-        import main
-        docx_bytes, filename, media, _draft = _run(
-            main._generate_midpoint_document(TEAM_EMAIL))
-        assert _DOCX_CT in media
-        assert filename.endswith(".docx")
-        text = _docx_text(docx_bytes)
-        assert "Data and Methodology" in text
-        assert "Preliminary Results" in text
-        assert "Roles and Division of Labor" in text
-        assert "Next Steps" in text
-        assert "AI DRAFT" in text          # mandatory banner
-        # May 26 2026 — the six [[BOB]] section callouts were removed.
-        # The Academic Writer's prose stands as each section's
-        # interpretation; no placeholder titles should appear.
-        for banned in (
-            "BOB — YOUR INTERPRETATION REQUIRED",
-            "BOB — PERSONALISE THIS SECTION",
-            "BOB — REVIEW AND REFINE",
-        ):
-            assert banned not in text, f"unexpected placeholder: {banned}"
-        # The submission checklist now lists only [[MOLLY]] callouts.
-        assert "[[BOB]]" not in text
-        # Cold caches in the test environment — every data-dependent
-        # section degrades to a [DATA PENDING] marker.
-        assert "[DATA PENDING]" in text
+    # PR-B (June 2026) deleted _generate_midpoint_document alongside
+    # the midpoint endpoint retirement; the corresponding docx-render
+    # smoke test is gone with it.
 
     def test_executive_brief_document_is_a_valid_docx_with_headings(self):
+        """June 18 2026 -- the brief was rewritten to the FNA 670
+        rubric's six required sections in rubric order. The earlier
+        (June 6) structure carried non-rubric "Five Human Decisions"
+        and "Part II preview" sections; rubric review against the
+        FNA 670 spec retired both. The six section headings below
+        match the rubric exactly."""
         import main
         docx_bytes, filename, media, _draft = _run(
             main._generate_brief_document(TEAM_EMAIL))
         assert _DOCX_CT in media
         assert filename.endswith(".docx")
         text = _docx_text(docx_bytes)
-        assert "Executive Summary" in text
-        assert "Methodology Overview" in text
-        assert "Key Findings" in text
-        assert "Limitations and Risks" in text
-        assert "Final Recommendations" in text
-        # May 26 2026 — the three judgement-section [[BOB]] callouts
-        # (FRAMING / JUDGEMENT / RECOMMENDATION) were removed.
+        # June 28 2026 -- the brief now has FIVE numbered
+        # sections. Section 6 'Visuals' was removed as an
+        # orphan: the brief_visuals agent was deleted June 26
+        # 2026 + the DOCX builder block was a leftover stub
+        # rendering "[DATA PENDING]" every export.
+        assert "1. Executive Summary" in text
+        assert "2. Methodology Overview" in text
+        assert "3. Key Findings and Insights" in text
+        assert "4. Limitations and Risks" in text
+        assert "5. Final Recommendations" in text
+        assert "6. Visuals to Demonstrate the Insights" not in (
+            text), (
+            "orphan Section 6 reappeared in the rendered DOCX")
+        # And the section order is preserved across 1-5.
+        idx = [text.index(h) for h in (
+            "1. Executive Summary",
+            "2. Methodology Overview",
+            "3. Key Findings and Insights",
+            "4. Limitations and Risks",
+            "5. Final Recommendations",
+        )]
+        assert idx == sorted(idx)
+        # The retired pre-rebuild [[BOB]] callouts must not creep back.
         for banned in (
             "BOB — YOUR FRAMING",
             "BOB — YOUR JUDGEMENT",
@@ -165,16 +327,30 @@ class TestDocumentGenerationContract:
         assert "[[BOB]]" not in text
         assert "[DATA PENDING]" in text
 
-    def test_presentation_deck_document_is_a_valid_10_slide_pptx(self):
+    def test_presentation_deck_document_is_a_valid_11_slide_pptx(self):
+        # June 27 2026 -- back to 11 slides after the Investment
+        # Case merge collapsed the old slide 3+4 setup + verdict
+        # into one split-panel slide to match Molly's reference
+        # deck. (Was 12 between 2026-06-22 agenda insert and
+        # the 2026-06-27 collapse.)
+        #
+        # PR 3 (June 27 2026): [DATA PENDING] is now NEVER emitted
+        # under any circumstances. Renderers log + skip missing
+        # elements silently. The cold-cache deck still builds with
+        # 11 slides + canonical titles (verified by the next test)
+        # -- it just carries empty bullet blocks for missing data.
         import main
+        from tools.academic_deck import DECK_SLIDE_COUNT
         pptx_bytes, filename, media, _draft = _run(
             main._generate_deck_document(TEAM_EMAIL))
         assert _PPTX_CT in media
         assert filename.endswith(".pptx")
         prs = Presentation(io.BytesIO(pptx_bytes))
-        assert len(prs.slides) == 10
-        # Cold caches / no matplotlib in the test env must not fail the deck.
-        assert "[DATA PENDING]" in _pptx_text(pptx_bytes)
+        assert len(prs.slides) == DECK_SLIDE_COUNT
+        assert DECK_SLIDE_COUNT == 11  # June 27 2026 Molly-aligned collapse
+        # PR 3 -- [DATA PENDING] string must NEVER appear in the
+        # exported PPTX, even in the cold-cache test path.
+        assert "[DATA PENDING]" not in _pptx_text(pptx_bytes)
 
     def test_presentation_deck_has_canonical_titles_and_notes(self):
         import main
@@ -182,10 +358,24 @@ class TestDocumentGenerationContract:
         pptx_bytes, *_ = _run(main._generate_deck_document(TEAM_EMAIL))
         prs = Presentation(io.BytesIO(pptx_bytes))
         text = _pptx_text(pptx_bytes)
-        # The ten canonical slide titles are always present (the builder
-        # falls back to them when the AI JSON is absent — the test env case).
+        # The canonical slide titles are present (the builder falls
+        # back to them when the AI JSON is absent -- the test env
+        # case). PR 3 (June 27 2026) -- slide titles that carry
+        # {{TOKEN}} placeholders get post-build substitution, so
+        # the rendered title is the value-substituted form (e.g.
+        # 'Live Regime Signal: TRANSITION at 95.4% Confidence' for
+        # slide 7). Test against the STATIC PREFIX before the
+        # first {{...}} token for those titles.
+        import re as _re
         for title in SLIDE_TITLES:
-            assert title in text, f"missing slide title: {title}"
+            # Static prefix is everything up to the first '{{'. A
+            # title with no tokens is unchanged.
+            static_prefix = _re.split(r"\{\{", title, maxsplit=1)[0]
+            # An empty prefix would mean the title starts with a
+            # token (none currently do) -- defensively fall back
+            # to the full title in that case.
+            needle = static_prefix.strip() or title
+            assert needle in text, f"missing slide title prefix: {needle}"
         # Every slide carries non-empty speaker notes (the verify caveat at
         # minimum); slide 1 additionally carries the submission checklist.
         for s in prs.slides:
@@ -194,35 +384,145 @@ class TestDocumentGenerationContract:
         assert "SUBMISSION CHECKLIST" in \
             prs.slides[0].notes_slide.notes_text_frame.text
 
-    def test_build_presentation_deck_embeds_charts_on_2_3_4_6_8(self):
-        # The chart-embedding contract, tested directly on the builder with a
-        # Pillow placeholder PNG (no matplotlib needed) so it is deterministic
-        # in every environment — the _generate_deck_document path renders None
-        # charts in the test env (cold data), so it cannot assert pictures.
+    def test_build_presentation_deck_embeds_charts_on_4_5_11(self):
+        # June 7 2026 (bridges #98 / #100) -- chart-bearing slides
+        # are 4, 5, 11 per the eleven-slide rebuild (rolling
+        # correlation on slide 4, OOS Sharpe / cumulative comparison
+        # proxy on slide 5, efficient frontier with the live blend
+        # marker on slide 11). The other eight slides carry stat
+        # cards, comparison tables, or pure prose -- no matplotlib.
         from pptx.enum.shapes import MSO_SHAPE_TYPE
-        from tools.academic_deck import SLIDE_CHARTS, build_presentation_deck
+        from tools.academic_deck import (
+            DECK_SLIDE_COUNT, SLIDE_CHARTS, build_presentation_deck)
         from tools.chart_render import _placeholder
-        png = _placeholder(240, 150)
         slides = [{"slide_number": n, "title": f"T{n}", "bullets": ["b1", "b2"],
                    "table_data": None, "speaker_notes": f"notes {n}"}
-                  for n in range(1, 11)]
-        charts = {n: png for n in SLIDE_CHARTS}  # 2, 3, 4, 6, 8
+                  for n in range(1, DECK_SLIDE_COUNT + 1)]
+        # June 26 2026 -- build a DISTINCT PNG per slide. The
+        # production renderer (_render_deck_slide_charts) produces
+        # three different matplotlib outputs (rolling_correlation,
+        # strategy_comparison, efficient_frontier), one per
+        # SLIDE_CHARTS role. The bytes-identity dedup added by
+        # the same PR that this test exercises would otherwise
+        # collapse all three placeholder PNGs to a single slide
+        # under the 'same bytes -> one slot' rule. The dedup is
+        # working as intended; the test setup is updated to match
+        # the production shape.
+        charts = {
+            n: _placeholder(240 + i, 150)
+            for i, n in enumerate(sorted(SLIDE_CHARTS))
+        }
         out = build_presentation_deck(slides, charts)
         prs = Presentation(io.BytesIO(out))
-        assert len(prs.slides) == 10
+        assert len(prs.slides) == DECK_SLIDE_COUNT
 
         def _has_pic(s):
             return any(sh.shape_type == MSO_SHAPE_TYPE.PICTURE
                        for sh in s.shapes)
-        for n in (2, 3, 4, 6, 8):
+        # Chart slides per SLIDE_CHARTS keys.
+        for n in SLIDE_CHARTS:
             assert _has_pic(prs.slides[n - 1]), f"slide {n} missing chart"
-        for n in (1, 5, 7, 9, 10):
-            assert not _has_pic(prs.slides[n - 1]), f"slide {n} unexpected chart"
+        # No-chart slides — all slides 1..N not in SLIDE_CHARTS.
+        chart_keys = set(SLIDE_CHARTS.keys())
+        for n in range(1, DECK_SLIDE_COUNT + 1):
+            if n in chart_keys:
+                continue
+            assert not _has_pic(prs.slides[n - 1]), (
+                f"slide {n} unexpected chart")
         for s in prs.slides:
             assert s.notes_slide.notes_text_frame.text.strip()
 
-    def test_all_three_require_authentication(self):
-        for endpoint in (MIDPOINT, BRIEF, DECK):
+    def test_analytical_appendix_returns_202_job(self):
+        resp = client.post(APPENDIX, headers=SESSION_HEADERS)
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "pending"
+        assert resp.json()["job_id"]
+
+    def test_analytical_appendix_document_has_eight_sections(self):
+        """The appendix must carry every one of the eight sections
+        regardless of cache state — a cold deploy renders the same
+        document shell with [DATA PENDING] markers in place of live
+        figures, so every section heading appears verbatim."""
+        import main
+        docx_bytes, filename, media, _draft = _run(
+            main._generate_appendix_document(TEAM_EMAIL))
+        assert _DOCX_CT in media
+        assert filename.endswith(".docx")
+        assert "analytical-appendix" in filename
+        text = _docx_text(docx_bytes)
+        section_headings = [
+            "A. Data and Methodology",
+            "B. Full Strategy Performance",
+            "C. Statistical Tests",
+            "D. Bootstrap Confidence Intervals",
+            "E. Factor Loadings",
+            "F. Crisis Window Performance",
+            "G. Transaction Cost Sensitivity",
+            "H. Validation Audit Summary",
+        ]
+        for h in section_headings:
+            assert h in text, f"missing section heading: {h}"
+        # And the section order is preserved A → H.
+        idx = [text.index(h) for h in section_headings]
+        assert idx == sorted(idx), (
+            f"section headings out of order: {idx}")
+        assert "AI DRAFT" in text                # mandatory banner
+        assert "Submission Checklist" in text    # CAVEAT 5
+
+    def test_analytical_appendix_carries_reproducibility_line(self):
+        """The Reproducibility line must surface the data hash + the
+        generation timestamp. In the test env the cache is cold so the
+        hash renders as [DATA PENDING]; the heading and the
+        explanatory copy are still present."""
+        import main
+        docx_bytes, *_ = _run(
+            main._generate_appendix_document(TEAM_EMAIL))
+        text = _docx_text(docx_bytes)
+        assert "Reproducibility" in text
+        assert "Data hash:" in text
+        assert "Generated at:" in text
+        # The cache traceability sentence — the part of the line that
+        # actually explains what the hash anchors.
+        assert "strategy_results_cache" in text
+
+    def test_analytical_appendix_renders_data_hash_when_supplied(self):
+        """Build the document directly to confirm a supplied data hash
+        appears verbatim. The endpoint reads the hash from the cache;
+        the builder renders whatever it is given."""
+        from tools.academic_docx import build_analytical_appendix
+        narratives = {
+            f"appendix_{ltr}": f"Intro for section {ltr.upper()}."
+            for ltr in "abcdefgh"
+        }
+        data = {
+            "summary_statistics": [],
+            "strategy_results": {},
+            "bootstrap_ci_sharpe": [],
+            "factor_loadings": [],
+            "crisis_performance": None,
+            "cost_sensitivity": None,
+            "invariant_summary": None,
+            "audit_disclosures": None,
+            "data_hash": "deadbeef12345678",
+        }
+        docx_bytes = build_analytical_appendix(data, narratives)
+        text = _docx_text(docx_bytes)
+        assert "deadbeef12345678" in text
+
+    def test_analytical_appendix_creates_editor_draft_or_falls_open(self):
+        """The endpoint creates an editor_drafts row alongside the
+        .docx so the document opens in the in-platform editor. In the
+        test env with no live DB the create_draft call fails open and
+        the helper returns draft_id=None — the file is still produced.
+        Either outcome (an integer id or None) is acceptable; what is
+        NOT acceptable is the helper raising."""
+        import main
+        _bytes, _name, _media, draft_id = _run(
+            main._generate_appendix_document(TEAM_EMAIL))
+        assert draft_id is None or isinstance(draft_id, int)
+
+    def test_all_four_require_authentication(self):
+        for endpoint in (MIDPOINT, BRIEF, DECK, APPENDIX):
             assert client.post(endpoint).status_code == 401
 
 

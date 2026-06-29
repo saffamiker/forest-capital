@@ -221,11 +221,32 @@ def generate_script(
     deck_draft: dict[str, Any],
     exec_brief: dict[str, Any] | None,
     midpoint: dict[str, Any] | None,
+    *,
+    substitution_table: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Builds the presentation-script content from a deck draft and the
     optional academic-context drafts. Returns content_json (TipTap),
     content_text, and the word / speaker / slide counts.
+
+    June 28 2026 (Phase 2 substitution-deferral) -- when
+    substitution_table is supplied AND DEFER_SUBSTITUTION_TO_EXPORT
+    is on, content_json preserves any {{TOKEN}} placeholders the
+    LLM emitted + content_text is derived from the substituted
+    projection (full-text search + word counts see resolved
+    values). When substitution_table is None or empty, both
+    columns share the raw text -- legacy behaviour.
+
+    The deck slides feeding the script's prompt already carry
+    resolved values (deck_to_editor substitutes at its boundary
+    regardless of flag, per the Phase 2 audit), so the
+    LLM-emitted script naturally references resolved values
+    rather than tokens. The substitution_table here is a
+    safety net for any {{TOKEN}} that survives in narrative
+    LLM output (the system prompt does not currently teach
+    placeholders, so this typically produces 0 substitutions
+    -- content_text == raw -- but the architecture is in
+    place for a future prompt update).
     """
     content = deck_draft.get("content_json") or {}
     slides = content.get("slides", []) if isinstance(content, dict) else []
@@ -245,7 +266,58 @@ def generate_script(
     if not raw or _slide_section_count(raw) < len(slides):
         raw = _fallback_script(slides)
 
+    # June 28 2026 -- soft-fail hard-lock for the script.
+    # Mirrors harness_narrative's wrap-and-persist behaviour
+    # for brief / appendix: scan raw for untoken-backed
+    # numerics; when violations remain, wrap each with
+    # <unverified>...</unverified> tags so the editor +
+    # document audit can flag them for human review.
+    # Operator directive (June 28 2026): document-type
+    # agnostic -- script gets the same soft-fail treatment.
+    # Fail-open: any scanner error leaves raw unchanged.
+    if substitution_table:
+        try:
+            from tools.untoken_numeric_check import (
+                find_untoken_backed_numerics,
+                wrap_unverified,
+            )
+            _script_viols = find_untoken_backed_numerics(
+                raw, substitution_table)
+            if _script_viols:
+                log.warning(
+                    "script_untoken_lock_soft_fail",
+                    remaining_violations=len(_script_viols),
+                    sample_offenders=[
+                        v.raw_value
+                        for v in _script_viols[:10]],
+                    note=(
+                        "hard-lock detected raw numerics in "
+                        "script output; wrapping with "
+                        "<unverified> tags for human review."))
+                raw = wrap_unverified(raw, _script_viols)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "script_untoken_lock_check_failed",
+                error=str(exc))
+
+    # June 28 2026 -- parallel substituted projection for
+    # content_text under deferred substitution.
     content_json, content_text = script_to_tiptap(raw)
+    if substitution_table:
+        try:
+            from tools.numeric_substitution import (
+                apply_substitutions,
+            )
+            substituted_raw, _ = apply_substitutions(
+                raw, substitution_table)
+            _, content_text_substituted = script_to_tiptap(
+                substituted_raw)
+            content_text = content_text_substituted
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "script_substitution_deferral_failed",
+                error=str(exc))
+
     return {
         "content_json": content_json,
         "content_text": content_text,

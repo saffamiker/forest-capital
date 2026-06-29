@@ -134,11 +134,88 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("cost_tracking_baseline_failed", error=str(exc))
+
+        # June 28 2026 -- platform-config startup seed for the
+        # DEFER_SUBSTITUTION_TO_EXPORT flag.
+        #
+        # Operator-confirmed root cause of Phase 2 deferral
+        # silently no-op-ing on drafts 74 / 77 (despite PRs
+        # #470 / #471 / #473 / #474): the platform_config row
+        # keys 'defer_substitution_to_export' kept disappearing
+        # on Render restarts. Without the row,
+        # platform_flags._read_flag returns its default of
+        # False, the deferral swap never fires, content_json
+        # gets resolved values, and the upgrade pass finds
+        # nothing to convert to token_value nodes.
+        #
+        # ON CONFLICT DO NOTHING means: if the row already
+        # exists (anyone has set it to true OR false via
+        # admin), respect that value -- never overwrite. The
+        # seed only inserts when the row is MISSING. Idempotent
+        # across restarts.
+        #
+        # Fail-open: a DB write failure logs + boot continues;
+        # the flag defaults to OFF in that case (legacy
+        # behaviour preserved).
+        try:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            async with AsyncSessionLocal() as ses:  # type: ignore[union-attr]
+                # CAST as JSONB so the column type matches.
+                res = await ses.execute(text(
+                    "INSERT INTO platform_config (key, value) "
+                    "VALUES (:k, CAST(:v AS JSONB)) "
+                    "ON CONFLICT (key) DO NOTHING"),
+                    {
+                        "k": "defer_substitution_to_export",
+                        "v": '{"enabled": true}',
+                    })
+                await ses.commit()
+                # rowcount > 0 -> we just inserted; == 0 ->
+                # row already existed (the ON CONFLICT path).
+                inserted = (res.rowcount or 0) > 0
+            log.info(
+                "platform_config_defer_substitution_seed",
+                inserted=inserted,
+                key="defer_substitution_to_export",
+                seeded_value=(
+                    '{"enabled": true}' if inserted else (
+                        "<existing row preserved>")))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "platform_config_defer_substitution_seed_failed",
+                error=str(exc))
+
         try:
             from tools.academic_context import refresh_academic_context
             await refresh_academic_context()
         except Exception as exc:  # noqa: BLE001
             log.warning("academic_context_warm_failed", error=str(exc))
+        # June 26 2026 -- auto-recover drafts left in the NULL-
+        # current-draft state by a generation job that landed the
+        # editor_drafts row but crashed before content_json was
+        # written. For each document_type with is_current=true AND
+        # content_json IS NULL, demotes the broken row + restores
+        # the most recent prior good draft as is_current. Fail-
+        # open: a DB error is logged and startup continues
+        # unaffected. Idempotent (a subsequent boot finds zero
+        # broken rows and returns 0).
+        try:
+            from tools.editor_drafts import (
+                recover_null_current_drafts,
+            )
+            recovered = await recover_null_current_drafts()
+            if recovered:
+                log.warning(
+                    "editor_null_current_drafts_recovered_at_startup",
+                    count=recovered)
+            else:
+                log.info(
+                    "editor_null_current_drafts_check_clean")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "editor_null_current_drafts_startup_failed",
+                error=str(exc))
         # Auto-extend the monthly data pipeline beyond the Excel file —
         # fetch any complete calendar months that have closed since the
         # last run. A daemon thread so startup never blocks on yfinance;
@@ -326,6 +403,74 @@ async def lifespan(app: FastAPI):
                 log.info("model_availability_check_scheduled")
             except Exception as exc:  # noqa: BLE001
                 log.warning("model_availability_check_schedule_failed",
+                            error=str(exc))
+
+        # June 27 2026 -- background regime-signals refresh ticker.
+        # The regime_signals_cache has a 15-minute TTL and used to go
+        # stale whenever no user activity triggered the HMM, blocking
+        # deck generation + light refresh via the hard gate at
+        # _refresh_regime_signals_for_deck. This ticker keeps the
+        # cache warm on a fixed 10-minute cadence (5 minutes of
+        # headroom before TTL expiry). Same fire-and-forget shape as
+        # the analytics auto-warm + model-availability tasks above
+        # so the lifespan handler never blocks on it. Per-iteration
+        # failures (FRED outage, detect_current_regime exception,
+        # cache write failure) log a warning and the loop continues
+        # to the next cycle -- the ticker NEVER crashes.
+        if not _is_test_env:
+            try:
+                from tools.cache import set_regime_cache
+                from tools.regime_detector import detect_current_regime
+
+                async def _regime_signals_ticker_task() -> None:
+                    # 10-second initial sleep -- defers past the
+                    # auto-warm (2s) + model-availability (5s) so the
+                    # cold-boot path doesn't pile detect_current_regime
+                    # on top of the heavier startup compute.
+                    await asyncio.sleep(10.0)
+                    while True:
+                        try:
+                            fresh = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    detect_current_regime),
+                                timeout=_REGIME_REFRESH_TIMEOUT_S)
+                            if not isinstance(fresh, dict):
+                                log.warning(
+                                    "regime_signals_background_refresh_failed",
+                                    error=(
+                                        "detect_current_regime "
+                                        "returned non-dict"),
+                                    return_type=type(fresh).__name__)
+                            else:
+                                await set_regime_cache(
+                                    fresh, ttl_minutes=15)
+                                log.info(
+                                    "regime_signals_background_refresh",
+                                    regime=fresh.get("regime"),
+                                    confidence=fresh.get(
+                                        "confidence"))
+                        except asyncio.CancelledError:
+                            # Clean shutdown -- propagate so the task
+                            # exits without logging a spurious failure.
+                            raise
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning(
+                                "regime_signals_background_refresh_failed",
+                                error=str(exc))
+                        # Sleep BETWEEN iterations -- a failed cycle
+                        # waits the full interval before retrying.
+                        # 10 min × 24h = 144 detect calls/day, and
+                        # the in-process TTL inside
+                        # detect_current_regime makes most a no-op.
+                        await asyncio.sleep(
+                            _REGIME_SIGNALS_TICKER_INTERVAL_S)
+
+                asyncio.create_task(_regime_signals_ticker_task())
+                log.info("regime_signals_ticker_scheduled",
+                         interval_s=(
+                             _REGIME_SIGNALS_TICKER_INTERVAL_S))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("regime_signals_ticker_schedule_failed",
                             error=str(exc))
     yield
     log.info("forest_capital_shutdown")
@@ -829,8 +974,13 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
             results_dict = await asyncio.to_thread(run_all_strategies, history)
             ranked = sorted(results_dict.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
 
-            # Write-through: persist for next cold start or Render restart
-            await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+            # Write-through: persist for next cold start or Render restart.
+            # Thread risk_free_monthly through so the invariant framework's
+            # 1b Sharpe-recomputation check uses the actual DTB3 series the
+            # backtester used (anything else produces false positives).
+            await set_strategy_cache(
+                strategy_hash, results_dict, n_observations=n_rows,
+                risk_free_monthly=history.get("risk_free_monthly"))
 
             cache_label = "miss" if not cached else "schema_refresh"
             return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": cache_label, "data_range": data_range}
@@ -905,10 +1055,14 @@ async def get_chart_data(request: Request, session: dict = Depends(require_auth)
                 )
             results_dict = run_all_strategies(history)
             # Write-through so the next /charts/data hit AND the next
-            # /compare hit both find a schema-compatible entry.
+            # /compare hit both find a schema-compatible entry. rf
+            # threaded so invariant 1b can recompute Sharpe against
+            # the same series the backtester used.
             try:
                 from tools.cache import set_strategy_cache
-                await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+                await set_strategy_cache(
+                    strategy_hash, results_dict, n_observations=n_rows,
+                    risk_free_monthly=history.get("risk_free_monthly"))
             except Exception as exc:
                 log.warning("chart_data_cache_write_failed", error=str(exc))
 
@@ -1182,6 +1336,226 @@ async def get_analytics_distribution(
         "return_distribution",
         lambda s: {"strategies": div.return_distribution(s)},
     )
+
+
+@app.get("/api/v1/strategy-cache/key-metrics")
+@limiter.limit("30/minute")
+async def get_strategy_cache_key_metrics(
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """Returns the key metrics from the current strategy cache,
+    organized for the Reports-page verification panel (June 21 2026).
+
+    The panel sits below the Generate Documents cards and gives Bob
+    a one-glance way to see every figure the brief and deck must
+    match. Every value is read directly from
+    strategy_results_cache for current_data_hash + the live CIO
+    recommendation overlay -- nothing computed inline, nothing
+    sourced from the brief or deck output.
+
+    Response shape:
+      {
+        "data_hash": "c421fb89",
+        "computed_at": "2026-06-21T...",
+        "available": bool,
+        "metrics": {
+          "strategy_performance": [{"label": "...", "value": "...",
+                                    "source": "strategy_cache"}],
+          "oos_metrics": [...],
+          "correlation_regime": [...],
+          "live_signal": [...]
+        }
+      }
+
+    Fail-open: a cold cache or missing CIO row returns
+    available=False with an empty metrics dict + a message; the
+    panel renders a "cache not yet warm" placeholder."""
+    try:
+        from tools.cache import get_latest_strategy_cache
+        from tools.cio_recommendation import (
+            compute_implied_asset_allocation, get_latest_recommendation,
+        )
+        from tools.numeric_substitution import (
+            format_corr, format_pct, format_sharpe,
+            format_months_from_days,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_imports_failed", error=str(exc))
+        return {
+            "data_hash": "", "available": False, "metrics": {},
+            "computed_at": None,
+            "message": "Cache helpers unavailable."}
+
+    # Read strategy_hash + computed_at directly from
+    # strategy_results_cache. The earlier version read
+    # current_data_hash() (a SHA256 of row counts + max dates
+    # across three tables) which is a LIGHTWEIGHT FINGERPRINT --
+    # NOT the strategy_results_cache.strategy_hash. They're two
+    # different hashes by design; the brief / deck / digest all
+    # cite the strategy_hash (c421fb89...), so the panel must
+    # match for consistency. Fix: read the canonical strategy hash
+    # directly from the cache row.
+    strategy_hash: str = ""
+    strategy_computed_at: str | None = None
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+                row = await session.execute(text(
+                    "SELECT strategy_hash, computed_at "
+                    "FROM strategy_results_cache "
+                    "ORDER BY computed_at DESC LIMIT 1"))
+                r = row.fetchone()
+                if r:
+                    strategy_hash = str(r[0] or "")
+                    strategy_computed_at = (
+                        str(r[1]) if r[1] else None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_hash_read_failed", error=str(exc))
+
+    try:
+        strategy_cache = await get_latest_strategy_cache() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_cache_failed", error=str(exc))
+        strategy_cache = {}
+
+    try:
+        cio_row = await get_latest_recommendation() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_cio_failed", error=str(exc))
+        cio_row = {}
+
+    # Compute the implied asset allocation from the live blend
+    # weights. The CIO row carries `blend_weights` but not the
+    # equity/IG/HY decomposition; `compute_implied_asset_allocation`
+    # multiplies blend_weights x strategy_cache avg_equity_weight /
+    # avg_ig_weight / avg_hy_weight to produce the live split.
+    # Returns {equity_pct, ig_bond_pct, hy_bond_pct, bond_pct,
+    # cash_pct} as fractions in [0, 1].
+    implied: dict = {}
+    try:
+        if cio_row.get("blend_weights"):
+            implied = await compute_implied_asset_allocation(
+                cio_row.get("blend_weights")) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_implied_alloc_failed", error=str(exc))
+
+    if not strategy_cache:
+        return {
+            "data_hash": strategy_hash[:8] or "—",
+            "available": False, "metrics": {},
+            "computed_at": strategy_computed_at,
+            "message": (
+                "Strategy cache is empty -- run the backtester or "
+                "warm the cache first.")}
+
+    benchmark = strategy_cache.get("BENCHMARK") or {}
+    classic = strategy_cache.get("CLASSIC_60_40") or {}
+    regime = strategy_cache.get("REGIME_SWITCHING") or {}
+
+    # Pull validated_constants from the same module the brief uses
+    # so the OOS Sharpe figures shown on the panel match what the
+    # brief substitutes for {{OOS_SHARPE_BLEND}} /
+    # {{OOS_SHARPE_BENCHMARK}}.
+    try:
+        from tools.academic_deck import (
+            OOS_SHARPE_BENCHMARK, OOS_SHARPE_REGIME_CONDITIONAL,
+            CORRELATION_PRE_2022, CORRELATION_POST_2022,
+        )
+    except Exception:  # noqa: BLE001
+        OOS_SHARPE_REGIME_CONDITIONAL = None
+        OOS_SHARPE_BENCHMARK = None
+        CORRELATION_PRE_2022 = None
+        CORRELATION_POST_2022 = None
+
+    metrics = {
+        "strategy_performance": [
+            {"label": "Benchmark (S&P 500) full-period Sharpe",
+             "value": format_sharpe(benchmark.get("sharpe_ratio")),
+             "source": "strategy_cache.BENCHMARK.sharpe_ratio"},
+            {"label": "Classic 60/40 full-period Sharpe",
+             "value": format_sharpe(classic.get("sharpe_ratio")),
+             "source": "strategy_cache.CLASSIC_60_40.sharpe_ratio"},
+            {"label": "Regime Switching full-period Sharpe",
+             "value": format_sharpe(regime.get("sharpe_ratio")),
+             "source": "strategy_cache.REGIME_SWITCHING.sharpe_ratio"},
+            {"label": "Benchmark max drawdown",
+             "value": format_pct(benchmark.get("max_drawdown")),
+             "source": "strategy_cache.BENCHMARK.max_drawdown"},
+            {"label": "Classic 60/40 max drawdown",
+             "value": format_pct(classic.get("max_drawdown")),
+             "source": "strategy_cache.CLASSIC_60_40.max_drawdown"},
+            {"label": "Regime Switching max drawdown",
+             "value": format_pct(regime.get("max_drawdown")),
+             "source": "strategy_cache.REGIME_SWITCHING.max_drawdown"},
+            {"label": "Benchmark recovery",
+             "value": format_months_from_days(
+                 benchmark.get("drawdown_recovery_days")),
+             "source": (
+                 "strategy_cache.BENCHMARK.drawdown_recovery_days")},
+            {"label": "Regime Switching recovery",
+             "value": format_months_from_days(
+                 regime.get("drawdown_recovery_days")),
+             "source": (
+                 "strategy_cache.REGIME_SWITCHING."
+                 "drawdown_recovery_days")},
+        ],
+        "oos_metrics": [
+            {"label": "OOS window",
+             "value": "January 2022 through May 2026 (53 months)",
+             "source": "academic_deck.OOS window constant"},
+            {"label": "Blend OOS Sharpe",
+             "value": format_sharpe(OOS_SHARPE_REGIME_CONDITIONAL),
+             "source": (
+                 "academic_deck.OOS_SHARPE_REGIME_CONDITIONAL")},
+            {"label": "Benchmark OOS Sharpe",
+             "value": format_sharpe(OOS_SHARPE_BENCHMARK),
+             "source": "academic_deck.OOS_SHARPE_BENCHMARK"},
+        ],
+        "correlation_regime": [
+            {"label": "Pre-2022 equity-IG correlation",
+             "value": format_corr(CORRELATION_PRE_2022),
+             "source": "academic_deck.CORRELATION_PRE_2022"},
+            {"label": "Post-2022 equity-IG correlation",
+             "value": format_corr(CORRELATION_POST_2022),
+             "source": "academic_deck.CORRELATION_POST_2022"},
+        ],
+        "live_signal": [
+            {"label": "Current regime",
+             "value": str(cio_row.get("regime") or "—"),
+             "source": "cio_recommendation.regime"},
+            {"label": "Regime confidence",
+             "value": format_pct(
+                 (cio_row.get("confidence") or {}).get("probability")
+                 if isinstance(cio_row.get("confidence"), dict)
+                 else cio_row.get("confidence")),
+             "source": "cio_recommendation.confidence"},
+            {"label": "Current blend equity",
+             "value": format_pct(implied.get("equity_pct")),
+             "source": (
+                 "compute_implied_asset_allocation("
+                 "cio.blend_weights).equity_pct")},
+            {"label": "Current blend IG bonds",
+             "value": format_pct(implied.get("ig_bond_pct")),
+             "source": (
+                 "compute_implied_asset_allocation("
+                 "cio.blend_weights).ig_bond_pct")},
+            {"label": "Current blend HY bonds",
+             "value": format_pct(implied.get("hy_bond_pct")),
+             "source": (
+                 "compute_implied_asset_allocation("
+                 "cio.blend_weights).hy_bond_pct")},
+        ],
+    }
+
+    return {
+        "data_hash":   strategy_hash[:8] or "—",
+        "available":   True,
+        "computed_at": strategy_computed_at,
+        "metrics":     metrics,
+    }
 
 
 # ── Strategy characterisations (item 9) ───────────────────────────────────────
@@ -2776,6 +3150,32 @@ async def _read_cached_metric_or_fallback(
         return await fallback()
 
 
+async def _overlay_live_regime(target: dict, *, prob_key: str = "probability") -> None:
+    """Write the LIVE regime label + posterior confidence onto `target`
+    (`target["regime"]` and `target[prob_key]`), from a fresh
+    detect_current_regime() read. Both landing tiles call this so they show
+    one identical, current confidence — not the value frozen into each
+    tile's data_hash cache at a different warm time. detect_current_regime()
+    has a 15-minute in-process cache (shared with the dashboard regime
+    banner), so this is the platform's live regime read, not a per-tile
+    cache. Fail-open: any error leaves the cached values untouched."""
+    if not isinstance(target, dict):
+        return
+    try:
+        import asyncio
+        from tools.regime_detector import detect_current_regime
+        live = await asyncio.to_thread(detect_current_regime)
+        regime = (live or {}).get("hmm_regime")
+        if not regime:
+            return
+        conf = ((live or {}).get("hmm_probabilities") or {}).get(regime)
+        target["regime"] = regime
+        if isinstance(conf, (int, float)):
+            target[prob_key] = conf
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live_regime_overlay_failed", error=str(exc))
+
+
 @app.get("/api/v1/recommendation")
 async def get_cio_recommendation(session: dict = Depends(require_auth)):
     """The live CIO recommendation behind the landing page. Served from
@@ -2787,8 +3187,137 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
     if ENVIRONMENT == "test":
         return {"available": False, "recommendation": None}
     try:
-        from tools.cio_recommendation import get_latest_recommendation
-        rec = await get_latest_recommendation()
+        # Read the recommendation by its REGIME-AWARE composite cache key
+        # ({data_hash}_{regime}_{bucket}) so a regime flip or a confidence
+        # move that crosses a 10pp bucket boundary serves the appropriate
+        # prose. On a miss, get_endpoint_recommendation returns the most
+        # recent cached row (whatever its key) AND schedules a background
+        # regenerate under the new composite key — the next read serves the
+        # fresh prose without blocking this one.
+        from tools.cio_recommendation import get_endpoint_recommendation
+        rec = await get_endpoint_recommendation()
+        # Overlay the LIVE regime read so the headline regime label +
+        # confidence are never the data_hash-stale cached values, and match
+        # the Forward Projection tile exactly (both read the same
+        # detect_current_regime() 15-minute in-process regime cache). The
+        # cached recommendation/dissent/limitations text is unchanged — the
+        # card reads regime + probability from rec.confidence.
+        if rec:
+            conf = rec.get("confidence")
+            if not isinstance(conf, dict):
+                conf = {}
+                rec["confidence"] = conf
+            await _overlay_live_regime(conf, prob_key="probability")
+            # Surface the live regime-conditional blend weights (from the
+            # cached forward projection — the same prob-weighted blend) so
+            # the tile can show the blend and flag a binding concentration
+            # constraint. Fail-open: the constraints table still renders its
+            # static rows without the weights, just no binding note.
+            try:
+                from tools.regime_meta_forward import get_cached_forward_projection
+                proj = await get_cached_forward_projection()
+                if proj and proj.get("blend_weights"):
+                    rec["blend_weights"] = proj["blend_weights"]
+            except Exception as exc:  # noqa: BLE001
+                log.warning("recommendation_blend_overlay_failed", error=str(exc))
+            # Bridge #81 -- implied asset allocation + blend change
+            # trigger overlays. Both reuse already-cached primitives:
+            #
+            # implied_asset_allocation -- equity / bond / cash portfolio
+            #   split derived from the live blend_weights times the
+            #   per-strategy avg_equity_weight / avg_bond_weight
+            #   persisted in strategy_results_cache. Pure read.
+            #
+            # blend_change_trigger -- one readable sentence describing
+            #   what would shift the blend (regime flip, VIX threshold,
+            #   etc.). Synthesised from detect_current_regime() output
+            #   already used by _overlay_live_regime above. The 15-min
+            #   in-process regime cache shields the second read.
+            #
+            # Both fail-open: a cold strategy cache leaves
+            # implied_asset_allocation absent; an unavailable regime
+            # leaves blend_change_trigger as the generic sentence. The
+            # frontend gracefully omits or shows the existing line in
+            # either case.
+            try:
+                import asyncio
+                from tools.cio_recommendation import (
+                    compute_implied_asset_allocation,
+                    compute_blend_change_trigger,
+                    compute_regime_blends_implied,
+                )
+                from tools.regime_detector import detect_current_regime
+                allocation = await compute_implied_asset_allocation(
+                    rec.get("blend_weights"))
+                if allocation:
+                    rec["implied_asset_allocation"] = allocation
+                live = await asyncio.to_thread(detect_current_regime)
+                rec["blend_change_trigger"] = compute_blend_change_trigger(
+                    (live or {}).get("hmm_regime"),
+                    (live or {}).get("monthly_hmm_regime"),
+                    bool((live or {}).get("hmm_models_agree", True)),
+                )
+                # Bridge (June 8 2026) -- per-regime blend shifts overlay.
+                # Pulls the cached regime_blends payload and computes the
+                # equity/bond implied split + delta-from-current for each
+                # of BULL / BEAR / TRANSITION so the CIO card and digest
+                # can render the per-regime shift without re-computing.
+                # Fail-open: a cold regime_blends row leaves the field
+                # absent and the frontend / digest omit the section.
+                try:
+                    # get_latest_metric lives in tools.precomputed_analytics,
+                    # not tools.cache (every other caller in the codebase
+                    # imports it from there). The wrong module here silently
+                    # broke the regime_blends overlay -- the try-block
+                    # swallowed the ImportError and logged
+                    # recommendation_regime_blends_overlay_failed, hiding
+                    # the typo behind the structured warning.
+                    from tools.precomputed_analytics import get_latest_metric
+                    rb_row = await get_latest_metric("regime_blends") or {}
+                    rb_blends = rb_row.get("blends") or {}
+                    if rb_blends and allocation:
+                        regime_implied = await compute_regime_blends_implied(
+                            rb_blends, allocation)
+                        if regime_implied:
+                            rec["regime_blends_implied"] = regime_implied
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "recommendation_regime_blends_overlay_failed",
+                        error=str(exc))
+                # OOS validation overlay (June 15 2026). The
+                # precomputed oos_summary metric carries the
+                # December 2025 academic-lock Sharpe values for the
+                # blend vs the 100%-equity benchmark plus the
+                # value-add event count from the play-by-play
+                # scorecard. Same pure-overlay pattern as the
+                # blend_change_trigger -- the cached scalar is read
+                # and threaded onto the recommendation payload so
+                # the CIO card can render the OOS validation row
+                # without a second round-trip. Fail-open: a cold
+                # oos_summary cache leaves the field as None and
+                # the frontend omits the row.
+                try:
+                    from tools.play_by_play import get_cached_oos_summary
+                    oos = await get_cached_oos_summary()
+                    if oos:
+                        rec["oos_sharpe"] = {
+                            "blend": oos.get("blend"),
+                            "benchmark": oos.get("benchmark"),
+                            "value_add_events": oos.get(
+                                "value_add_events"),
+                            "total_events": oos.get("total_events"),
+                        }
+                    else:
+                        rec["oos_sharpe"] = None
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "recommendation_oos_summary_overlay_failed",
+                        error=str(exc))
+                    rec["oos_sharpe"] = None
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "recommendation_allocation_overlay_failed",
+                    error=str(exc))
         return {"available": bool(rec), "recommendation": rec}
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
@@ -2837,6 +3366,27 @@ async def get_play_by_play(session: dict = Depends(require_auth)):
                 "key_limitations": {}, "ref": ref}
 
 
+@app.get("/api/v1/oos-cost-sensitivity")
+async def get_oos_cost_sensitivity(session: dict = Depends(require_auth)):
+    """Transaction-cost sensitivity of the regime-conditional blend over
+    the post-2022 OOS window — net Sharpe + vs-benchmark at 10/15/20 bps
+    per rebalance and the material-rebalance count — behind the Council
+    Performance Record "Net of Switching Costs" table. Served from the
+    data_hash-cached 'oos_cost_sensitivity' metric; never recomputes on a
+    read. Returns {available, ...} for a clean empty state before the
+    first warm."""
+    if ENVIRONMENT == "test":
+        return {"available": False, "cost_sensitivity": None}
+    try:
+        from tools.regime_meta_validation import get_cached_cost_sensitivity
+        cost = await get_cached_cost_sensitivity()
+        return {"available": bool(cost), "cost_sensitivity": cost}
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.warning("oos_cost_sensitivity_read_failed", ref=ref, error=str(exc))
+        return {"available": False, "cost_sensitivity": None, "ref": ref}
+
+
 @app.get("/api/v1/forward-projection")
 async def get_forward_projection(session: dict = Depends(require_auth)):
     """The Layer 4 forward Monte Carlo confidence bands for the landing
@@ -2850,6 +3400,12 @@ async def get_forward_projection(session: dict = Depends(require_auth)):
     try:
         from tools.regime_meta_forward import get_cached_forward_projection
         proj = await get_cached_forward_projection()
+        # Overlay the LIVE regime read onto the cached bands so the regime
+        # label + confidence match the CIO card (same source) rather than
+        # the data_hash-stale value the simulation was cached with. The
+        # simulation bands / p_outperform stay as cached.
+        if proj:
+            await _overlay_live_regime(proj, prob_key="regime_probability")
         return {"available": bool(proj), "projection": proj}
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
@@ -2934,6 +3490,1122 @@ async def get_analytics_sensitivity(request: Request, session: dict = Depends(re
 
 
 # ── Admin: data status ────────────────────────────────────────────────────────
+
+@app.post("/api/v1/admin/clear-story-plans")
+async def post_clear_story_plans(
+    document_type: str = "all",
+    session: dict = Depends(require_team_member),
+):
+    """PR #336 Gap E -- delete cached story_plans rows so the next
+    deck or brief regeneration runs the four-pass Opus pipeline from
+    scratch. Required after a prompt change (e.g. PR #335's seven-
+    citation grounding) lands so the new framing fires immediately
+    rather than waiting for the data_hash to change.
+
+    document_type:
+      "brief" -- delete only brief plans
+      "deck"  -- delete only deck plans
+      "all"   -- delete every story_plans row (the default)
+
+    Returns: {"deleted": <int>, "document_type": <str>}.
+    """
+    if document_type not in {"brief", "deck", "all"}:
+        raise HTTPException(
+            status_code=400,
+            detail="document_type must be 'brief' | 'deck' | 'all'")
+    if ENVIRONMENT == "test":
+        return {"deleted": 0, "document_type": document_type,
+                "note": "test environment"}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal  # type: ignore[attr-defined]
+        if AsyncSessionLocal is None:
+            return {"deleted": 0, "document_type": document_type,
+                    "note": "no database"}
+        async with AsyncSessionLocal() as s:
+            if document_type == "all":
+                res = await s.execute(
+                    text("DELETE FROM story_plans"))
+            else:
+                res = await s.execute(
+                    text("DELETE FROM story_plans "
+                         "WHERE document_type = :t"),
+                    {"t": document_type})
+            await s.commit()
+            deleted = int(res.rowcount or 0)
+        log.info("story_plans_cleared",
+                 document_type=document_type, deleted=deleted,
+                 actor=session.get("email"))
+        return {"deleted": deleted, "document_type": document_type}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("clear_story_plans_failed",
+                    document_type=document_type, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"clear_story_plans_failed: {exc}")
+
+
+@app.get("/api/v1/story-plans/exists")
+async def get_story_plans_exists(
+    document_types: str = "",
+    session: dict = Depends(require_auth),
+):
+    """June 23 2026 -- pre-flight check for the brief regen
+    confirmation modal. The frontend hits this endpoint BEFORE
+    POSTing /api/v1/export/executive-brief; if any downstream
+    plan exists for the listed document_types, the UI surfaces
+    a confirmation modal warning the user that those plans will
+    be cleared. If exists is false, the UI skips the modal and
+    fires Generate immediately.
+
+    Query param document_types: a comma-separated list of
+    document_type values to check. Returns {exists: bool, types:
+    {<doc_type>: bool}}.
+
+    Auth: require_auth -- anyone signed in can ask. The clear
+    itself still gates on generate_documents (it runs inside
+    _generate_brief_document, which gates on that permission).
+    """
+    types = [t.strip() for t in document_types.split(",") if t.strip()]
+    if not types:
+        return {"exists": False, "types": {}}
+    if ENVIRONMENT == "test":
+        return {"exists": False, "types": {t: False for t in types}}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal  # type: ignore[attr-defined]
+        if AsyncSessionLocal is None:
+            return {"exists": False, "types": {t: False for t in types}}
+        async with AsyncSessionLocal() as s:
+            res = await s.execute(
+                text("SELECT document_type FROM story_plans "
+                     "WHERE document_type = ANY(:types)"),
+                {"types": types})
+            present = {row[0] for row in res.fetchall()}
+        per_type = {t: (t in present) for t in types}
+        return {"exists": any(per_type.values()), "types": per_type}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plans_exists_failed", error=str(exc))
+        # Fail-open: if the check fails, do NOT block the user.
+        # The modal will simply not fire; the user can still hit
+        # Generate. Returning exists=False matches that intent.
+        return {"exists": False, "types": {t: False for t in types}}
+
+
+@app.post("/api/v1/data/light-refresh")
+@limiter.limit("10/minute")
+async def post_light_refresh(
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
+):
+    """June 24 2026 -- light analytics-cache refresh for the team
+    member's "I want to see if there's new market data" workflow.
+
+    Runs the same three compute steps as the admin
+    refresh-appendix-caches endpoint (backtester + academic
+    analytics + OOS cost sensitivity) but is bound to the
+    generate_documents permission rather than team_member so
+    every doc-generator user can self-serve a refresh without
+    a sysadmin escalation. The response shape is identical to
+    refresh-appendix-caches so the frontend can reuse the same
+    rendering.
+
+    What this endpoint does NOT do:
+      - Touch story_plans (those clear on brief regen via the
+        existing _generate_brief_document hook)
+      - Touch editor_drafts (no document_content is mutated)
+      - Touch the canonical data_hash unless the data fetcher
+        reports new rows that change it
+      - Trigger document regeneration -- the user runs Generate /
+        Regenerate themselves on the doc tiles when they want
+        new prose. This endpoint just refreshes the underlying
+        analytics so the next regen sees the latest figures.
+
+    Returns: {ok, strategy_hash, steps[]} -- per-step status so
+    a partial failure (e.g. academic_analytics refresh fails but
+    backtester + cost_sens succeed) surfaces every step's
+    individual outcome.
+    """
+    import asyncio
+    if ENVIRONMENT == "test":
+        return {
+            "ok": True,
+            "note": "test environment -- compute chain skipped",
+            "steps": [],
+            "strategy_hash": None,
+        }
+
+    # ── June 27 2026: regime_signals pre-flight gate ─────────────
+    # Light refresh is the typical user workflow immediately before
+    # a deck regen ("warm everything, then regenerate"). If the
+    # regime cache can't be refreshed within 10s, fail the entire
+    # light-refresh now -- the user otherwise sees a successful
+    # refresh, kicks off a deck regen, and the deck regen 503s
+    # with the same blocking message a moment later. Cleaner UX
+    # to surface the failure here. Brief / appendix users are
+    # blocked too; they don't NEED fresh regime signals (em-dash
+    # fallback works) but the cost is bounded -- 10s max wait on
+    # a 15-min cache means most calls hit and return instantly.
+    ok, _signals = await _regime_signals_fresh_or_refresh()
+    if not ok:
+        log.warning(
+            "light_refresh_blocked_on_regime_signals",
+            note=("regime_signals_cache miss + refresh "
+                  "failed/timed out within 10s -- blocking "
+                  "light-refresh so the user doesn't waste "
+                  "a deck regen on stale signals"))
+        raise HTTPException(
+            status_code=503,
+            detail=_REGIME_BLOCKING_ERROR_DETAIL)
+
+    steps: list[dict] = []
+    strategy_hash: str | None = None
+
+    # Step 1 -- backtester + strategy_results_cache write.
+    #
+    # June 25 2026 -- unified on Hash A. Previously this step used
+    # tools.cache._compute_data_hash(n_rows, last_date, n_strategies)
+    # (Hash B), which produced a value the UI Live Hash banner
+    # (current_data_hash, Hash A) could never match. Every refresh
+    # left the Light Refresh status table permanently 'Stale' and
+    # the draft chip permanently amber because the two columns
+    # read different formulas. The audit confirmed Hash A is the
+    # canonical platform-state fingerprint (see audit_assembler
+    # .current_data_hash docstring -- derived-cache churn must NOT
+    # invalidate it). Switching the refresh to stamp Hash A makes
+    # the Draft Hash + Live Hash columns finally agree.
+    try:
+        from tools.backtester import run_all_strategies
+        from tools.cache import set_strategy_cache
+        from tools.data_fetcher import get_full_history_async
+        from tools.audit_assembler import current_data_hash
+        from tools.submission_freeze import get_effective_data_hash
+        history = await get_full_history_async()
+        monthly = history.get("equity_monthly")
+        n_rows = len(monthly) if monthly is not None else 0
+        # June 27 2026 (PR 1 v4 -- architectural-rule closure) --
+        # under freeze, light refresh MUST warm the strategy cache
+        # under the FREEZE hash, not the live hash. Otherwise the
+        # StrategyCacheMissingForHashError raised by the 3 doc
+        # generators (PR 1 v3) is NOT self-healing: the user runs
+        # light refresh, the cache populates under the live hash,
+        # the freeze-hash slot is still empty, the next deck export
+        # fails again -- infinite loop. Routing through
+        # get_effective_data_hash makes the cache write land in the
+        # correct slot for whichever mode the platform is in. All
+        # downstream uses below (refresh_academic_analytics,
+        # refresh_oos_cost_sensitivity, the editor_drafts UPDATE,
+        # the response's strategy_hash field) inherit the effective
+        # hash automatically -- no further changes needed.
+        live_hash = await current_data_hash()
+        strategy_hash = await get_effective_data_hash(live_hash)
+        if not strategy_hash:
+            # current_data_hash returns "" on a degraded data path
+            # (the source tables haven't loaded). Fall through with
+            # an empty hash so the step records the failure mode
+            # rather than crashing -- set_strategy_cache treats an
+            # empty key as a no-op and the response's strategy_hash
+            # field surfaces null.
+            log.warning(
+                "light_refresh_current_data_hash_empty")
+        results_dict = await asyncio.to_thread(
+            run_all_strategies, history)
+        await set_strategy_cache(
+            strategy_hash, results_dict, n_observations=n_rows,
+            risk_free_monthly=history.get("risk_free_monthly"))
+        steps.append({
+            "step": "backtester",
+            "ok": True,
+            "strategy_hash": strategy_hash,
+            "n_strategies": len(results_dict),
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "light_refresh_backtester_failed", error=str(exc))
+        steps.append({
+            "step": "backtester",
+            "ok": False,
+            "error": str(exc),
+        })
+        # Same short-circuit as refresh-appendix-caches --
+        # downstream metrics need the strategy_hash this step
+        # produces. Surface the failure as a 500 so the UI can
+        # render an error rather than a partial-success summary.
+        raise HTTPException(
+            status_code=500,
+            detail={"steps": steps,
+                    "blocked_at": "backtester"})
+
+    # Step 2 -- academic_analytics refresh.
+    try:
+        from tools.precomputed_analytics import (
+            refresh_academic_analytics,
+        )
+        await refresh_academic_analytics(strategy_hash)
+        steps.append({
+            "step": "refresh_academic_analytics",
+            "ok": True,
+            "data_hash": strategy_hash,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "light_refresh_academic_failed", error=str(exc))
+        steps.append({
+            "step": "refresh_academic_analytics",
+            "ok": False,
+            "error": str(exc),
+        })
+
+    # Step 3 -- OOS cost sensitivity refresh.
+    try:
+        from tools.regime_meta_validation import (
+            refresh_oos_cost_sensitivity,
+        )
+        ok = await refresh_oos_cost_sensitivity(strategy_hash)
+        steps.append({
+            "step": "refresh_oos_cost_sensitivity",
+            "ok": bool(ok),
+            "data_hash": strategy_hash,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "light_refresh_cost_sens_failed", error=str(exc))
+        steps.append({
+            "step": "refresh_oos_cost_sensitivity",
+            "ok": False,
+            "error": str(exc),
+        })
+
+    all_ok = all(step.get("ok") for step in steps)
+
+    # June 25 2026 -- after a successful refresh, stamp the new
+    # strategy_hash onto every current draft so the editor's hash
+    # status chip reads "Data current" against the fresh cache
+    # rather than showing every draft stale. The light refresh is
+    # explicitly opt-in by a team member with generate_documents
+    # rights; the assumption is that the team intends the refreshed
+    # cache to be the new authoritative baseline. Generation of any
+    # given document is still the user's explicit action -- the
+    # data_hash stamp tracks 'what cache did the team last sync to'
+    # not 'what was the cache when each section was written'.
+    drafts_updated = 0
+    if strategy_hash and all_ok:
+        try:
+            from sqlalchemy import text as _text
+            from database import (
+                AsyncSessionLocal as _ASL,  # type: ignore
+            )
+            if _ASL is not None:
+                async with _ASL() as _s:
+                    r = await _s.execute(_text(
+                        "UPDATE editor_drafts "
+                        "SET data_hash = :h, "
+                        "    updated_at = NOW() "
+                        "WHERE is_current = true "
+                        "  AND is_deleted = false "
+                        "  AND document_type IN ("
+                        "    'executive_brief', "
+                        "    'analytical_appendix', "
+                        "    'presentation_deck', "
+                        "    'presentation_script') "
+                        "RETURNING id"),
+                        {"h": strategy_hash})
+                    drafts_updated = len(r.fetchall())
+                    await _s.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "light_refresh_draft_hash_update_failed",
+                error=str(exc))
+
+    # June 26 2026 -- auto-recover any draft left in the NULL-
+    # current-draft state. Runs on every light-refresh so a botched
+    # generation that raced the refresh recovers without an operator
+    # restart. Same helper used at startup; idempotent.
+    drafts_recovered = 0
+    try:
+        from tools.editor_drafts import (
+            recover_null_current_drafts as _recover,
+        )
+        drafts_recovered = await _recover()
+        if drafts_recovered:
+            log.warning(
+                "light_refresh_null_current_drafts_recovered",
+                count=drafts_recovered)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "light_refresh_null_current_drafts_failed",
+            error=str(exc))
+
+    log.info(
+        "light_refresh_complete",
+        all_ok=all_ok,
+        strategy_hash=strategy_hash,
+        drafts_updated=drafts_updated,
+        drafts_recovered=drafts_recovered,
+        actor=session.get("email"))
+    return {
+        "ok": all_ok,
+        "strategy_hash": strategy_hash,
+        "drafts_updated": drafts_updated,
+        "drafts_recovered": drafts_recovered,
+        "steps": steps,
+    }
+
+
+@app.post("/api/v1/data/verify-post-refresh")
+async def post_verify_post_refresh(
+    session: dict = Depends(require_team_member),
+):
+    """June 27 2026 -- post-light-refresh verification pass +
+    rounding audit. Re-reads every substitution token, classifies
+    each by submission scope, runs the per-scope sanity check
+    (LOCKED == strategy_cache, CONSTANT == academic_deck module
+    constant, FULL_DATASET == plausible range, LIVE == fresh and
+    non-null), and checks each numeric value against the
+    canonical rounding rule for its token class.
+
+    Self-contained: does NOT depend on the /data-reference-sheet
+    endpoint. Derives submission_scope locally via the verifier
+    module's classify_submission_scope (consolidated with
+    data_reference_catalog.classify_submission_scope post-merge
+    of PR #459).
+
+    Operator wiring: the Light Refresh panel auto-calls this
+    endpoint after every successful refresh and the Data
+    Reference Sheet header carries a 'Verify submission data'
+    button that fires it on demand.
+
+    Response shape per spec:
+      {verified_at, freeze_active, freeze_hash, effective_hash,
+       passed, failed, warnings,
+       results[{token, label, scope, expected, actual,
+                rounded_correctly, status, message}],
+       rounding_summary{checked, consistent, inconsistent,
+                        inconsistent_tokens[]},
+       ready_for_submission}
+
+    ready_for_submission == true iff (failed == 0
+       AND rounding_summary.inconsistent == 0
+       AND no live tokens stale)."""
+    _ = session  # team-gated
+    from tools.post_refresh_verifier import run_verification
+    return await run_verification()
+
+
+# ── Dual-mode token storage endpoints (PR-DM-Lite, June 28) ──────
+
+
+async def _auto_upgrade_draft_to_token_values(
+    draft_id: int, document_type: str,
+) -> None:
+    """June 28 2026 (Fix 8b) -- per-draft auto-upgrade hook.
+
+    Fires right after a generator persists its draft +
+    value_manifest. Replaces the manual operator step of
+    POSTing to /api/v1/admin/upgrade-all-drafts-to-token-values
+    after every generation.
+
+    Contract:
+      * Only runs when DEFER_SUBSTITUTION_TO_EXPORT is ON --
+        otherwise content_json carries resolved values not
+        {{TOKEN}} placeholders, the {{TOKEN}}-only matcher
+        finds nothing to upgrade, and the call is a no-op.
+        Short-circuiting here saves a DB round-trip + keeps
+        the legacy flag-OFF path bit-identical.
+      * Only touches the ONE draft_id passed in -- never the
+        batch. The admin endpoint
+        post_upgrade_all_drafts_to_token_values remains
+        available for backfill scenarios; this is the
+        steady-state per-generation path.
+      * Fail-open: every error logs + returns. Generation
+        completion is never blocked by an upgrade-pass
+        failure -- the draft is already persisted; the admin
+        batch endpoint can be re-run to recover."""
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    from tools.draft_token_upgrade import (
+        upgrade_canvas_slides_for_unverified_tags,
+        upgrade_content_json_for_unverified_tags,
+        upgrade_content_json_to_token_values,
+    )
+    from tools.platform_flags import (
+        is_defer_substitution_enabled,
+    )
+    import json as _json
+
+    try:
+        # Phase 2 deferral gate ONLY guards the token-upgrade
+        # pass. The <unverified> tag upgrade runs UNCONDITIONALLY
+        # because soft-fail tags can be emitted regardless of
+        # the deferral flag (the hard-lock soft-fail in
+        # harness_narrative / generate_script /
+        # _substitute_slide_content fires whenever the
+        # 3-pass cap is hit).
+        defer_on = await is_defer_substitution_enabled()
+        if _ASL is None:
+            return
+        async with _ASL() as s:
+            row = await s.execute(_text(
+                "SELECT content_json, value_manifest, "
+                "       migration_run "
+                "FROM editor_drafts "
+                "WHERE id = :id AND is_deleted = false"),
+                {"id": draft_id})
+            r = row.fetchone()
+            if not r:
+                return
+            content_json, manifest, migration_run = r
+            if not isinstance(content_json, dict):
+                return
+            cj_after = content_json
+            token_stats = {
+                "nodes_upgraded": 0, "already_upgraded": 0}
+            unverified_stats = {
+                "nodes_upgraded": 0, "already_upgraded": 0}
+            # Token upgrade only when flag ON + manifest exists
+            # + migration hasn't run yet.
+            if (defer_on and manifest
+                    and not migration_run):
+                cj_after, token_stats = (
+                    upgrade_content_json_to_token_values(
+                        cj_after, manifest))
+            # June 28 2026 (PR #479) -- unverified-tag upgrade
+            # runs for every doc type, every generation,
+            # regardless of the deferral flag. The deck uses
+            # a different schema (canvas slides) so dispatch
+            # by document_type.
+            if document_type == "presentation_deck":
+                cj_after, unverified_stats = (
+                    upgrade_canvas_slides_for_unverified_tags(
+                        cj_after))
+            else:
+                cj_after, unverified_stats = (
+                    upgrade_content_json_for_unverified_tags(
+                        cj_after))
+            any_change = (
+                token_stats["nodes_upgraded"] > 0
+                or unverified_stats["nodes_upgraded"] > 0)
+            if any_change:
+                await s.execute(_text(
+                    "UPDATE editor_drafts "
+                    "SET pre_migration_content_json "
+                    "      = COALESCE("
+                    "          pre_migration_content_json, "
+                    "          CAST(:snap AS JSONB)), "
+                    "    content_json = CAST(:cj AS JSONB), "
+                    "    migration_run = true, "
+                    "    updated_at = NOW() "
+                    "WHERE id = :id"),
+                    {
+                        "snap": _json.dumps(content_json),
+                        "cj":   _json.dumps(cj_after),
+                        "id":   draft_id,
+                    })
+                await s.commit()
+        log.info(
+            "draft_auto_upgrade_persisted",
+            draft_id=draft_id,
+            document_type=document_type,
+            token_nodes_upgraded=token_stats["nodes_upgraded"],
+            unverified_nodes_upgraded=(
+                unverified_stats["nodes_upgraded"]))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "draft_auto_upgrade_failed",
+            draft_id=draft_id,
+            document_type=document_type,
+            error=str(exc))
+
+
+@app.post("/api/v1/admin/upgrade-all-drafts-to-token-values")
+async def post_upgrade_all_drafts_to_token_values(
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- explicit, operator-triggered upgrade pass.
+
+    Walks every current draft with value_manifest IS NOT NULL +
+    migration_run = FALSE. For each:
+      1. Snapshot content_json into pre_migration_content_json
+      2. Run upgrade_content_json_to_token_values
+      3. Persist new content_json + set migration_run = TRUE
+
+    Returns a per-draft summary (id / document_type / status /
+    nodes_upgraded / manifest_entries / message).
+
+    The operator MUST run this manually after PR-DM-Lite
+    deploys. NOT triggered automatically on first draft load.
+    """
+    _ = session  # team-gated
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    from tools.draft_token_upgrade import (
+        upgrade_content_json_to_token_values,
+    )
+    import json as _json
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not configured")
+
+    results: list[dict] = []
+    async with _ASL() as s:
+        rows = await s.execute(_text(
+            "SELECT id, document_type, owner_email, "
+            "content_json, value_manifest "
+            "FROM editor_drafts "
+            "WHERE is_current = true "
+            "  AND is_deleted = false "
+            "  AND migration_run = false "
+            "ORDER BY id"))
+        drafts = rows.fetchall()
+
+        for row in drafts:
+            draft_id, doc_type, owner, content_json, manifest = row
+            if not isinstance(content_json, dict):
+                results.append({
+                    "draft_id":       draft_id,
+                    "document_type":  doc_type,
+                    "owner":          owner,
+                    "status":         "skipped",
+                    "message":        (
+                        "content_json missing or non-dict"),
+                })
+                continue
+            if not manifest:
+                results.append({
+                    "draft_id":       draft_id,
+                    "document_type":  doc_type,
+                    "owner":          owner,
+                    "status":         "skipped",
+                    "message":        (
+                        "value_manifest NULL (pre-Layer-3 "
+                        "draft) -- cannot upgrade"),
+                })
+                continue
+            try:
+                upgraded, stats = (
+                    upgrade_content_json_to_token_values(
+                        content_json, manifest))
+                # Persist: snapshot + new content + flag.
+                await s.execute(_text(
+                    "UPDATE editor_drafts "
+                    "SET pre_migration_content_json "
+                    "      = CAST(:snap AS JSONB), "
+                    "    content_json = CAST(:cj AS JSONB), "
+                    "    migration_run = true, "
+                    "    updated_at = NOW() "
+                    "WHERE id = :id"),
+                    {
+                        "snap": _json.dumps(content_json),
+                        "cj":   _json.dumps(upgraded),
+                        "id":   draft_id,
+                    })
+                results.append({
+                    "draft_id":          draft_id,
+                    "document_type":     doc_type,
+                    "owner":             owner,
+                    "status":            "upgraded",
+                    "manifest_entries":  stats["manifest_entries"],
+                    "nodes_upgraded":    stats["nodes_upgraded"],
+                    "already_upgraded":  stats["already_upgraded"],
+                    "message":           (
+                        f"{stats['nodes_upgraded']} "
+                        "token_value nodes inserted"),
+                })
+                log.info(
+                    "draft_upgrade_persisted",
+                    draft_id=draft_id,
+                    document_type=doc_type,
+                    nodes_upgraded=stats["nodes_upgraded"])
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "draft_upgrade_failed",
+                    draft_id=draft_id,
+                    error=str(exc))
+                results.append({
+                    "draft_id":       draft_id,
+                    "document_type":  doc_type,
+                    "owner":          owner,
+                    "status":         "failed",
+                    "message":        str(exc),
+                })
+        await s.commit()
+
+    return {
+        "drafts_checked": len(drafts),
+        "upgraded":  sum(
+            1 for r in results if r["status"] == "upgraded"),
+        "skipped":   sum(
+            1 for r in results if r["status"] == "skipped"),
+        "failed":    sum(
+            1 for r in results if r["status"] == "failed"),
+        "results":   results,
+    }
+
+
+@app.post("/api/v1/admin/revert-all-draft-migrations")
+async def post_revert_all_draft_migrations(
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- batch revert of every draft whose
+    upgrade pass ran AND has a pre_migration_content_json
+    snapshot. Restores content_json from the snapshot, clears
+    the snapshot, sets migration_run = FALSE.
+
+    Used to undo a buggy upgrade pass in one shot. After this
+    runs the operator deploys the upgrade-pass fix + re-invokes
+    POST /api/v1/admin/upgrade-all-drafts-to-token-values.
+
+    Returns per-draft summary (id, document_type, owner, status,
+    message)."""
+    _ = session  # team-gated
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    import json as _json
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not configured")
+
+    results: list[dict] = []
+    async with _ASL() as s:
+        rows = await s.execute(_text(
+            "SELECT id, document_type, owner_email "
+            "FROM editor_drafts "
+            "WHERE is_current = true "
+            "  AND is_deleted = false "
+            "  AND migration_run = true "
+            "  AND pre_migration_content_json IS NOT NULL "
+            "ORDER BY id"))
+        candidates = rows.fetchall()
+        for row in candidates:
+            draft_id, doc_type, owner = row
+            try:
+                snap_row = await s.execute(_text(
+                    "SELECT pre_migration_content_json "
+                    "FROM editor_drafts WHERE id = :id"),
+                    {"id": draft_id})
+                r = snap_row.fetchone()
+                snap = r[0] if r else None
+                if snap is None:
+                    results.append({
+                        "draft_id":      draft_id,
+                        "document_type": doc_type,
+                        "owner":         owner,
+                        "status":        "skipped",
+                        "message":       "no snapshot present",
+                    })
+                    continue
+                await s.execute(_text(
+                    "UPDATE editor_drafts "
+                    "SET content_json = CAST(:cj AS JSONB), "
+                    "    migration_run = false, "
+                    "    pre_migration_content_json = NULL, "
+                    "    updated_at = NOW() "
+                    "WHERE id = :id"),
+                    {
+                        "cj": _json.dumps(snap)
+                              if not isinstance(snap, str)
+                              else snap,
+                        "id": draft_id,
+                    })
+                results.append({
+                    "draft_id":      draft_id,
+                    "document_type": doc_type,
+                    "owner":         owner,
+                    "status":        "reverted",
+                    "message":       (
+                        "content_json restored from snapshot; "
+                        "migration_run reset to FALSE; "
+                        "snapshot cleared"),
+                })
+                log.info(
+                    "draft_migration_reverted",
+                    draft_id=draft_id,
+                    document_type=doc_type)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "draft_migration_revert_failed",
+                    draft_id=draft_id, error=str(exc))
+                results.append({
+                    "draft_id":      draft_id,
+                    "document_type": doc_type,
+                    "owner":         owner,
+                    "status":        "failed",
+                    "message":       str(exc),
+                })
+        await s.commit()
+
+    return {
+        "drafts_checked": len(candidates),
+        "reverted":  sum(
+            1 for r in results if r["status"] == "reverted"),
+        "skipped":   sum(
+            1 for r in results if r["status"] == "skipped"),
+        "failed":    sum(
+            1 for r in results if r["status"] == "failed"),
+        "results":   results,
+    }
+
+
+@app.post("/api/v1/admin/revert-draft-migration/{draft_id}")
+async def post_revert_draft_migration(
+    draft_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- restores content_json from
+    pre_migration_content_json + sets migration_run = FALSE.
+    Used when the upgrade pass produced an unexpected result on
+    a specific draft."""
+    _ = session
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    import json as _json
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503, detail="Database not configured")
+    async with _ASL() as s:
+        row = await s.execute(_text(
+            "SELECT pre_migration_content_json "
+            "FROM editor_drafts WHERE id = :id"),
+            {"id": draft_id})
+        r = row.fetchone()
+        if not r or not r[0]:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"draft {draft_id} has no pre-migration "
+                    "snapshot -- nothing to revert"))
+        snap = r[0]
+        await s.execute(_text(
+            "UPDATE editor_drafts "
+            "SET content_json = CAST(:cj AS JSONB), "
+            "    migration_run = false, "
+            "    pre_migration_content_json = NULL, "
+            "    updated_at = NOW() "
+            "WHERE id = :id"),
+            {
+                "cj": _json.dumps(snap)
+                      if not isinstance(snap, str) else snap,
+                "id": draft_id,
+            })
+        await s.commit()
+    return {"ok": True, "draft_id": draft_id}
+
+
+@app.get("/api/v1/data/review-pending-updates/{draft_id}")
+async def get_review_pending_updates_for_draft(
+    draft_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- per-draft review summary for the
+    ValueUpdateReviewPanel. Walks the (upgraded) content_json
+    and returns one entry per token_value node with current
+    value, cache value, match flag, and override status."""
+    _ = session
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    from tools.draft_token_upgrade import build_review_summary
+    from tools.audit_assembler import current_data_hash
+    from tools.cache import get_strategy_cache
+    from tools.cio_recommendation import (
+        get_latest_recommendation,
+    )
+    from tools.numeric_substitution import (
+        get_substitution_table,
+    )
+    from tools.submission_freeze import (
+        get_effective_data_hash,
+    )
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503, detail="Database not configured")
+
+    async with _ASL() as s:
+        row = await s.execute(_text(
+            "SELECT content_json, migration_run "
+            "FROM editor_drafts WHERE id = :id"),
+            {"id": draft_id})
+        r = row.fetchone()
+    if not r:
+        raise HTTPException(
+            status_code=404, detail=f"draft {draft_id} not found")
+    content_json, migration_run = r
+    if not migration_run:
+        return {
+            "draft_id": draft_id,
+            "migration_run": False,
+            "message": (
+                "Draft has not been upgraded to dual-mode token "
+                "storage yet. Run "
+                "POST /api/v1/admin/upgrade-all-drafts-to-token-"
+                "values first."),
+            "entries": [],
+        }
+
+    # Build the current substitution table -- freeze-aware.
+    live_hash = await current_data_hash()
+    eff_hash = await get_effective_data_hash(live_hash) or live_hash
+    cio = await get_latest_recommendation() or {}
+    strategy_cache = await get_strategy_cache(eff_hash) or {}
+    table = get_substitution_table(
+        eff_hash, strategy_cache, cio, hash_verified=True)
+
+    entries = build_review_summary(content_json, table)
+    mismatched = sum(1 for e in entries if not e["match"])
+    overridden = sum(1 for e in entries if e["overridden"])
+    return {
+        "draft_id":       draft_id,
+        "migration_run":  True,
+        "effective_hash": eff_hash,
+        "entries":        entries,
+        "total":          len(entries),
+        "matched":        len(entries) - mismatched,
+        "mismatched":     mismatched,
+        "overridden":     overridden,
+    }
+
+
+@app.post("/api/v1/data/apply-updates/{draft_id}")
+async def post_apply_updates_to_draft(
+    draft_id: int,
+    body: dict | None = None,
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 -- applies token updates to a draft's
+    content_json. Body shape:
+      {"tokens": ["{{TOKEN_A}}", "{{TOKEN_B}}", ...]}
+    Only nodes whose attrs.token is in the list get updated.
+    Omit the body (or send empty tokens) to apply all changes.
+
+    Returns count + per-update audit log."""
+    _ = session
+    from sqlalchemy import text as _text
+    from database import AsyncSessionLocal as _ASL
+    from tools.draft_token_upgrade import apply_token_updates
+    from tools.audit_assembler import current_data_hash
+    from tools.cache import get_strategy_cache
+    from tools.cio_recommendation import (
+        get_latest_recommendation,
+    )
+    from tools.numeric_substitution import (
+        get_substitution_table,
+    )
+    from tools.submission_freeze import (
+        get_effective_data_hash,
+    )
+    import json as _json
+
+    if _ASL is None:
+        raise HTTPException(
+            status_code=503, detail="Database not configured")
+
+    selected: set[str] | None = None
+    if body and isinstance(body.get("tokens"), list):
+        selected = set(str(t) for t in body["tokens"])
+
+    async with _ASL() as s:
+        row = await s.execute(_text(
+            "SELECT content_json, migration_run "
+            "FROM editor_drafts WHERE id = :id"),
+            {"id": draft_id})
+        r = row.fetchone()
+        if not r:
+            raise HTTPException(
+                status_code=404,
+                detail=f"draft {draft_id} not found")
+        content_json, migration_run = r
+        if not migration_run:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Draft has not been upgraded to dual-mode "
+                    "token storage. Run the upgrade pass first."))
+
+        # Build current substitution table.
+        live_hash = await current_data_hash()
+        eff_hash = (
+            await get_effective_data_hash(live_hash) or live_hash)
+        cio = await get_latest_recommendation() or {}
+        strategy_cache = await get_strategy_cache(eff_hash) or {}
+        table = get_substitution_table(
+            eff_hash, strategy_cache, cio, hash_verified=True)
+
+        new_content_json, updates = apply_token_updates(
+            content_json, table, eff_hash, selected)
+        if updates:
+            await s.execute(_text(
+                "UPDATE editor_drafts "
+                "SET content_json = CAST(:cj AS JSONB), "
+                "    data_hash = :h, "
+                "    updated_at = NOW() "
+                "WHERE id = :id"),
+                {
+                    "cj": _json.dumps(new_content_json),
+                    "h":  eff_hash,
+                    "id": draft_id,
+                })
+            await s.commit()
+        log.info(
+            "draft_token_rewrite_applied",
+            draft_id=draft_id,
+            updates_count=len(updates),
+            actor=(session.get("email") if session else None))
+
+    return {
+        "draft_id":       draft_id,
+        "updates_count":  len(updates),
+        "updates":        updates,
+        "effective_hash": eff_hash,
+    }
+
+
+@app.post("/api/v1/admin/refresh-appendix-caches")
+async def post_refresh_appendix_caches(
+    session: dict = Depends(require_team_member),
+):
+    """June 21 2026 -- the appendix's graded sections (B, C, D,
+    E, G) depend on three upstream cache populations:
+      1. strategy_results_cache (backtester run) -- Sections B,
+         C, E source
+      2. academic_analytics metric (refresh_academic_analytics)
+         -- Section D's bootstrap_ci_sharpe AND Section E's
+         factor_loadings
+      3. oos_cost_sensitivity metric
+         (refresh_oos_cost_sensitivity) -- Section G
+
+    Before this endpoint, the operator had to ssh to the Render
+    shell and trigger each compute manually. This endpoint runs
+    the chain in sequence so the appendix's pre-flight cache
+    gate (HTTPException 409 when any field is empty) can be
+    cleared from the admin UI / a single curl call.
+
+    Returns a per-step status report. Each step is wrapped
+    individually so a partial failure (e.g. the backtester
+    succeeds but academic_analytics refresh fails) still surfaces
+    which steps completed.
+
+    Sequencing matters: the backtester populates
+    strategy_results_cache + computes the canonical strategy_hash;
+    refresh_academic_analytics + refresh_oos_cost_sensitivity
+    both read that hash + write keyed to it. Running them out of
+    order against a stale hash produces orphan cache rows."""
+    import asyncio
+    if ENVIRONMENT == "test":
+        return {
+            "ok": True,
+            "note": "test environment -- compute chain skipped",
+            "steps": [],
+        }
+    steps: list[dict] = []
+    strategy_hash: str | None = None
+
+    # Step 1 -- backtester run + strategy_results_cache write.
+    try:
+        from tools.backtester import run_all_strategies
+        from tools.cache import (
+            _compute_data_hash, set_strategy_cache,
+        )
+        from tools.data_fetcher import get_full_history_async
+        history = await get_full_history_async()
+        monthly = history.get("equity_monthly")
+        n_rows = len(monthly) if monthly is not None else 0
+        last_date = (
+            str(monthly.index[-1].date())
+            if monthly is not None and len(monthly) > 0
+            else "unknown")
+        strategy_hash = _compute_data_hash(
+            n_rows, last_date, n_strategies=10)
+        results_dict = await asyncio.to_thread(
+            run_all_strategies, history)
+        await set_strategy_cache(
+            strategy_hash, results_dict, n_observations=n_rows,
+            risk_free_monthly=history.get("risk_free_monthly"))
+        steps.append({
+            "step": "backtester",
+            "ok": True,
+            "strategy_hash": strategy_hash,
+            "n_strategies": len(results_dict),
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "admin_refresh_appendix_caches_backtester_failed",
+            error=str(exc))
+        steps.append({
+            "step": "backtester",
+            "ok": False,
+            "error": str(exc),
+        })
+        # Backtester failure short-circuits the chain --
+        # downstream metrics need the strategy_hash that step 1
+        # produces.
+        raise HTTPException(
+            status_code=500,
+            detail={"steps": steps,
+                    "blocked_at": "backtester"})
+
+    # Step 2 -- academic_analytics refresh (bootstrap_ci_sharpe
+    # + factor_loadings).
+    try:
+        from tools.precomputed_analytics import (
+            refresh_academic_analytics,
+        )
+        await refresh_academic_analytics(strategy_hash)
+        steps.append({
+            "step": "refresh_academic_analytics",
+            "ok": True,
+            "data_hash": strategy_hash,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "admin_refresh_appendix_caches_academic_failed",
+            error=str(exc))
+        steps.append({
+            "step": "refresh_academic_analytics",
+            "ok": False,
+            "error": str(exc),
+        })
+        # Do NOT short-circuit -- cost sensitivity is
+        # independent; surfacing both failures is more useful
+        # than masking the second one.
+
+    # Step 3 -- OOS cost sensitivity refresh.
+    try:
+        from tools.regime_meta_validation import (
+            refresh_oos_cost_sensitivity,
+        )
+        ok = await refresh_oos_cost_sensitivity(strategy_hash)
+        steps.append({
+            "step": "refresh_oos_cost_sensitivity",
+            "ok": bool(ok),
+            "data_hash": strategy_hash,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "admin_refresh_appendix_caches_cost_sens_failed",
+            error=str(exc))
+        steps.append({
+            "step": "refresh_oos_cost_sensitivity",
+            "ok": False,
+            "error": str(exc),
+        })
+
+    all_ok = all(step.get("ok") for step in steps)
+    log.info(
+        "admin_refresh_appendix_caches_complete",
+        all_ok=all_ok,
+        strategy_hash=strategy_hash,
+        actor=session.get("email"))
+    return {
+        "ok": all_ok,
+        "strategy_hash": strategy_hash,
+        "steps": steps,
+    }
+
 
 @app.post("/api/v1/admin/warm-analytics-cache")
 async def post_warm_analytics_cache(
@@ -3059,6 +4731,750 @@ async def get_admin_data_status(session: dict = Depends(require_auth)):
         return {"available": False, "study_period": None, "tables": []}
     from tools.cache import get_data_status
     return await get_data_status()
+
+
+@app.get("/api/v1/admin/invariants")
+async def get_admin_invariants(session: dict = Depends(require_auth)):
+    """May 30 2026 — surfaces the latest invariant-framework run
+    summary. Backs the "Invariant Checks" health indicator in
+    Settings → Data and Study Period.
+
+    Returns either {"available": false, "ran_at": null} when no run
+    has happened yet (cold deploy) or a full summary with per-
+    violation breakdown for the admin to inspect. The framework
+    runs on every analytics warm via set_strategy_cache."""
+    from tools.invariant_checks import get_latest_result
+    latest = get_latest_result()
+    if latest is None:
+        return {
+            "available": False,
+            "ran_at": None,
+            "note": "No invariant run has landed yet — the framework "
+                    "fires on the next analytics warm.",
+        }
+    return {"available": True, **latest}
+
+
+@app.get("/api/v1/admin/invariants/history")
+async def get_admin_invariants_history(
+    limit: int = 7,
+    session: dict = Depends(require_auth),
+):
+    """June 2 2026 — last-N invariant verdicts for the /admin/health
+    Cache Warm History section.
+
+    Pure read of the rows PR #252 (set_strategy_cache_invariant_persist)
+    writes to analytics_metrics_cache with metric_kind='invariant_
+    summary'. One row per distinct data_hash, upserted with a fresh
+    computed_at on each warm against the same hash — so the result is
+    effectively "one row per distinct dataset that was warmed, most-
+    recent verdict per dataset."
+
+    No recomputation, no fan-out — a single SELECT plus a JSON
+    projection. Auth-only (not sysadmin) so any team member can read
+    the warm-history strip from the admin panel.
+
+    Fail-open: a DB read failure renders {available: false, rows: []}
+    rather than 500, matching the convention every other admin
+    health endpoint follows."""
+    limit = max(1, min(int(limit or 7), 30))
+    if ENVIRONMENT == "test":
+        return {"available": False, "rows": []}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {"available": False, "rows": []}
+        rows: list[dict[str, Any]] = []
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(text(
+                "SELECT data_hash, payload, computed_at "
+                "FROM analytics_metrics_cache "
+                "WHERE metric_kind = 'invariant_summary' "
+                "ORDER BY computed_at DESC "
+                "LIMIT :n"), {"n": limit})
+            for data_hash, payload, computed_at in r.fetchall():
+                # payload is JSONB; SQLAlchemy returns it as dict already
+                # under asyncpg, but tolerate a string fallback (some
+                # SQLAlchemy versions / drivers serialize differently).
+                if isinstance(payload, str):
+                    try:
+                        import json as _json
+                        payload = _json.loads(payload)
+                    except Exception:  # noqa: BLE001
+                        payload = {}
+                payload = payload or {}
+                rows.append({
+                    "computed_at":   (computed_at.isoformat()
+                                      if hasattr(computed_at, "isoformat")
+                                      else str(computed_at)),
+                    "data_hash":     (data_hash or "")[:8],
+                    "passed":        bool(payload.get("passed", True)),
+                    "checks_run":    int(payload.get("checks_run", 0)),
+                    "hard_failures": int(payload.get("hard_failures", 0)),
+                    "soft_warnings": int(payload.get("soft_warnings", 0)),
+                    "ran_at":        payload.get("ran_at"),
+                })
+        return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("admin_invariants_history_read_failed",
+                    error=str(exc))
+        return {"available": False, "rows": []}
+
+
+# ── Council query metrics (June 3 2026) ──────────────────────────────────
+
+
+async def _write_council_query_metric(
+    *,
+    question_type: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    context_bundle_size: int,
+    synthesis_text: str,
+    cio_input_tokens: int | None = None,
+) -> None:
+    """Writes one row to council_query_metrics for the just-completed
+    /api/council/query call.
+
+    Reads the live regime ONCE (15-min in-process cache), extracts the
+    recommendation direction from the synthesis prose, computes the
+    refined alignment score, and inserts. Skipped entirely in the
+    test environment (no DB). Fail-open per the wider council
+    endpoint's post-stream-logging convention.
+    """
+    if ENVIRONMENT == "test":
+        return
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return
+
+        # Live regime (the 15-min cache; cheap once warm).
+        hmm_state: str | None = None
+        hmm_confidence: float | None = None
+        try:
+            from tools.regime_detector import detect_current_regime
+            r = detect_current_regime() or {}
+            hmm_state = r.get("hmm_regime")
+            probs = r.get("hmm_probabilities") or {}
+            if hmm_state and isinstance(probs, dict):
+                hmm_confidence = float(probs.get(hmm_state, 0.0))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("council_metric_regime_read_failed",
+                        error=str(exc))
+
+        # Direction extraction + refined alignment score.
+        from tools.council_direction_extractor import (
+            alignment_score, extract_direction,
+        )
+        direction = extract_direction(synthesis_text)
+        score = alignment_score(direction, hmm_state, hmm_confidence)
+
+        # Anchor the row to the dataset that produced it.
+        data_hash: str | None = None
+        try:
+            from tools.cache import get_latest_strategy_hash
+            data_hash = await get_latest_strategy_hash()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("council_metric_hash_read_failed", error=str(exc))
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(text(
+                "INSERT INTO council_query_metrics "
+                "(question_type, input_tokens, output_tokens, "
+                " cio_input_tokens, context_bundle_size, "
+                " hmm_state, hmm_confidence, "
+                " recommendation_direction, hmm_alignment_score, "
+                " data_hash) VALUES "
+                "(:qt, :it, :ot, :cit, :cbs, :hs, :hc, :rd, :as, :dh)"
+            ), {
+                "qt":  question_type,
+                "it":  (int(input_tokens)
+                        if input_tokens is not None else None),
+                "ot":  (int(output_tokens)
+                        if output_tokens is not None else None),
+                "cit": (int(cio_input_tokens)
+                        if cio_input_tokens is not None else None),
+                "cbs": int(context_bundle_size or 0),
+                "hs":  hmm_state,
+                "hc":  hmm_confidence,
+                "rd":  direction,
+                "as":  score,
+                "dh":  data_hash,
+            })
+            await session.commit()
+        log.info("council_query_metric_written",
+                 question_type=question_type,
+                 input_tokens=input_tokens,
+                 output_tokens=output_tokens,
+                 context_bundle_size=context_bundle_size,
+                 direction=direction,
+                 hmm_state=hmm_state,
+                 alignment_score=score)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("council_query_metric_write_inner_failed",
+                    error=str(exc))
+
+
+@app.get("/api/v1/admin/council-metrics")
+async def get_admin_council_metrics(
+    limit: int = 30,
+    session: dict = Depends(require_auth),
+):
+    """The /admin/council-metrics surface that backs the cost-and-
+    HMM-alignment measurement dashboard.
+
+    Two payloads in one envelope:
+      rows        — the latest N council_query_metrics rows
+      aggregates  — per-question_type averages plus the headline
+                    token_reduction_vs_baseline figure
+
+    Fail-open: a DB unreachable / missing table returns
+    {available:false, rows:[], aggregates:{}} rather than 500.
+    Auth-only — any authenticated user can read. June 3 2026."""
+    limit = max(1, min(int(limit or 30), 200))
+    if ENVIRONMENT == "test":
+        return {"available": False, "rows": [], "aggregates": {}}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {"available": False, "rows": [], "aggregates": {}}
+        rows: list[dict[str, Any]] = []
+        per_type: dict[str, dict[str, Any]] = {}
+        baseline_input = None
+        baseline_cio = None
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(text(
+                "SELECT id, timestamp, question_type, input_tokens, "
+                " output_tokens, cio_input_tokens, "
+                " context_bundle_size, hmm_state, "
+                " hmm_confidence, recommendation_direction, "
+                " hmm_alignment_score, data_hash "
+                "FROM council_query_metrics "
+                "ORDER BY timestamp DESC LIMIT :n"), {"n": limit})
+            for row in r.fetchall():
+                rows.append({
+                    "id":                     row[0],
+                    "timestamp":              (row[1].isoformat()
+                                               if hasattr(row[1], "isoformat")
+                                               else str(row[1])),
+                    "question_type":          row[2],
+                    "input_tokens":           row[3],
+                    "output_tokens":          row[4],
+                    "cio_input_tokens":       row[5],
+                    "context_bundle_size":    row[6],
+                    "hmm_state":              row[7],
+                    "hmm_confidence":         row[8],
+                    "recommendation_direction": row[9],
+                    "hmm_alignment_score":    row[10],
+                    "data_hash":              (row[11] or "")[:8] if row[11] else None,
+                })
+            # Aggregates — one SQL per metric so each remains
+            # independently fail-open on a column type drift.
+            agg_r = await db.execute(text(
+                "SELECT question_type, "
+                " AVG(input_tokens)::float AS avg_input, "
+                " AVG(output_tokens)::float AS avg_output, "
+                " AVG(cio_input_tokens)::float AS avg_cio_input, "
+                " AVG(context_bundle_size)::float AS avg_bundle, "
+                " AVG(hmm_alignment_score)::float AS avg_align, "
+                " COUNT(*)::int AS n_rows "
+                "FROM council_query_metrics "
+                "GROUP BY question_type"))
+            for (qt, avg_in, avg_out, avg_cio_in, avg_bundle,
+                 avg_align, n) in agg_r.fetchall():
+                per_type[qt] = {
+                    "avg_input_tokens":       avg_in,
+                    "avg_output_tokens":      avg_out,
+                    "avg_cio_input_tokens":   avg_cio_in,
+                    "avg_context_bundle_size": avg_bundle,
+                    "avg_hmm_alignment_score": avg_align,
+                    "n_rows":                 n,
+                }
+                if qt in ("baseline_full", "full"):
+                    # Use the baseline_full averages preferentially;
+                    # fall back to the live "full" fallback rows if
+                    # the baseline-capture run hasn't been done yet.
+                    if qt == "baseline_full":
+                        if avg_in is not None:
+                            baseline_input = avg_in
+                        if avg_cio_in is not None:
+                            baseline_cio = avg_cio_in
+                    else:  # "full" — only used when baseline_full empty
+                        if avg_in is not None and baseline_input is None:
+                            baseline_input = avg_in
+                        if avg_cio_in is not None and baseline_cio is None:
+                            baseline_cio = avg_cio_in
+
+        # Reductions per bundle — two parallel maps. Total-tokens
+        # is noisy (chart-vision dominates); cio_input_tokens is the
+        # like-for-like measurement. Both surfaced.
+        reductions: dict[str, float | None] = {}
+        cio_reductions: dict[str, float | None] = {}
+        for qt, stats in per_type.items():
+            avg_in = stats.get("avg_input_tokens")
+            if (baseline_input and avg_in and avg_in > 0
+                    and qt not in ("baseline_full", "full")):
+                reductions[qt] = round(
+                    1 - (float(avg_in) / float(baseline_input)), 4)
+            else:
+                reductions[qt] = None
+            avg_cio_in = stats.get("avg_cio_input_tokens")
+            if (baseline_cio and avg_cio_in and avg_cio_in > 0
+                    and qt not in ("baseline_full", "full")):
+                cio_reductions[qt] = round(
+                    1 - (float(avg_cio_in) / float(baseline_cio)), 4)
+            else:
+                cio_reductions[qt] = None
+
+        return {
+            "available": True,
+            "rows": rows,
+            "aggregates": {
+                "per_question_type": per_type,
+                "token_reduction_vs_baseline": reductions,
+                "cio_token_reduction_vs_baseline": cio_reductions,
+                "baseline_avg_input_tokens": baseline_input,
+                "baseline_avg_cio_input_tokens": baseline_cio,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("admin_council_metrics_read_failed", error=str(exc))
+        return {"available": False, "rows": [], "aggregates": {}}
+
+
+# ── Document audit (June 3 2026) ─────────────────────────────────────────
+
+
+async def _run_document_audit(
+    content_text: str,
+    document_type: str,
+    email: str,
+) -> dict[str, Any] | None:
+    """Runs the post-generation audit. Returns the flags_by_check
+    dict suitable for editor_drafts.audit_warnings, or None when
+    nothing was flagged (so the column stores NULL).
+
+    Reads the latest strategy_results_cache row ONCE so the numeric
+    cross-reference and consistency checks share the same dataset
+    snapshot. For the brief, ALSO reads the cached brief section
+    plan from story_plans so PR #336's CHECK 5 (story_plan_violation),
+    CHECK 6 (required_citations), and CHECK 7 (section_word_count)
+    can fire end-to-end. Fail-open per the wider generator: an audit
+    exception logs and returns None, never blocks the document write.
+    """
+    if ENVIRONMENT == "test":
+        return None
+    try:
+        from tools.cache import (
+            get_latest_strategy_cache, get_latest_strategy_hash,
+        )
+        from tools.document_audit import audit_document
+        strategy_cache = await get_latest_strategy_cache()
+        # PR #336 -- pull the cached brief section plan so CHECK 5
+        # has the locked numeric_anchors to compare against. Fail-
+        # open if the plan is unavailable (cold cache or a brief
+        # generated before #333's caching layer landed); the check
+        # skips silently in that case.
+        brief_section_plan: dict | None = None
+        if document_type == "executive_brief":
+            try:
+                from tools import story_plan as sp
+                data_hash = await get_latest_strategy_hash()
+                if data_hash:
+                    plan = await sp.get_cached_story_plan(
+                        data_hash, "brief")
+                    if plan and isinstance(
+                            plan.get("section_plan"), dict):
+                        brief_section_plan = plan["section_plan"]
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "document_audit_brief_plan_lookup_failed",
+                    error=str(exc))
+        result = audit_document(
+            content_text, document_type,
+            strategy_cache=strategy_cache,
+            brief_section_plan=brief_section_plan)
+        log.info("document_audit_executed",
+                 document_type=document_type,
+                 owner=email,
+                 flag_counts=result.flag_counts,
+                 skipped=list(result.skipped.keys()))
+        if not result.has_any_flag:
+            return None
+        return {
+            "flags_by_check": result.flags_by_check,
+            "flag_counts":    result.flag_counts,
+            "skipped":        result.skipped,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("document_audit_failed",
+                    document_type=document_type, error=str(exc))
+        return None
+
+
+async def _write_audit_metrics(
+    document_type: str,
+    email: str,
+    draft_id: int | None,
+    audit_warnings: dict[str, Any] | None,
+) -> None:
+    """Persist a document_audit_metrics row for the just-completed
+    generation. Reads the live strategy_hash to anchor the row to
+    the dataset that produced the document."""
+    if ENVIRONMENT == "test":
+        return
+    try:
+        from tools.cache import get_latest_strategy_hash
+        from tools.document_audit_metrics import write_metric
+        flag_counts = (
+            (audit_warnings or {}).get("flag_counts")
+            or {"numeric": 0, "direction": 0, "consistency": 0,
+                "citation": 0, "total": 0})
+        data_hash = await get_latest_strategy_hash()
+        await write_metric(
+            document_type=document_type, owner_email=email,
+            draft_id=draft_id, flag_counts=flag_counts,
+            data_hash=data_hash)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("document_audit_metrics_inner_failed",
+                    error=str(exc))
+
+
+@app.get("/api/v1/admin/document-audit-metrics")
+async def get_admin_document_audit_metrics(
+    limit: int = 30,
+    session: dict = Depends(require_auth),
+):
+    """Last-N document audit rows + per-document-type averages.
+    Backs the admin tile that surfaces flag-rate trends so a
+    drift in generation quality (e.g. citation-completeness flags
+    spiking after a prompt change) is visible at a glance.
+
+    Auth-only — any authenticated user can read. Fail-open in
+    the test env to {available:false, rows:[], aggregates:{}}.
+    June 3 2026."""
+    from tools.document_audit_metrics import read_recent
+    return await read_recent(limit=limit)
+
+
+# ── Automated email system — manual triggers (June 1 2026) ────────────────
+
+
+@app.post("/api/v1/admin/send-digest")
+@limiter.limit("6/hour")
+async def admin_send_digest(
+    request: Request,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Component 1 — daily team digest manual trigger. Also called by
+    the Render cron `forest-capital-digest` at 07:00 ET. Returns the
+    Resend message id on success.
+
+    Synchronous send: the assembly + Resend round-trip take a few
+    seconds, well inside the request budget — no need for a job
+    handle. Rate-limited to 6/hour so a sysadmin testing the digest
+    cannot accidentally spam the team."""
+    from tools.email_digest import send_daily_digest
+    return await send_daily_digest()
+
+
+@app.post("/api/v1/admin/test-alert")
+@limiter.limit("6/hour")
+async def admin_test_alert(
+    request: Request,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Component 2 — synthetic invariant alert (Michael only).
+    Fires the alert email using a hand-built violations payload so
+    the wire format + Resend round-trip can be exercised without
+    waiting for a real invariant breach. Rate-limited 6/hour."""
+    from tools.email_alert import send_test_alert
+    return send_test_alert()
+
+
+# ── Layer 4: submission freeze ───────────────────────────────────────────────
+# Locks document generation to a frozen data_hash for the FNA 670
+# submission deadline (June 30 2026). Live platform reads (CIO card,
+# regime detector, Investment Outlook, daily digest) continue calling
+# current_data_hash() directly so the July 1 presentation shows live
+# signals. See backend/tools/submission_freeze.py for the operational
+# runbook (the curl invocations the operator runs on submission day).
+
+@app.post("/api/v1/admin/submission-freeze")
+async def admin_set_submission_freeze(
+    body: dict,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Activate or deactivate the submission freeze.
+
+    Body shape:
+      {"active": true,  "freeze_hash": "c421fb89..."}  -- ON
+      {"active": false}                                -- OFF
+
+    On activate: validates freeze_hash matches a strategy_results_cache
+    row before flipping (a typo'd hash would otherwise silently lock
+    documents against a non-existent cache key, producing empty
+    substitution tables on every generation).
+
+    Sysadmin-only (manage_users permission, same gate every other
+    destructive admin endpoint uses).
+    """
+    from tools.submission_freeze import set_freeze_config
+
+    active = bool(body.get("active"))
+    freeze_hash = body.get("freeze_hash")
+
+    if active:
+        if not freeze_hash or not isinstance(freeze_hash, str):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "freeze_hash is required when activating the "
+                    "submission freeze. Supply the data_hash from "
+                    "strategy_results_cache the documents were "
+                    "generated against."),
+            )
+        # Validate the hash exists in strategy_results_cache. A typo
+        # caught HERE costs the operator one HTTP round-trip; the
+        # same typo caught at generation time costs an entire
+        # document re-generation under the wrong frozen hash.
+        try:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal as _DB
+            if _DB is not None:
+                async with _DB() as s:
+                    row = await s.execute(
+                        text(
+                            "SELECT 1 FROM strategy_results_cache "
+                            "WHERE strategy_hash = :h LIMIT 1"),
+                        {"h": freeze_hash},
+                    )
+                    if row.fetchone() is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"freeze_hash {freeze_hash[:8]}... "
+                                "not found in strategy_results_cache. "
+                                "Run a generation pass first so the "
+                                "cache row exists, then activate the "
+                                "freeze against the resulting hash."),
+                        )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "submission_freeze_hash_validation_skipped",
+                error=str(exc),
+                note="DB unreachable -- activating without validation")
+
+    try:
+        new_config = await set_freeze_config(
+            active=active,
+            freeze_hash=freeze_hash if active else None,
+            activated_by=session.get("email"),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return new_config
+
+
+async def _read_latest_strategy_hash() -> str:
+    """Returns the most recent strategy_results_cache.strategy_hash
+    (e.g. 'c421fb895347f924') or "" on read failure / empty cache.
+
+    The canonical hash used by document generation + freeze
+    validation. Distinct from tools.audit_assembler.current_data_hash
+    which returns a SHA256 of platform-level row counts + max dates.
+    Extracted to a module-level helper so the submission-status
+    endpoint can be stubbed in tests without monkeypatching
+    AsyncSessionLocal."""
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return ""
+        async with AsyncSessionLocal() as session_db:  # type: ignore[union-attr]
+            row = await session_db.execute(text(
+                "SELECT strategy_hash FROM strategy_results_cache "
+                "ORDER BY computed_at DESC LIMIT 1"))
+            r = row.fetchone()
+            return str(r[0]) if r and r[0] else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+@app.get("/api/v1/admin/submission-status")
+async def admin_get_submission_status(
+    session: dict = Depends(require_auth),
+):
+    """Reports the submission-readiness verdict: the freeze state, the
+    drift between the frozen hash and the live hash, and the per-
+    document export+verification state for the calling user.
+
+    Available to any authenticated user (read-only) so Bob and Molly
+    can see whether the freeze is on without needing sysadmin
+    permissions. The activation/deactivation endpoint is sysadmin-only.
+
+    Shape:
+      {
+        "freeze_active": bool,
+        "freeze_hash": str | None,
+        "freeze_date": str | None,
+        "current_live_hash": str,
+        "hash_drift": bool,
+        "frozen_documents": {
+          "brief":    {"generated", "exported", "export_verified",
+                        "editor_draft_id"},
+          "deck":     {...},
+          "appendix": {...},
+        },
+        "submission_ready": bool,
+        "submission_recommendation": str,
+      }
+    """
+    from tools.editor_drafts import get_current_draft_with_layer3
+    from tools.submission_freeze import get_freeze_config
+
+    config = await get_freeze_config()
+    freeze_active = bool(config.get("active"))
+    freeze_hash = config.get("freeze_hash")
+    freeze_date = config.get("freeze_date")
+
+    # June 21 2026 -- read strategy_hash from strategy_results_cache
+    # directly, NOT current_data_hash(). The latter is a SHA256 of
+    # row counts + max dates across three tables (a platform
+    # fingerprint), distinct from strategy_results_cache.strategy_hash
+    # which is the canonical hash document generation + freeze
+    # validation both cite. Same fix shape as PR #354 for the
+    # key-metrics endpoint.
+    try:
+        live_hash = await _read_latest_strategy_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "submission_status_live_hash_read_failed", error=str(exc))
+        live_hash = ""
+
+    hash_drift = bool(freeze_active and freeze_hash
+                      and live_hash and freeze_hash != live_hash)
+
+    # Per-document state for the calling user. We read editor_drafts
+    # because that's where the generated draft lands; once the user
+    # exports it the export_verification JSONB (Layer 3a) carries the
+    # verification result. The get_current_draft return shape is
+    # version-compatible across Layer 3a -- on pre-3a deploys the
+    # export_verification key is simply absent.
+    email = session.get("email") or ""
+    document_keys = (
+        ("brief", "executive_brief"),
+        ("deck", "presentation_deck"),
+        ("appendix", "analytical_appendix"),
+    )
+    frozen_documents: dict[str, dict] = {}
+    for short_key, doc_type in document_keys:
+        # Switched from get_current_draft to the Layer-3 variant
+        # (June 21 2026) so the export_verification JSONB column is
+        # actually fetched -- the legacy get_current_draft uses the
+        # legacy column set and NEVER read export_verification, so
+        # `draft.get("export_verification")` below was always None
+        # and every document showed exported=False even when a draft
+        # had been exported. The layer3 helper has its own savepoint-
+        # style retry that rolls back the failed-transaction state
+        # before falling back to the legacy column set, so an
+        # aborted transaction on a column-missing first attempt
+        # doesn't break the second attempt.
+        try:
+            draft = await get_current_draft_with_layer3(email, doc_type)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("submission_status_draft_read_failed",
+                        document_type=doc_type, error=str(exc))
+            draft = None
+
+        if not draft:
+            frozen_documents[short_key] = {
+                "generated": False,
+                "exported": False,
+                "export_verified": None,
+                "editor_draft_id": None,
+            }
+            continue
+
+        # export_verification is a Layer 3a column -- pre-3a drafts
+        # simply lack the key. Treat "missing" as "not yet exported"
+        # rather than "exported but unverified" so the readiness
+        # verdict is conservative on pre-3a deploys.
+        ev: Any = None
+        try:
+            ev = draft.get("export_verification")
+        except Exception:  # noqa: BLE001
+            ev = None
+        exported = ev is not None and ev != {}
+        export_verified: bool | None = None
+        if exported and isinstance(ev, dict):
+            passed = ev.get("passed")
+            if isinstance(passed, bool):
+                export_verified = passed
+
+        frozen_documents[short_key] = {
+            "generated": True,
+            "exported": bool(exported),
+            "export_verified": export_verified,
+            "editor_draft_id": str(draft.get("id"))
+            if draft.get("id") is not None else None,
+        }
+
+    # Readiness verdict + recommendation -- the plain-English sentence
+    # the Reports page surfaces in the freeze banner.
+    all_generated = all(d["generated"] for d in frozen_documents.values())
+    all_exported = all(d["exported"] for d in frozen_documents.values())
+    all_verified = all(
+        d["export_verified"] is True for d in frozen_documents.values())
+
+    submission_ready = bool(
+        freeze_active and all_generated and all_exported
+        and all_verified and not hash_drift)
+
+    def _missing(predicate) -> str:
+        names = [k for k, d in frozen_documents.items() if not predicate(d)]
+        return ", ".join(names) if names else ""
+
+    if not freeze_active:
+        recommendation = (
+            "Activate the submission freeze after generating and "
+            "verifying all deliverables.")
+    elif not all_generated:
+        recommendation = (
+            f"Generate {_missing(lambda d: d['generated'])} "
+            "before submitting.")
+    elif not all_exported:
+        recommendation = (
+            f"Export {_missing(lambda d: d['exported'])} "
+            "before submitting.")
+    elif not all_verified:
+        recommendation = (
+            "Run Pre-Submission Check to verify all deliverables "
+            "against the cache.")
+    else:
+        recommendation = (
+            "All deliverables verified and freeze active. Safe to "
+            "submit.")
+
+    return {
+        "freeze_active": freeze_active,
+        "freeze_hash": freeze_hash,
+        "freeze_date": freeze_date,
+        "current_live_hash": live_hash,
+        "hash_drift": hash_drift,
+        "frozen_documents": frozen_documents,
+        "submission_ready": submission_ready,
+        "submission_recommendation": recommendation,
+    }
 
 
 @app.get("/api/v1/admin/team-activity/merge-commit-authors")
@@ -3281,17 +5697,39 @@ async def charts_render(
 # PATCH is silent (no version), POST .../versions saves a named checkpoint.
 
 @app.get("/api/v1/documents/drafts")
-async def editor_list_drafts(session: dict = Depends(require_team_member)):
-    """Every non-deleted draft owned by the current user."""
-    from tools.editor_drafts import list_drafts
-    return {"drafts": await list_drafts(session["email"])}
+async def editor_list_drafts(
+    include_all: bool = False,
+    session: dict = Depends(require_team_member),
+):
+    """Default response (June 25 2026): only is_current=true drafts
+    -- at most one row per document_type. The previous all-drafts
+    response broke DocumentGenerationPanel's 'is there a current
+    draft for this type?' lookup once history accumulated, blocking
+    Open in Editor for the whole team.
+
+    Query: include_all=true keeps the legacy full-history behaviour,
+    used by the editor toolbar's DraftVersionSelector which lists
+    every version of the current document_type for the user to
+    switch between.
+
+    Owner-scoping was removed June 24 2026 (PR #399); team members
+    share access to every document. The endpoint stays behind
+    require_team_member so viewers (Dr. Panttser) still cannot
+    reach it -- they get the same 403 they got before."""
+    from tools.editor_drafts import list_all_drafts
+    return {
+        "drafts": await list_all_drafts(include_all=include_all),
+    }
 
 
 @app.get("/api/v1/documents/drafts/{draft_id}")
 async def editor_get_draft(
     draft_id: int, session: dict = Depends(require_team_member),
 ):
-    """A single draft with its current working content."""
+    """A single draft with its current working content. June 24
+    2026: get_draft is not owner-scoped; the team_member gate
+    is the authoritative access boundary. Viewers cannot reach
+    this endpoint."""
     from tools.editor_drafts import get_draft
     draft = await get_draft(draft_id)
     if draft is None:
@@ -3326,6 +5764,100 @@ async def editor_create_draft(
     return draft
 
 
+@app.post(
+    "/api/v1/editor/drafts/{draft_id}/accept-unverified")
+async def accept_unverified_value(
+    draft_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """June 28 2026 (PR #479) -- log an operator "accept as-is"
+    decision for an <unverified> tag in a draft.
+
+    The frontend popover (UnverifiedPopover.tsx) calls this
+    when Bob or Molly clicks "Accept as-is" on a flagged
+    numeric value. The endpoint:
+      1. Logs the override into editor_numeric_overrides
+         (migration 066 -- the existing table from PR #469).
+      2. Returns the override-record id + a timestamp.
+
+    The frontend separately rewrites the draft content_json
+    via the existing PATCH endpoint to remove the
+    <unverified> wrapper (leaving the raw value as plain
+    text). This endpoint is the AUDIT LOG, not a content
+    mutator -- separation of concerns.
+
+    Body: {value: str, sentence_context: str, document_type:
+    str?}. `value` is the raw numeric the operator accepted.
+    `sentence_context` is the surrounding sentence text for
+    the audit log (caps at 1000 chars on persist).
+    `document_type` defaults to the draft's stored type when
+    omitted.
+
+    Fail-open: DB write failure returns a 503 with details;
+    the frontend should surface the error + leave the
+    <unverified> wrapper in place pending a retry."""
+    value = str(body.get("value", "")).strip()
+    sentence = str(body.get("sentence_context", "")).strip()
+    user_email = session.get("email") or ""
+    if not value:
+        raise HTTPException(
+            status_code=422,
+            detail="value is required")
+    if not user_email:
+        raise HTTPException(
+            status_code=401,
+            detail="session has no email")
+    # Resolve document_type from the body or the stored draft.
+    doc_type = body.get("document_type")
+    if not doc_type:
+        try:
+            from tools.editor_drafts import get_draft
+            d = await get_draft(draft_id)
+            if d is not None:
+                doc_type = d.get("document_type")
+        except Exception:  # noqa: BLE001
+            doc_type = None
+    # Persist as a single editor_numeric_overrides row using
+    # the existing log_editor_overrides helper. The
+    # suggested_token slot is intentionally NULL for an
+    # accept-as-is decision (the operator chose NOT to swap).
+    from tools.editor_save_numeric_check import (
+        log_editor_overrides,
+    )
+    n = await log_editor_overrides(
+        draft_id,
+        doc_type,
+        user_email,
+        [{
+            "offending_value": value,
+            "sentence":        sentence,
+            "suggested_token": None,
+        }])
+    if n != 1:
+        # DB write failed (log_editor_overrides logged the
+        # exception + returned 0 / -1). Surface 503 so the
+        # frontend can retry.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not log the accept-as-is decision. "
+                "Retry; the <unverified> wrapper is still in "
+                "place."))
+    log.info(
+        "unverified_accept_logged",
+        draft_id=draft_id,
+        document_type=doc_type,
+        user_email=user_email,
+        value=value)
+    return {
+        "logged":         True,
+        "draft_id":       draft_id,
+        "document_type":  doc_type,
+        "value":          value,
+        "user_email":     user_email,
+    }
+
+
 @app.patch("/api/v1/documents/drafts/{draft_id}")
 async def editor_update_draft(
     draft_id: int, body: dict,
@@ -3334,15 +5866,94 @@ async def editor_update_draft(
     """
     Auto-save — overwrites the working content. Silent: does NOT create
     a version. Body: {content_json, content_text, word_count?}.
+
+    June 28 2026 -- touchpoint 5 of the hard-lock guardrail.
+    BEFORE persisting, the incoming content_json is scanned for
+    untoken-backed numerics (e.g. operator typed a "0.86" by hand
+    that bypasses the harness loop). Warnings are NON-BLOCKING --
+    the save always succeeds. Offenders are logged to
+    editor_numeric_overrides for audit + returned in the response
+    so the frontend can render a dismissible banner.
     """
     from tools.editor_drafts import update_draft
+    from tools.editor_save_numeric_check import (
+        log_editor_overrides,
+        scan_editor_save_for_untoken_numerics,
+    )
+
+    # ── Pre-persist scan -- non-blocking, fail-open ────────────
+    warnings: list[dict] = []
+    try:
+        # Build the current substitution table so the scanner
+        # has the canonical token-to-value map. Freeze-aware via
+        # PR #455 v4's effective-hash resolver.
+        from tools.audit_assembler import current_data_hash
+        from tools.cache import get_strategy_cache
+        from tools.cio_recommendation import (
+            get_latest_recommendation,
+        )
+        from tools.numeric_substitution import (
+            get_substitution_table,
+        )
+        from tools.submission_freeze import (
+            get_effective_data_hash,
+        )
+
+        live_hash = await current_data_hash()
+        eff_hash = (
+            await get_effective_data_hash(live_hash) or live_hash)
+        cio = await get_latest_recommendation() or {}
+        strategy_cache = await get_strategy_cache(eff_hash) or {}
+        sub_table = get_substitution_table(
+            eff_hash, strategy_cache, cio, hash_verified=True)
+
+        warnings = scan_editor_save_for_untoken_numerics(
+            body.get("content_json"), sub_table)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_save_numeric_scan_skipped",
+            draft_id=draft_id, error=str(exc))
+        warnings = []
+
+    # ── Persist regardless of warning count ────────────────────
     wc = body.get("word_count")
     ok = await update_draft(
         draft_id, body.get("content_json"), body.get("content_text"),
         word_count_override=int(wc) if isinstance(wc, (int, float)) else None)
     if not ok:
         raise HTTPException(status_code=404, detail="Draft not found.")
-    return {"saved": True, "draft_id": draft_id}
+
+    # ── Audit-log every warning (after persist; idempotent on
+    #    DB failure) ────────────────────────────────────────────
+    if warnings:
+        try:
+            from sqlalchemy import text as _text
+            from database import AsyncSessionLocal
+            doc_type: str | None = None
+            if AsyncSessionLocal is not None:
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(_text(
+                        "SELECT document_type FROM editor_drafts "
+                        "WHERE id = :id"), {"id": draft_id})
+                    row = r.fetchone()
+                    doc_type = row[0] if row else None
+            await log_editor_overrides(
+                draft_id,
+                doc_type,
+                session.get("email", ""),
+                warnings)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "editor_save_numeric_audit_log_skipped",
+                draft_id=draft_id, error=str(exc))
+
+    return {
+        "saved":    True,
+        "draft_id": draft_id,
+        # June 28 2026 -- non-blocking numeric warnings. Frontend
+        # surfaces these in a dismissible banner.
+        "numeric_warnings": warnings,
+    }
 
 
 @app.post("/api/v1/documents/drafts/{draft_id}/versions", status_code=201)
@@ -3777,7 +6388,12 @@ async def get_draft_academic_review_status(
     from tools.academic_review_score import ADVISORY_THRESHOLD
 
     draft = await get_draft(draft_id)
-    if draft is None or draft.get("owner_email") != session.get("email"):
+    # June 25 2026 -- documents are team-shared (PR #399), so the
+    # owner_email filter was producing spurious 404s for team
+    # members opening a draft someone else generated. The endpoint
+    # already gates on require_team_member; that's the authoritative
+    # access check.
+    if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found.")
 
     document_type = draft.get("document_type") or ""
@@ -3790,12 +6406,24 @@ async def get_draft_academic_review_status(
         "section_ratings": {},
         "run_at":          None,
         "threshold":       ADVISORY_THRESHOLD,
+        # June 25 2026 -- new fields per the editor's review-status
+        # badge contract. Backward-compatible additions; legacy
+        # callers ignore them.
+        "draft_id":        draft_id,
+        "has_review":      False,
+        "last_review_at":  None,
+        "arbiter_score":   None,
+        "verdict_summary": None,
     }
 
-    # Auto-review only fires for these two document types. A deck
-    # or script draft has no review to surface; return the empty
-    # shape so the frontend can hide the indicator cleanly.
-    if document_type not in ("midpoint_paper", "executive_brief"):
+    # Auto-review tracking covers all four submission doc types now.
+    # The midpoint legacy is preserved for advisory; per-doc reviews
+    # fire from the editor's per-doc trigger (Concern 3) which logs
+    # an agent_interactions row tied to the draft_id.
+    if document_type not in (
+            "midpoint_paper", "executive_brief",
+            "analytical_appendix", "presentation_deck",
+            "presentation_script"):
         return empty
 
     try:
@@ -3820,6 +6448,16 @@ async def get_draft_academic_review_status(
         and isinstance(score, (int, float))
         and score < ADVISORY_THRESHOLD
     )
+    response_summary = latest.get("response_summary") or ""
+    verdict_summary: str | None = None
+    if response_summary:
+        # Strip markdown headings + collapse whitespace; first
+        # ~280 chars is enough for the editor's badge tooltip.
+        compact = " ".join(
+            response_summary.replace("#", "").split())
+        verdict_summary = (
+            compact[:280] + "…" if len(compact) > 280
+            else (compact or None))
     return {
         "status":          "complete",
         "score":           score,
@@ -3829,74 +6467,473 @@ async def get_draft_academic_review_status(
         "section_ratings": meta.get("section_ratings") or {},
         "run_at":          latest.get("timestamp"),
         "threshold":       ADVISORY_THRESHOLD,
+        # New fields (June 25 2026) -- additive, legacy-safe.
+        "draft_id":        draft_id,
+        "has_review":      True,
+        "last_review_at":  latest.get("timestamp"),
+        "arbiter_score":   score,
+        "verdict_summary": verdict_summary,
     }
+
+
+@app.get("/api/v1/documents/drafts/{draft_id}/review-export")
+async def export_draft_academic_review(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """June 25 2026 -- DOCX export of the completed academic review
+    for a draft. Returns the assembled report as
+    application/vnd.openxmlformats-officedocument.wordprocessingml
+    .document download.
+
+    Sourced from three places:
+      editor_drafts row              cover metadata
+      council_debates row            peer responses + critic findings
+                                     + arbiter resolution + fix
+                                     proposals + counter arguments
+      agent_interactions row         arbiter prose (response_summary)
+                                     + overall_rating + score
+                                     + independent_review block
+    Returns 404 when the draft does not exist, 200 + DOCX even when
+    no review has landed yet (the DOCX surfaces a 'no review found'
+    notice in each section so the download endpoint never errors).
+    """
+    from datetime import date
+
+    from tools.editor_drafts import get_draft
+    from tools.activity_log import get_latest_academic_review_for_draft
+    from tools.review_docx import build_review_docx
+    from agents.academic_review import get_latest_debate_for_draft
+
+    draft = await get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(
+            status_code=404, detail="Draft not found.")
+
+    interaction = await get_latest_academic_review_for_draft(draft_id)
+    debate = await get_latest_debate_for_draft(draft_id)
+
+    if interaction is None and debate is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No academic review found for this draft. "
+                "Run the review first."))
+
+    content = await asyncio.to_thread(
+        build_review_docx,
+        draft=draft, debate=debate, interaction=interaction)
+
+    doc_type = draft.get("document_type") or "document"
+    slug = doc_type.replace("_", "-")
+    filename = (
+        f"forest-capital-{slug}-academic-review-"
+        f"draft-{draft_id}-{date.today().isoformat()}.docx")
+    return Response(
+        content=content,
+        media_type=_DOCX_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        })
 
 
 @app.post("/api/v1/documents/script/generate")
 @limiter.limit("6/minute")
 async def generate_presentation_script(
     request: Request,
-    body: dict | None = None,
     session: dict = Depends(require_permission("team_member")),
 ):
+    """June 25 2026 -- async job kickoff for presentation script
+    generation. Matches the brief / appendix / deck pattern: 202
+    + {job_id, status: 'pending'}, generation runs as a background
+    task via _generate_async, the frontend polls /api/v1/jobs/<id>
+    for completion.
+
+    The previous synchronous shape (POST returns 200 with draft_id
+    inline) prevented the Reports tile from inheriting the standard
+    inProgress / complete / failed / idle ternary because the tile's
+    UI is driven by the generation-jobs Zustand store -- which only
+    populates when an endpoint returns a job_id. Refactoring to the
+    async pattern lets the script tile move into the DOCS array and
+    render with the same chrome as the other three deliverables.
+
+    Deck-draft lookup moved from the request body to
+    get_current_draft_by_type('presentation_deck') -- mirrors the
+    academic review's team-shared lookup (PR #410). The body
+    parameter is now ignored; existing clients passing
+    {draft_id: ...} continue to work but the value is unused.
+
+    Speakers-required validation + missing-deck 404 now surface
+    INSIDE the job (status='failed' with the error message) rather
+    than as synchronous HTTPException. The frontend's failed-state
+    branch renders the error chip + Try Again so the UX is the
+    same; the failure just lands one polling-tick later.
     """
-    Generates a presentation script from a presentation_deck draft.
+    return _start_generation_job(
+        "presentation_script", session, request)
 
-    Reads the deck (draft_id in the body), the caller's current
-    executive_brief and midpoint_paper drafts as academic context (both
-    optional — generation degrades gracefully without them), runs the
-    Academic Writer through the generator-evaluator harness, and stores
-    the result as a new presentation_script editor draft. Returns the new
-    draft id and its word / speaker / slide counts.
 
-    400 when no slide has a speaker assigned; 404 when the deck draft is
-    not found. Team members only.
+@app.post("/api/v1/documents/script/regenerate-slide")
+@limiter.limit("12/minute")
+async def regenerate_script_slide(
+    request: Request,
+    body: dict,
+    session: dict = Depends(
+        require_permission("generate_documents")),
+):
+    """June 26 2026 -- per-slide script regeneration.
+
+    Body: {draft_id: int, slide_number: int}
+
+    Returns: {content_json: TipTapDoc, slide_number, draft_id,
+              draft_version}
+
+    Synchronous (NOT the async-job pattern): scoped to a single
+    slide's prose so the wall-clock is ~30-60s, well within a
+    single HTTP request. The full-script generation path stays
+    async because it covers all 12 slides (~3-6 min). Per the
+    user spec, the per-slide regen is 'outside the main async
+    job queue -- synchronous response since it's scoped to one
+    slide.'
+
+    Process:
+      1. Load the current script draft. 404 if not found, 400 if
+         document_type != presentation_script.
+      2. Load the current team-shared deck draft for slide
+         context. 409 if no deck.
+      3. Extract the H2-bounded TipTap block for slide_number
+         from the script's content_json (the H2 'Slide N: title'
+         marker bounds each slide).
+      4. Call Sonnet with the per-slide context (deck slide N's
+         body + speaker + brief excerpt) targeting ~150 words.
+      5. Parse the response into TipTap nodes (reuses
+         script_to_tiptap fragments).
+      6. Splice into content_json: replace nodes from the H2
+         marker up to the next H2 (or end of doc).
+      7. Persist via update_draft (no new version row -- this is
+         an auto-save shape) so version history doesn't churn.
+      8. Return the new content_json so the frontend can patch
+         the TipTap editor in place.
+
+    Failure modes (HTTP error):
+      404 -- draft not found or wrong document_type
+      409 -- no current deck draft, or slide_number not in deck,
+             or slide marker missing from script content_json
+      422 -- malformed body
+      502 -- generator call failed
     """
     import asyncio
+    import re as _re
 
-    from tools.editor_drafts import create_draft, get_current_draft, get_draft
-    from tools.script_generation import deck_speakers, generate_script
+    from tools.editor_drafts import (
+        get_draft, get_current_draft_by_type, update_draft,
+    )
+    from tools.script_generation import (
+        build_script_prompt, script_to_tiptap,
+    )
+    from tools.brief_grounding import get_brief_for_grounding
 
-    raw_id = (body or {}).get("draft_id")
+    raw_draft_id = (body or {}).get("draft_id")
+    raw_slide = (body or {}).get("slide_number")
     try:
-        deck_id = int(raw_id)
+        draft_id = int(raw_draft_id)
+        slide_number = int(raw_slide)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="'draft_id' is required.")
-
-    deck = await get_draft(deck_id)
-    if deck is None or deck.get("document_type") != "presentation_deck":
         raise HTTPException(
-            status_code=404, detail="Presentation deck draft not found.")
+            status_code=422,
+            detail="draft_id and slide_number are required ints.")
 
-    content = deck.get("content_json") or {}
-    slides = content.get("slides", []) if isinstance(content, dict) else []
-    if not deck_speakers(slides):
+    draft = await get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(
+            status_code=404, detail="Script draft not found.")
+    if draft.get("document_type") != "presentation_script":
         raise HTTPException(
             status_code=400,
-            detail="Assign speakers to slides before generating the script.")
+            detail="Draft is not a presentation script.")
 
-    email = session["email"]
+    deck = await get_current_draft_by_type("presentation_deck")
+    if deck is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No current presentation deck draft to source "
+                "the regenerated slide from."))
+    deck_content = deck.get("content_json") or {}
+    deck_slides = (
+        deck_content.get("slides", [])
+        if isinstance(deck_content, dict) else [])
+    target_slide = next(
+        (s for s in deck_slides
+         if isinstance(s, dict)
+         and int(s.get("id") or 0) == slide_number),
+        None)
+    if target_slide is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Slide {slide_number} not found in the deck."))
+
+    # Extract the current script's H2-bounded slide block. The
+    # H2 marker pattern is '## Slide N: <title>' OR a bare
+    # 'Slide N' heading -- script_to_tiptap recognises both.
+    script_content = draft.get("content_json") or {}
+    nodes = (
+        script_content.get("content", [])
+        if isinstance(script_content, dict) else [])
+
+    def _node_text(n: dict) -> str:
+        if n.get("text"):
+            return str(n["text"])
+        return "".join(_node_text(c) for c in (n.get("content") or []))
+
+    slide_marker_re = _re.compile(
+        rf"^\s*Slide\s+{slide_number}\b", _re.IGNORECASE)
+    start_idx = None
+    end_idx = len(nodes)
+    for i, n in enumerate(nodes):
+        if not isinstance(n, dict):
+            continue
+        if n.get("type") != "heading":
+            continue
+        level = (n.get("attrs") or {}).get("level")
+        if level not in (1, 2):
+            continue
+        text = _node_text(n)
+        if start_idx is None and slide_marker_re.match(text):
+            start_idx = i
+        elif start_idx is not None:
+            # Next H1/H2 -- the slide's block ends here.
+            end_idx = i
+            break
+    if start_idx is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Slide {slide_number} marker not found in the "
+                "script content. The script may have been edited "
+                "to remove the slide heading; refresh and retry."))
+
+    # Build a single-slide prompt. Reuses build_script_prompt
+    # against just this slide so the model sees the same
+    # contextual scaffolding (slide body + speaker) it sees for
+    # the full-script path. Brief excerpt threaded in for
+    # consistency with the full-generation flow.
+    brief = await get_brief_for_grounding()
+    brief_text = brief.get("content_text") if brief else None
+    one_slide_prompt = build_script_prompt(
+        [target_slide], brief_text, None)
+    # Tighten the ask -- single-slide prose, ~150 words.
+    one_slide_prompt += (
+        "\n\nFOCUS: regenerate ONLY this single slide's "
+        "delivery prose. Target ~150 words. Keep the speaker "
+        "assignment unchanged. Output the slide's prose in the "
+        "same '## Slide N: title' + speaker-block + paragraphs "
+        "format the full-script generator emits.")
+
+    if ENVIRONMENT == "test":
+        raw = (
+            f"## Slide {slide_number}: "
+            f"{target_slide.get('title') or 'Slide'}\n\n"
+            f"**Speaker: {target_slide.get('speaker') or 'TBA'}**\n\n"
+            "Regenerated delivery paragraph for this slide.")
+    else:
+        try:
+            from agents.base import SONNET_MODEL, call_claude
+            raw = await asyncio.to_thread(
+                call_claude,
+                SONNET_MODEL,
+                "You are an academic presenter generating a "
+                "word-for-word delivery script for one slide.",
+                one_slide_prompt,
+                max_tokens=600,
+                trigger="script_regen_per_slide")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "script_slide_regen_call_failed",
+                slide_number=slide_number, error=str(exc))
+            raise HTTPException(
+                status_code=502,
+                detail=f"Per-slide regeneration failed: {exc}")
+
+    # Parse the new prose into TipTap nodes and splice.
+    new_subdoc, _new_text = script_to_tiptap(raw)
+    new_nodes = (
+        new_subdoc.get("content", [])
+        if isinstance(new_subdoc, dict) else [])
+    if not new_nodes:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Regenerated slide produced no parseable "
+                "content. Retry the regen."))
+
+    spliced_nodes = (
+        nodes[:start_idx] + new_nodes + nodes[end_idx:])
+    new_content_json = {"type": "doc", "content": spliced_nodes}
+
+    # Derive content_text from the spliced nodes via the same
+    # walker the full-script generator uses.
+    new_content_text = "\n\n".join(
+        _node_text(n).strip() for n in spliced_nodes
+        if _node_text(n).strip())
+
+    ok = await update_draft(
+        draft_id, new_content_json, new_content_text)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not persist the regenerated script.")
+
+    return {
+        "draft_id": draft_id,
+        "slide_number": slide_number,
+        "content_json": new_content_json,
+    }
+
+
+async def _generate_script_document(
+    email: str,
+) -> tuple[bytes, str, str, int | None]:
+    """June 25 2026 -- presentation script generator helper.
+    Mirrors _generate_brief_document / _generate_appendix_document /
+    _generate_deck_document's contract: returns (file bytes,
+    filename, media type, editor draft id). Raises on any failure
+    so _generate_async's outer try/except records the job as
+    failed with the ref'd error.
+
+    Inputs:
+      - The current team-shared presentation_deck draft (via
+        get_current_draft_by_type, NOT owner-scoped) -- the script
+        is generated from the canonical deck regardless of which
+        team member triggered.
+      - The caller's executive_brief + midpoint_paper drafts as
+        optional academic context (degrades gracefully when
+        absent).
+
+    Failure paths (raise -> job goes to status='failed'):
+      - No current deck draft -> RuntimeError surfaces 'Generate
+        the Presentation Deck first.'
+      - Deck has no slides with assigned speakers -> RuntimeError
+        surfaces 'Assign speakers to slides before generating the
+        script.'
+
+    The script draft is created with data_hash stamped (migration
+    063) so the tile chip + Light Refresh status table render
+    correctly post-generation.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.editor_drafts import (
+        create_draft, get_current_draft,
+        get_current_draft_by_type,
+    )
+    from tools.script_generation import deck_speakers, generate_script
+    from tools.academic_docx import build_editor_docx
+
+    deck = await get_current_draft_by_type("presentation_deck")
+    if deck is None:
+        raise RuntimeError(
+            "No current presentation deck draft to source the "
+            "script from. Generate the Presentation Deck first.")
+
+    content = deck.get("content_json") or {}
+    slides = (
+        content.get("slides", [])
+        if isinstance(content, dict) else [])
+    if not deck_speakers(slides):
+        raise RuntimeError(
+            "Assign speakers to slides before generating the "
+            "script.")
+
     exec_brief = await get_current_draft(email, "executive_brief")
     midpoint = await get_current_draft(email, "midpoint_paper")
-    result = await asyncio.to_thread(
-        generate_script, deck, exec_brief, midpoint)
 
+    # June 28 2026 (Phase 2) -- build a substitution_table from
+    # the freeze-aware effective hash so the script generator
+    # can derive content_text from the substituted projection
+    # under DEFER_SUBSTITUTION_TO_EXPORT. Fail-open: any error
+    # leaves substitution_table=None + script_to_tiptap falls
+    # through to the legacy single-pass behaviour.
+    _script_sub_table: dict[str, str] | None = None
+    try:
+        from tools.audit_assembler import current_data_hash
+        from tools.cache import get_strategy_cache
+        from tools.cio_recommendation import (
+            get_latest_recommendation,
+        )
+        from tools.numeric_substitution import (
+            get_substitution_table,
+        )
+        from tools.submission_freeze import (
+            get_effective_data_hash,
+        )
+        _live = await current_data_hash()
+        _eff = await get_effective_data_hash(_live) or _live
+        _cio = await get_latest_recommendation() or {}
+        _scache = await get_strategy_cache(_eff) or {}
+        _script_sub_table = get_substitution_table(
+            _eff, _scache, _cio, hash_verified=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "script_substitution_table_build_failed",
+            error=str(exc))
+
+    result = await asyncio.to_thread(
+        generate_script, deck, exec_brief, midpoint,
+        substitution_table=_script_sub_table)
+
+    # Stamp the live strategy hash on the draft (migration 063).
+    try:
+        from tools.audit_assembler import (
+            current_data_hash as _curr_hash,
+        )
+        _script_hash = await _curr_hash()
+    except Exception:  # noqa: BLE001
+        _script_hash = None
+
+    # June 26 2026 -- run the document audit against the
+    # generated content_text so the script draft carries
+    # audit_warnings just like the brief / appendix / deck do.
+    # The editor's AuditWarningsBanner reads draft.audit_warnings
+    # and renders the flagged-items list; without this call the
+    # script draft was always landing with audit_warnings=null
+    # and the banner stayed empty even when the script had real
+    # issues (numeric / direction / consistency / citation
+    # flags). Mirrors the pattern in _generate_brief_document +
+    # _generate_deck_document.
+    audit_warnings = await _run_document_audit(
+        result["content_text"], "presentation_script", email)
     new_draft = await create_draft(
         "presentation_script", email, "Presentation Script",
         result["content_json"], result["content_text"],
-        created_from="generated")
+        created_from="generated",
+        audit_warnings=audit_warnings,
+        data_hash=_script_hash)
     if new_draft is None:
         ref = uuid.uuid4().hex[:8]
         log.error("script_draft_create_failed", ref=ref)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not save the generated script (ref: {ref})")
-    return {
-        "draft_id": new_draft["id"],
-        "word_count": result["word_count"],
-        "speaker_count": result["speaker_count"],
-        "slide_count": result["slide_count"],
-    }
+        raise RuntimeError(
+            f"Could not save the generated script (ref: {ref})")
+
+    # June 28 2026 (PR #479) -- auto-upgrade hook for script.
+    # Walks content_json + converts any <unverified> tag
+    # substrings into structured unverified TipTap nodes so
+    # the NodeView renders. Document-type-agnostic per
+    # operator directive.
+    await _auto_upgrade_draft_to_token_values(
+        new_draft["id"], "presentation_script")
+
+    # Build the docx for the job's /download endpoint -- the
+    # frontend Download button reads from there. Mirrors the
+    # brief / appendix / deck path which all stage the bytes on
+    # the job row.
+    file_bytes = await asyncio.to_thread(
+        build_editor_docx, new_draft)
+    filename = (
+        f"forest-capital-presentation-script-"
+        f"{date.today().isoformat()}.docx")
+    return file_bytes, filename, _DOCX_MEDIA, new_draft["id"]
 
 
 @app.get("/api/v1/documents/rehearsal")
@@ -4020,6 +7057,126 @@ async def get_current_regime(session: dict = Depends(require_auth)):
         except Exception as exc:
             log.warning("regime_detection_fallback", error=str(exc))
     return MOCK_REGIME
+
+
+# ── Regime-signals freshness gate (June 27 2026, deck-tier only) ─────────────
+#
+# The presentation deck includes a live CIO recommendation on slides 7 and
+# 11 that depends on regime_signals_cache being current (15-min TTL). Stale
+# signals at generation time would produce a deck that misleads the live
+# panel. Per the user spec, the deck is held to a stricter standard than
+# the brief / appendix: those keep the existing graceful em-dash fallback
+# (they don't surface a live recommendation); the deck must HARD GATE.
+#
+# Three operations gate on this helper:
+#   * _generate_deck_document       (full generation)
+#   * council_academic_review       (when document_type=presentation_deck)
+#   * post_light_refresh            (the cache-warming workflow that
+#                                    typically immediately precedes deck
+#                                    regen)
+#
+# When the cache is hit, the helper returns (True, signals). When it
+# misses, we attempt detect_current_regime() with a HARD 10-SECOND TIMEOUT
+# (FRED + market-data fetches can hang for minutes; the panel can't wait
+# that long for an error message) and either return (True, signals) on a
+# successful refresh OR (False, None) on timeout / failure. The caller
+# raises a 503 with the user-spec blocking error message in the failure
+# case -- never falls back to em-dashes for the deck.
+
+_REGIME_REFRESH_TIMEOUT_S = 10.0
+_REGIME_BLOCKING_ERROR_DETAIL = (
+    "Live regime signals unavailable. The deck includes a live CIO "
+    "recommendation that requires current data. Please try again in a "
+    "few minutes.")
+
+# June 27 2026 -- background refresh cadence for the regime_signals_cache.
+# The cache TTL is 15 minutes (set_regime_cache ttl_minutes=15). Refreshing
+# every 10 minutes leaves 5 minutes of headroom so the cache is always warm
+# when a user (or the deck hard gate) reads it -- the gate never fires
+# due to TTL expiry during normal operation. Scheduled by the lifespan
+# handler as a fire-and-forget task; per-iteration failures (FRED outage,
+# detect_current_regime exception, cache write failure) log a warning and
+# the loop continues to the next cycle.
+_REGIME_SIGNALS_TICKER_INTERVAL_S = 600.0
+
+
+async def _regime_signals_fresh_or_refresh() -> tuple[bool, dict | None]:
+    """Returns (is_fresh, signals).
+
+    1. Check regime_signals_cache via get_regime_cache(). If the cached
+       row is unexpired, returns (True, signals) immediately.
+    2. On miss/expiry, run detect_current_regime() in a worker thread
+       with a 10-second hard timeout. The detector hits live market
+       data APIs (FRED, Yahoo) which can hang under load -- without the
+       timeout the blocking error itself could take minutes to surface,
+       worse UX than the original stale-cache behaviour.
+    3. On successful refresh: write to set_regime_cache(ttl_minutes=15)
+       and return (True, signals).
+    4. On timeout / exception: log + return (False, None). The caller
+       translates to a 503 with the spec blocking message.
+
+    In ENVIRONMENT=test we return (True, None) so the gate is a no-op
+    for the existing test suite -- tests that exercise the gate set
+    up the cache row directly via tools.cache.set_regime_cache.
+    """
+    if ENVIRONMENT == "test":
+        return True, None
+    try:
+        from tools.cache import get_regime_cache, set_regime_cache
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_cache_module_unavailable", error=str(exc))
+        return False, None
+    cached = None
+    try:
+        cached = await get_regime_cache()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_cache_read_failed", error=str(exc))
+    if cached is not None:
+        return True, cached
+    # Cache miss / expired -- attempt a fresh detect with a hard
+    # 10s timeout. detect_current_regime() is synchronous; run it in
+    # a worker thread so the async event loop isn't blocked.
+    import asyncio as _asyncio
+    try:
+        from tools.regime_detector import detect_current_regime
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_detector_import_failed", error=str(exc))
+        return False, None
+    try:
+        fresh = await _asyncio.wait_for(
+            _asyncio.to_thread(detect_current_regime),
+            timeout=_REGIME_REFRESH_TIMEOUT_S)
+    except _asyncio.TimeoutError:
+        log.warning(
+            "regime_gate_refresh_timeout",
+            timeout_s=_REGIME_REFRESH_TIMEOUT_S,
+            note=(
+                "detect_current_regime() did not return within the "
+                "10s hard timeout -- treating as a blocking failure "
+                "for the deck-tier gate"))
+        return False, None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_refresh_failed",
+            error=str(exc),
+            note="detect_current_regime() raised during refresh")
+        return False, None
+    if not isinstance(fresh, dict):
+        log.warning(
+            "regime_gate_refresh_returned_non_dict",
+            type=type(fresh).__name__)
+        return False, None
+    # Best-effort cache write -- a write failure doesn't unwind the
+    # successful detect; the next caller just re-runs detect.
+    try:
+        await set_regime_cache(fresh, ttl_minutes=15)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "regime_gate_cache_write_failed", error=str(exc))
+    return True, fresh
 
 
 # ── Optimize ──────────────────────────────────────────────────────────────────
@@ -4705,14 +7862,86 @@ async def council_query(
             strategy_results = await asyncio.to_thread(
                 run_all_strategies, history)
 
+            # Page-scoped live context — when the question was asked from
+            # a council-facing landing page, resolve that page's live
+            # cached data (recommendation / performance / prediction) and
+            # thread it into the deliberation. None for an unscoped or
+            # unknown scope, so the existing behaviour is unchanged.
+            from tools.council_live_context import get_scope_context
+            page_context = await get_scope_context(body.context_scope)
+            if page_context:
+                log.info("council_scope_context_injected",
+                         scope=body.context_scope,
+                         keys=list(page_context.keys()))
+
+            # ── Question-type bundle (refines PR #229's page scope) ──
+            # The keyword classifier in tools.council_question_bundles
+            # narrows the context to a question-type-specific subset
+            # (regime / recommendation / risk / statistical / forward).
+            # A confident classification REPLACES the wider page
+            # bundle; a low-confidence query falls back to the page
+            # bundle (or to no context if no page was set). The
+            # question_type label is recorded for the metrics row so
+            # the team can quantify the cost reduction afterwards.
+            from tools.council_question_bundles import (
+                QUESTION_TYPE_FULL,
+                classify_question,
+                resolve_bundle,
+            )
+            question_type = classify_question(query)
+            live_context = None
+            if question_type is not None:
+                bundle = await resolve_bundle(question_type)
+                if bundle:
+                    live_context = bundle
+                    log.info("council_question_bundle_injected",
+                             question_type=question_type,
+                             keys=list(bundle.keys()))
+                else:
+                    # Classifier matched but bundle had nothing in
+                    # cache — fall back to the page scope.
+                    log.info("council_question_bundle_empty",
+                             question_type=question_type)
+                    question_type = None
+            if live_context is None:
+                live_context = page_context
+                # Record "full" as the question-type for the metrics
+                # row when we landed on the page bundle (or None) —
+                # the column is non-null in the schema and "full" is
+                # the canonical fallback label.
+                question_type_recorded = QUESTION_TYPE_FULL
+            else:
+                question_type_recorded = question_type
+
             # Capture every specialist's harness run + every agent
             # call's token usage. Seeded before the generator runs so
             # the copied thread contexts share the accumulator lists.
             start_harness_capture()
             start_usage_capture()
 
+            # June 5 2026 — fetch the prior CIO recommendation so the
+            # synthesis step can write Section C (shift narrative). The
+            # helper fails open to None — first run, cache cleared, or
+            # DB outage all produce None and Section C is omitted from
+            # the response per the system prompt's CONDITIONAL clause.
+            prior_recommendation = None
+            try:
+                from tools.cio_recommendation import (
+                    _current_data_hash, get_prior_recommendation,
+                )
+                current_hash = await _current_data_hash()
+                if current_hash:
+                    prior_recommendation = await get_prior_recommendation(
+                        current_hash)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("council_prior_recommendation_fetch_error",
+                            error=str(exc))
+
             cio = CIO()
-            gen = cio.deliberate_streaming(query, strategy_results, history)
+            gen = cio.deliberate_streaming(
+                query, strategy_results, history,
+                live_context=live_context,
+                prior_recommendation=prior_recommendation)
             sentinel = object()
             while True:
                 # Each next(gen) runs a phase — specialists fan-out,
@@ -4782,6 +8011,43 @@ async def council_query(
                     metadata=({"harness": harness_meta}
                               if harness_meta else None),
                 )
+
+                # ── council_query_metrics row ─────────────────────
+                # One row per query: token totals + bundle size +
+                # live regime + extracted recommendation direction +
+                # the refined alignment score. Fail-open — a metric
+                # write failure logs and never affects the user-
+                # facing stream that already completed.
+                try:
+                    from agents.usage import collect_usage
+                    usage = collect_usage()
+                    bundle_size = (
+                        len(json.dumps(live_context, default=str))
+                        if live_context else 0)
+                    # per-agent breakdown — pull the "cio" total
+                    # specifically as the LIKE-FOR-LIKE bundle-impact
+                    # signal. _compile_draft_consensus and _synthesise
+                    # both _tag_agent("cio") before their call_claude,
+                    # so this aggregates both — the only two calls in
+                    # the deliberation whose prompt content the bundle
+                    # changes. June 3 2026 (migration 052).
+                    per_agent = usage.get("per_agent") or {}
+                    cio_input = (
+                        per_agent.get("cio", {}).get("input_tokens")
+                        if isinstance(per_agent.get("cio"), dict)
+                        else None)
+                    await _write_council_query_metric(
+                        question_type=question_type_recorded,
+                        input_tokens=usage.get("input_tokens"),
+                        output_tokens=usage.get("output_tokens"),
+                        cio_input_tokens=cio_input,
+                        context_bundle_size=bundle_size,
+                        synthesis_text=final_result.get(
+                            "final_recommendation", "") or "",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("council_query_metric_write_failed",
+                                error=str(exc))
         except Exception as exc:  # noqa: BLE001
             # A deliberation failure surfaces clearly — no silent
             # fall-through to mock data. The frontend renders the
@@ -4817,6 +8083,75 @@ def _parse_overall_rating(verdict: str) -> str | None:
         verdict or "", re.IGNORECASE,
     )
     return m.group(1) if m else None
+
+
+async def with_keepalive(producer, interval: float = 20.0):
+    """June 25 2026 -- wrap any async-generator SSE stream so it emits
+    a comment-frame keepalive ping whenever the upstream is silent for
+    `interval` seconds. SSE comment lines (lines starting with ':')
+    are ignored by the standard EventSource parser but reset the
+    connection timeout on every hop between server, Render's edge
+    proxy, the operator's network, and the browser. Without
+    keepalives, a 60-90s arbiter call or a 3-4 min full pipeline
+    looks like a dropped connection to the proxies even though the
+    backend is still running.
+
+    Implementation -- the producer pushes frames into an asyncio.Queue
+    (decoupling the producer's awaits from the consumer's yields)
+    and the consumer wakes every `interval` seconds. If the wakeup
+    found a frame, yield it; if the wakeup hit the timeout, yield
+    a keepalive line. A None sentinel from the producer (placed by
+    the finally below) signals end-of-stream so the consumer
+    drains any pending items and stops.
+
+    Cancellation -- if the producer task is cancelled (client
+    disconnect propagated as CancelledError), the consumer's
+    finally cancels the producer task too and exits without
+    yielding anything else."""
+    import asyncio
+    queue: asyncio.Queue = asyncio.Queue()
+    DONE = object()
+
+    async def _drive() -> None:
+        try:
+            async for msg in producer:
+                await queue.put(msg)
+        except asyncio.CancelledError:
+            # Re-raise so the outer await propagates the cancel.
+            await queue.put(DONE)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "sse_with_keepalive_producer_failed",
+                error=str(exc))
+        finally:
+            await queue.put(DONE)
+
+    producer_task = asyncio.create_task(_drive())
+    try:
+        while True:
+            try:
+                msg = await asyncio.wait_for(
+                    queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                # Producer silent for `interval` seconds -- emit a
+                # keepalive comment frame. Two newlines so the SSE
+                # parser treats it as a complete event boundary.
+                yield ": keepalive\n\n"
+                continue
+            if msg is DONE:
+                # Drain any final items the producer may have queued
+                # in parallel with the sentinel, then exit.
+                break
+            yield msg
+        await producer_task
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+            try:
+                await producer_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 @app.post("/api/council/academic-review")
@@ -4856,9 +8191,69 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
 
     # Rubric switch — read once at the top of the handler so a future
     # gather_review_context refactor can also consume it. Only the literal
-    # string "presentation_script" enables the script rubric.
-    script_review = (
-        request.query_params.get("document_type") == "presentation_script")
+    # string "presentation_script" enables the script rubric; the
+    # literal "executive_brief" enables the brief-specific rubric (PR
+    # — brief-specific rubric, replaces the midpoint 5.5/10 floor).
+    document_type_q = request.query_params.get("document_type")
+    script_review = document_type_q == "presentation_script"
+    brief_review = document_type_q == "executive_brief"
+    deck_review = document_type_q == "presentation_deck"
+    appendix_review = document_type_q == "analytical_appendix"
+
+    # ── June 27 2026: regime_signals pre-flight gate (deck only) ─
+    # The deck-tier council review references the live CIO
+    # recommendation that the deck surfaces on slides 7 + 11. A
+    # review run against stale regime signals would grade a recom-
+    # mendation the user can no longer trust by the time the panel
+    # sees it. Hard-gate the same way the deck generation does --
+    # 10s refresh, 503 if it fails. Brief / appendix / script
+    # reviews are unaffected (their docs use the em-dash fallback).
+    # Runs BEFORE the focus-brief body parse below so a deck-tier
+    # 503 short-circuits without consuming the body.
+    if deck_review:
+        ok, _signals = await _regime_signals_fresh_or_refresh()
+        if not ok:
+            log.warning(
+                "deck_council_review_blocked_on_regime_signals",
+                note=("regime_signals_cache miss + refresh "
+                      "failed/timed out within 10s -- blocking "
+                      "deck-tier council review"))
+            raise HTTPException(
+                status_code=503,
+                detail=_REGIME_BLOCKING_ERROR_DETAIL)
+
+    # June 27 2026 -- optional pre-review focus brief. The frontend
+    # surfaces a 1000-char textarea after the cross-document confirm
+    # modal (or directly on the per-doc Run Review click); the brief
+    # is sent as JSON {focus_brief: "..."} on the POST body. The
+    # endpoint historically takes no body, so we parse defensively:
+    # any parse / type failure falls back to None (legacy no-brief
+    # behaviour). Strip + truncate at FOCUS_BRIEF_MAX_CHARS so a
+    # client that doesn't enforce the limit still produces a
+    # bounded prompt.
+    from agents.academic_review import FOCUS_BRIEF_MAX_CHARS
+    focus_brief: str | None = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            raw = body.get("focus_brief")
+            if isinstance(raw, str):
+                cleaned = raw.strip()
+                if cleaned:
+                    if len(cleaned) > FOCUS_BRIEF_MAX_CHARS:
+                        cleaned = cleaned[:FOCUS_BRIEF_MAX_CHARS]
+                    focus_brief = cleaned
+    except Exception:  # noqa: BLE001
+        # Empty body / malformed JSON / wrong content-type --
+        # silently treat as no-brief. Legacy callers that POST with
+        # no body land here.
+        focus_brief = None
+    log.info(
+        "academic_review_focus_brief",
+        focus_brief_present=bool(focus_brief),
+        focus_brief_chars=len(focus_brief or ""),
+        document_type=document_type_q,
+    )
 
     async def event_stream():
         try:
@@ -4869,7 +8264,9 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             start_harness_capture()
             start_usage_capture()
             ctx = await gather_review_context(
-                reviewer_email=session.get("email"))
+                reviewer_email=session.get("email"),
+                document_type=document_type_q or None,
+                focus_brief=focus_brief)
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)
             # Threaded into the chart-vision scope sentences so all-
@@ -4894,13 +8291,52 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             # Arbiter — generated in full and harness-evaluated in a worker
             # thread (the harness is synchronous), then streamed as chunks.
             # The loading state on the frontend covers the evaluation wait.
+            # June 25 2026 -- when the harness exhausts retries and the
+            # final score is below threshold, the arbiter still returns
+            # the best attempt's response; we surface that with an
+            # arbiter_degraded marker frame BEFORE the arbiter_chunk
+            # stream so the client knows the quality threshold wasn't
+            # met. The harness already returns the best-scoring
+            # attempt's text on max retries (see HarnessResult), so the
+            # chunks themselves are still real prose to render -- the
+            # frame is an advisory tag, not a hide.
             arbiter_text = await asyncio.to_thread(
                 run_arbiter_with_harness, context_block, peer_responses,
-                multi_user, script_review, n_strategies)
+                multi_user, script_review, n_strategies, brief_review,
+                deck_review, appendix_review)
+            try:
+                arbiter_metrics = collect_harness_metrics()
+            except Exception:  # noqa: BLE001
+                arbiter_metrics = {}
+            # arbiter_metrics aggregates ALL agents in the harness run
+            # log (peers + arbiter). The arbiter's final_score lives
+            # under average_final_score in the aggregate; a more
+            # accurate per-arbiter score requires the harness's
+            # per-record buf -- defer to the existing telemetry. For
+            # the degraded signal, a below-threshold AVERAGE final
+            # score plus attempts > 1 is enough heuristic to flag.
+            arbiter_degraded = bool(
+                arbiter_metrics
+                and arbiter_metrics.get("average_final_score") is not None
+                and float(arbiter_metrics.get(
+                    "average_final_score", 0)) < 7.0)
+            if arbiter_degraded:
+                yield _sse(
+                    "arbiter_degraded",
+                    average_final_score=arbiter_metrics.get(
+                        "average_final_score"),
+                    agents_retried=arbiter_metrics.get(
+                        "agents_retried"),
+                    message=(
+                        "Arbiter quality threshold was not met after "
+                        "harness retries. The verdict below reflects "
+                        "the best attempt; consider re-running the "
+                        "review."))
             for chunk in chunk_arbiter_text(arbiter_text):
                 yield _sse("arbiter_chunk", text=chunk)
             log.info("academic_review_arbiter_complete",
-                     arbiter_chars=len(arbiter_text))
+                     arbiter_chars=len(arbiter_text),
+                     degraded=arbiter_degraded)
 
             # Independent Review — second-opinion advisory layer. A
             # SEPARATE agent (Gemini) sees ONLY the headline findings
@@ -4927,8 +8363,38 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                     analytics_snapshot=ctx.get("analytics"),
                     strategy_results=strategy_results_for_findings,
                 )
+                # June 25 2026 -- pass the primary document to the
+                # independent reviewer so it reads the same source
+                # the peers did rather than the extracted-findings
+                # block alone. The doc is sourced from
+                # gather_review_context's docs_by_type (already
+                # overlaid with the team-shared editor draft via
+                # get_current_draft_by_type). Falls back to an empty
+                # string when no target document was supplied (the
+                # cross-document review path); the independent
+                # reviewer's _build_user_message then skips the
+                # primary-document block.
+                primary_doc_text: str = ""
+                try:
+                    target_review = (
+                        ctx.get("target_review_type")
+                        or None)
+                    docs_by_type = (
+                        ctx.get("documents_by_type") or {})
+                    if target_review and isinstance(
+                            docs_by_type, dict):
+                        rows = (
+                            docs_by_type.get(target_review) or [])
+                        if rows and isinstance(rows[0], dict):
+                            primary_doc_text = str(
+                                rows[0].get("content_text") or "")
+                except Exception as _exc:  # noqa: BLE001
+                    log.info(
+                        "independent_review_primary_doc_lookup_failed",
+                        error=str(_exc))
                 independent = await asyncio.to_thread(
-                    run_independent_review, findings)
+                    run_independent_review,
+                    findings, primary_doc_text or None)
                 independent["findings_seen"] = findings
                 yield _sse("independent_review", **independent)
                 log.info(
@@ -4957,6 +8423,215 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                     findings_seen={},
                 )
 
+            # ── Adversarial critic + debate round (Concern 7g) ──
+            # Runs AFTER the primary arbiter completes. Critic
+            # findings always stream; the debate round fires only
+            # when fatal + major > 0. The council_debates row is
+            # always written -- the durable audit record covers
+            # both the "debate ran" and the "minor only -- skipped"
+            # branches.
+            critic_result = None
+            debate_text: str | None = None
+            was_addressed: list[bool] | None = None
+            counter_arguments: list[dict[str, Any]] | None = None
+            current_data_hash_str: str | None = None
+            try:
+                from agents.academic_review import (
+                    build_critic_context, run_critic_review,
+                    run_arbiter_debate_round,
+                    parse_debate_assessments,
+                    record_debate_round,
+                )
+                critic_context = await build_critic_context(
+                    reviewer_email=session.get("email"),
+                    document_type=document_type_q or None)
+                critic_result = await run_critic_review(
+                    critic_context, document_type=document_type_q)
+                # Stream the structured critic findings frame.
+                yield _sse(
+                    "critic_findings",
+                    document_scope=(
+                        document_type_q or "full_package"),
+                    gemini_findings=critic_result.gemini_findings,
+                    grok_findings=critic_result.grok_findings,
+                    merged_findings=critic_result.merged_findings,
+                    gemini_prose=critic_result.gemini_prose,
+                    grok_prose=critic_result.grok_prose,
+                    fatal_count=critic_result.fatal_count,
+                    major_count=critic_result.major_count,
+                    minor_count=critic_result.minor_count,
+                    partial_failure=critic_result.partial_failure)
+                log.info(
+                    "critic_review_complete",
+                    fatal=critic_result.fatal_count,
+                    major=critic_result.major_count,
+                    minor=critic_result.minor_count,
+                    partial=critic_result.partial_failure,
+                )
+                # Debate round gate: only fire if there's something
+                # actionable to debate. Minor-only findings are
+                # logged but skip the second arbiter call.
+                try:
+                    from tools.audit_assembler import (
+                        current_data_hash as _cur_hash,
+                    )
+                    current_data_hash_str = await _cur_hash() or ""
+                except Exception:  # noqa: BLE001
+                    current_data_hash_str = ""
+
+                if critic_result.has_actionable:
+                    debate_text = await asyncio.to_thread(
+                        run_arbiter_debate_round,
+                        context_block, peer_responses,
+                        critic_result.merged_findings,
+                        multi_user, n_strategies)
+                    for chunk in chunk_arbiter_text(debate_text):
+                        yield _sse(
+                            "debate_round_arbiter", text=chunk)
+                    was_addressed, counter_arguments = (
+                        parse_debate_assessments(
+                            debate_text,
+                            critic_result.merged_findings))
+                    log.info(
+                        "academic_review_debate_complete",
+                        debate_chars=len(debate_text),
+                        addressed=sum(
+                            1 for x in was_addressed if x),
+                        rebutted=len(counter_arguments),
+                    )
+                else:
+                    yield _sse("critic_minor_only")
+                    log.info(
+                        "academic_review_debate_skipped_minor_only",
+                        minor=critic_result.minor_count,
+                    )
+
+                # Always-write audit row -- both branches above.
+                debate_id = await record_debate_round(
+                    interaction_id=None,  # filled by _log_interaction_bg later
+                    context="academic_review",
+                    document_type=(
+                        document_type_q or "full_package"),
+                    critic_result=critic_result,
+                    peer_responses=peer_responses,
+                    arbiter_resolution=debate_text,
+                    was_addressed=was_addressed,
+                    counter_arguments=counter_arguments,
+                    data_hash=current_data_hash_str,
+                )
+                log.info(
+                    "council_debates_row_written",
+                    debate_id=debate_id,
+                )
+
+                # Concern 7k-i auto-fire: every Fatal finding gets a
+                # pre-populated arbiter fix proposal so the team sees
+                # an Apply Fix button on every Fatal card without
+                # waiting for a follow-up request. Majors are
+                # explicit-only (UI Propose Fix button hits
+                # /api/v1/documents/propose-fix). Best-effort -- a
+                # proposal generation failure just leaves the card
+                # without an auto-proposal; the team can still
+                # request one manually.
+                auto_proposals: list[dict[str, Any]] = []
+                try:
+                    from agents.academic_review import (
+                        run_arbiter_fix_proposal,
+                        write_fix_proposals_to_debate,
+                    )
+                    if debate_id and critic_result \
+                            and critic_result.has_actionable:
+                        target_doc = (
+                            document_type_q or "full_package")
+                        fatal_indexes = [
+                            i for i, f in enumerate(
+                                critic_result.merged_findings)
+                            if str(f.get("severity")).strip()
+                            .capitalize() == "Fatal"]
+                        proposals = []
+                        for fi in fatal_indexes:
+                            f = (
+                                critic_result.merged_findings[fi])
+                            pdoc = (
+                                str(f.get("target_document"))
+                                if f.get("target_document")
+                                and f.get("target_document")
+                                != "cross_document"
+                                else target_doc)
+                            prop = await run_arbiter_fix_proposal(
+                                finding=f, finding_id=fi,
+                                document_type=pdoc,
+                                reviewer_email=session.get(
+                                    "email"))
+                            if prop is not None:
+                                proposals.append(prop)
+                                auto_proposals.append({
+                                    "finding_id": prop.finding_id,
+                                    "target": prop.target,
+                                    "section_name": (
+                                        prop.section_name),
+                                    "rationale": prop.rationale,
+                                    "patch_instruction": (
+                                        prop.patch_instruction),
+                                    "severity": prop.severity,
+                                    "auto_proposed": (
+                                        prop.auto_proposed),
+                                    "target_document": (
+                                        prop.target_document),
+                                    "source_of_truth_document": (
+                                        prop.source_of_truth_document
+                                    ),
+                                })
+                        if proposals:
+                            await write_fix_proposals_to_debate(
+                                debate_id, proposals)
+                            log.info(
+                                "fix_proposals_auto_written",
+                                debate_id=debate_id,
+                                count=len(proposals))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "fix_proposal_auto_fire_failed",
+                        error=str(exc))
+
+                # Concern 7j + 7k-v -- emit the persisted-row
+                # marker frame carrying debate_id + auto-fire fix
+                # proposals so the UI can route propose-fix and
+                # apply-fix calls without a follow-up GET. Always
+                # emitted (the row is always written).
+                yield _sse(
+                    "debate_recorded",
+                    debate_id=debate_id,
+                    fix_proposals=auto_proposals)
+            except asyncio.CancelledError:
+                # Client disconnected mid-stream. Re-raise so the
+                # SSE generator unwinds cleanly; without this catch
+                # the asyncpg pool would leak the in-flight
+                # connection from record_debate_round /
+                # write_fix_proposals_to_debate. The outer
+                # event_stream's [DONE] frame is skipped (the
+                # client is gone) but the connections are released
+                # by the async-with blocks unwinding under the
+                # CancelledError propagation.
+                log.info(
+                    "academic_review_critic_cancelled",
+                    document_type=(
+                        document_type_q or "full_package"))
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # All other exceptions are advisory -- the critic
+                # pipeline is fail-open. Log and continue so the
+                # primary verdict still streams to the user. Partial
+                # critic results (one of Gemini/Grok failed parse)
+                # are NOT exceptions -- they surface via the
+                # partial_failure field on the critic_findings
+                # frame, and the debate round still fires on
+                # whatever findings the other model produced.
+                log.warning(
+                    "academic_review_critic_pipeline_failed",
+                    error=str(exc),
+                )
+
             # Team Activity — log the completed review. The overall
             # readiness rating is parsed out of the verdict; the harness
             # block aggregates the peer + arbiter quality runs.
@@ -4968,18 +8643,57 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             harness_meta = collect_harness_metrics()
             if harness_meta:
                 review_metadata["harness"] = harness_meta
+            if critic_result is not None:
+                review_metadata["critic"] = {
+                    "fatal": critic_result.fatal_count,
+                    "major": critic_result.major_count,
+                    "minor": critic_result.minor_count,
+                    "partial_failure": (
+                        critic_result.partial_failure),
+                    "debate_round_fired": (
+                        critic_result.has_actionable),
+                }
+                if counter_arguments:
+                    review_metadata["critic"][
+                        "rebuttals_logged"] = len(counter_arguments)
             _log_interaction_bg(
                 request, session, "academic_review",
                 agents_involved=agents,
                 response_summary=arbiter_text,
                 metadata=review_metadata,
             )
+        except asyncio.CancelledError:
+            # Client disconnected mid-stream. Re-raise so the async
+            # generator unwinds cleanly (asyncpg releases the in-
+            # flight connection from record_debate_round /
+            # write_fix_proposals_to_debate). The outer [DONE] in
+            # the finally below is skipped under the CancelledError
+            # propagation -- the client isn't listening anyway.
+            log.info(
+                "academic_review_stream_cancelled",
+                document_type=document_type_q or "full_package")
+            raise
         except Exception as exc:  # noqa: BLE001
             log.error("academic_review_failed", error=str(exc))
             yield _sse("error", message="Academic review failed — please retry.")
-        yield "data: [DONE]\n\n"
+        finally:
+            # June 25 2026 -- always emit [DONE]. The previous
+            # structure had [DONE] after the except block which is
+            # functionally equivalent for the normal exit path but
+            # subtle: any new branch (e.g. an inner return on a
+            # downstream failure) would skip the terminal frame and
+            # leave the client polling forever. The finally
+            # guarantees [DONE] reaches the client on every exit
+            # path except CancelledError (where the client is gone).
+            yield "data: [DONE]\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    # June 25 2026 -- wrap the producer in with_keepalive so the
+    # 60-90s arbiter / 3-4 min full pipeline doesn't trigger a
+    # client / proxy timeout. The wrapper emits a ': keepalive'
+    # comment frame whenever the producer is silent for 20s.
+    return StreamingResponse(
+        with_keepalive(event_stream()),
+        media_type="text/event-stream")
 
 
 # ── Peer Review Assistant (item 7, Feature A) ─────────────────────────────────
@@ -4996,97 +8710,36 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
 @limiter.limit("10/minute")
 async def council_peer_review(
     request: Request,
-    file: UploadFile = File(...),
-    submission_name: str = Form(""),
     session: dict = Depends(require_team_member),
 ):
-    """Streams a peer-review script for the uploaded submission.
+    """RETIRED (PR-B, June 2026).
 
-    multipart/form-data:
-      file              the peer team's midpoint paper (.pdf, .docx, .md)
-      submission_name   optional display name surfaced in the verdict;
-                        defaults to the file's basename
+    The frontend Peer Review page was removed in PR #338; this
+    endpoint is retired in PR-B (June 21 2026). Returns 410 Gone
+    so existing clients receive a clear "this existed and is now
+    gone" signal rather than a 404 connection error.
 
-    SSE wire format mirrors /api/council/academic-review for UI
-    consistency:
-      data: {"type": "submission_meta", "name": "...", "char_count": N}
-      data: {"type": "arbiter_chunk", "text": "..."}     (repeated)
-      data: [DONE]
+    Replacement: brief quality verification is now handled by the
+    post-generation audit checks (see tools/document_audit.py CHECK 5
+    / CHECK 6 / CHECK 7 added in PR #336).
 
-    Errors flow as a single `{"type": "error", "message": "..."}`
-    frame followed by [DONE] so the frontend has one consistent
-    parse path."""
-    import asyncio
-    from agents.peer_review import (
-        extract_peer_paper_text,
-        build_peer_review_context_block,
-        render_peer_review_context_block,
-        run_peer_review_with_harness,
-        chunk_arbiter_text,
-        MAX_PEER_PAPER_BYTES,
-    )
+    The handler is preserved as a stub for one release cycle so a
+    monitoring dashboard can detect retired-endpoint calls; the route
+    decorator + 410 body will be deleted in a subsequent PR once
+    Render logs confirm zero residual traffic.
+    """
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "gone",
+            "message": (
+                "Peer review has been retired. Use the post-"
+                "generation audit checks for brief quality "
+                "verification."),
+            "canonical_path": "/api/v1/export/executive-brief",
+        })
 
-    # Read + extract synchronously BEFORE the stream opens so a
-    # 422 (unsupported format, scanned PDF, oversize) lands on the
-    # POST itself instead of mid-stream. Frontend renders the
-    # error inline.
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=422,
-                             detail="Uploaded file is empty.")
-    if len(raw) > MAX_PEER_PAPER_BYTES:
-        raise HTTPException(
-            status_code=422,
-            detail=(f"Uploaded file exceeds "
-                    f"{MAX_PEER_PAPER_BYTES} bytes."))
-    try:
-        text = extract_peer_paper_text(file.filename or "", raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
 
-    name = (submission_name or "").strip()
-    if not name:
-        # Fall back to the filename without the extension.
-        from pathlib import Path
-        name = Path(file.filename or "submission").stem or "submission"
-
-    ctx_dict = build_peer_review_context_block(name, text)
-    context_block = render_peer_review_context_block(ctx_dict)
-
-    async def event_stream():
-        try:
-            yield _sse(
-                "submission_meta",
-                name=name,
-                char_count=len(text),
-            )
-            verdict = await asyncio.to_thread(
-                run_peer_review_with_harness, context_block)
-            for chunk in chunk_arbiter_text(verdict):
-                yield _sse("arbiter_chunk", text=chunk)
-            log.info(
-                "peer_review_complete",
-                submission_name=name,
-                paper_chars=len(text),
-                verdict_chars=len(verdict))
-            _log_interaction_bg(
-                request, session, "peer_review",
-                agents_involved=["peer_review_assistant"],
-                response_summary=verdict,
-                metadata={
-                    "submission_name": name,
-                    "paper_chars":     len(text),
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.error("peer_review_failed", error=str(exc))
-            yield _sse(
-                "error",
-                message="Peer review failed — please retry.")
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(event_stream(),
-                              media_type="text/event-stream")
 
 
 # ── Thesis Defense Prep (item 7, Feature B) ───────────────────────────────────
@@ -5096,146 +8749,204 @@ async def council_peer_review(
 # categories (technical, academic, governance). No file upload —
 # the draft is the source of truth.
 
-@app.post("/api/council/defense-prep")
-@limiter.limit("10/minute")
-async def council_defense_prep(
-    request: Request,
-    session: dict = Depends(require_team_member),
-):
-    """Streams a mock-panel Q&A prep sheet for the calling user's
-    paper.
+# ── Defense Prep — async background job pattern ─────────────────────────────
+#
+# May 30 2026 — the synchronous SSE flow was timing out on Render. A long
+# Opus + harness generation could leave the connection idle for >100s
+# between the draft_meta byte and the first arbiter_chunk byte, and the
+# gateway killed it. Same shape as the document-generation jobs (see
+# tools/generation_jobs.py): POST 202 + job_id → background task → poll
+# GET /api/v1/defense-prep/{id}.
+_defense_prep_bg_tasks: set = set()
 
-    May 24 2026 (P5 — Final Submission marker): if the request body
-    carries `generation_id`, Defense Prep references the
-    Final-marked version of THAT generation when one exists
-    (falling back to the most recent saved version). Otherwise it
-    auto-fetches the user's most-recent midpoint_paper editor
-    draft via get_current_draft (the prior behaviour).
 
-    The body shape:
-      {generation_id?: int}    optional; when present pins the
-                               canonical version per migration 040.
-
-    SSE wire format:
-      data: {"type": "draft_meta", "title": "...",
-              "word_count": N, "updated_at": "...",
-              "source": "final_marker" | "most_recent" | "editor_draft"}
-      data: {"type": "arbiter_chunk", "text": "..."}     (repeated)
-      data: [DONE]
-    """
+async def _run_defense_prep_job(
+    job_id: str, filename: str, draft_text: str,
+    user_email: str, session: dict, ip: str,
+) -> None:
+    """Background task: build the context, run the harness, persist the
+    verdict on the job. Fail-open — any exception flips the job to
+    `failed` with a readable error so the polling frontend can render it
+    inline rather than spinning forever."""
     import asyncio
     from agents.peer_review import (
         build_defense_prep_context_block,
         render_defense_prep_context_block,
         run_defense_prep_with_harness,
-        chunk_arbiter_text,
     )
+    from tools.activity_log import log_agent_interaction
+    from tools.generation_jobs import update_job
+    from datetime import datetime, timezone
 
-    # Optional generation_id from the request body — when present,
-    # the Final-marked version takes precedence over the editor
-    # draft. Read defensively: a missing body or non-JSON body
-    # falls through to the prior editor-draft path.
-    generation_id: int | None = None
+    update_job(job_id, status="running")
     try:
-        body = await request.json()
-        if isinstance(body, dict) and body.get("generation_id") is not None:
-            generation_id = int(body["generation_id"])
-    except Exception:
-        generation_id = None
-
-    # Resolve the draft BEFORE opening the stream so a 404-style
-    # error frame fires immediately rather than mid-flow.
-    draft = None
-    source = "editor_draft"
-    try:
-        if generation_id is not None:
-            from tools.paper_versions import (
-                get_canonical_version, get_final_version,
-            )
-            canonical = await get_canonical_version(generation_id)
-            if canonical:
-                final = await get_final_version(generation_id)
-                source = ("final_marker"
-                          if final is not None else "most_recent")
-                draft = {
-                    "content_text": canonical.get("paper_md") or "",
-                    "title":        (canonical.get("label")
-                                       or f"Generation {generation_id} "
-                                          f"v{canonical.get('version_number')}"),
-                    "word_count":   sum(
-                        int(v) for v in
-                        (canonical.get("word_counts") or {}).values()
-                        if isinstance(v, (int, float))
-                    ),
-                    "updated_at":   canonical.get("saved_at"),
-                }
-        if draft is None:
-            from tools.editor_drafts import get_current_draft
-            draft = await get_current_draft(
-                owner_email=session.get("email") or "",
-                document_type="midpoint_paper")
-            source = "editor_draft"
-    except Exception as exc:  # noqa: BLE001
-        log.warning("defense_prep_draft_lookup_failed",
-                    error=str(exc))
-
-    async def event_stream():
-        if not draft or not (draft.get("content_text") or "").strip():
-            # No draft — surface the gap rather than running the
-            # agent against empty input. The frontend renders the
-            # error and offers a "Open editor" link.
-            yield _sse(
-                "error",
-                message=(
-                    "No midpoint paper draft found. Generate or "
-                    "open a draft in the Reports editor first, "
-                    "then re-run Defense Prep."))
-            yield "data: [DONE]\n\n"
-            return
-        draft_text = draft["content_text"] or ""
-        title = draft.get("title") or "Midpoint paper draft"
-
+        ctx = build_defense_prep_context_block(
+            "Forest Capital (team draft)", draft_text,
+            source_name=filename)
+        context_block = render_defense_prep_context_block(ctx)
+        verdict = await asyncio.to_thread(
+            run_defense_prep_with_harness, context_block)
+        update_job(
+            job_id,
+            status="complete",
+            completed_at=datetime.now(timezone.utc),
+            _result_text=verdict,
+        )
+        log.info("defense_prep_complete", job_id=job_id, source="upload",
+                 filename=filename, draft_chars=len(draft_text),
+                 verdict_chars=len(verdict))
+        # The endpoint returned 202 long before this task started; there
+        # is no Request object to thread through to _log_interaction_bg.
+        # Call log_agent_interaction directly so the activity log row
+        # still lands. Fail-open inside the helper.
         try:
-            yield _sse(
-                "draft_meta",
-                title=title,
-                word_count=draft.get("word_count") or 0,
-                updated_at=draft.get("updated_at") or None,
-                source=source,
-            )
-
-            ctx_dict = build_defense_prep_context_block(
-                "Forest Capital (team draft)", draft_text)
-            context_block = render_defense_prep_context_block(
-                ctx_dict)
-
-            verdict = await asyncio.to_thread(
-                run_defense_prep_with_harness, context_block)
-            for chunk in chunk_arbiter_text(verdict):
-                yield _sse("arbiter_chunk", text=chunk)
-            log.info(
-                "defense_prep_complete",
-                draft_id=draft.get("id"),
-                draft_chars=len(draft_text),
-                verdict_chars=len(verdict))
-            _log_interaction_bg(
-                request, session, "defense_prep",
+            await log_agent_interaction(
+                user_email=user_email,
+                interaction_type="defense_prep",
+                session_id=session.get("session_id"),
+                session_type=session.get("session_type"),
+                ip_address=ip,
+                user_agent=None,
                 agents_involved=["thesis_defense_prep"],
+                question_text=None,
                 response_summary=verdict,
                 metadata={
-                    "draft_id":   draft.get("id"),
+                    "source":      "upload",
+                    "filename":    filename,
                     "draft_chars": len(draft_text),
+                    "job_id":      job_id,
                 },
             )
-        except Exception as exc:  # noqa: BLE001
-            log.error("defense_prep_failed", error=str(exc))
-            yield _sse(
-                "error",
-                message="Defense prep failed — please retry.")
-        yield "data: [DONE]\n\n"
+        except Exception as log_exc:  # noqa: BLE001
+            log.warning("defense_prep_activity_log_failed",
+                        job_id=job_id, error=str(log_exc))
+    except Exception as exc:  # noqa: BLE001
+        log.error("defense_prep_failed", job_id=job_id, error=str(exc))
+        update_job(
+            job_id,
+            status="failed",
+            completed_at=datetime.now(timezone.utc),
+            error="Defense prep failed: " + str(exc),
+        )
 
-    return StreamingResponse(event_stream(),
-                              media_type="text/event-stream")
+
+@app.post("/api/council/defense-prep")
+@limiter.limit("10/minute")
+async def council_defense_prep(
+    request: Request,
+    file: UploadFile = File(...),
+    session: dict = Depends(require_team_member),
+):
+    """Validates an uploaded .pdf or .docx, creates a Defense Prep job,
+    spawns the LLM run on a background task, and returns 202 + job_id
+    immediately. The frontend polls GET /api/v1/defense-prep/{id} every
+    few seconds and renders status / result / error as they land.
+
+    Upload validation is SYNCHRONOUS — empty / oversize / unsupported
+    extensions return 422 with a JSON detail, NEVER a job_id. The
+    uploaded bytes are extracted in-memory and never persisted.
+
+    Returns: 202 with {"job_id": "...", "status": "pending"}.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    from tools.academic_context import extract_uploaded_text
+    from tools.generation_jobs import create_job, update_job
+
+    filename = (file.filename or "upload").strip()
+    try:
+        raw = await file.read()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("defense_prep_upload_read_failed",
+                    filename=filename, error=str(exc))
+        raise HTTPException(
+            status_code=422,
+            detail="Could not read the uploaded file. Try again.")
+    if not raw:
+        raise HTTPException(
+            status_code=422,
+            detail="The uploaded file was empty. Choose a .pdf or .docx "
+                   "with content and try again.")
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(
+            status_code=422,
+            detail="The uploaded file exceeds the 10 MB limit. Trim the "
+                   "document or split it before retrying.")
+    try:
+        draft_text = extract_uploaded_text(filename, raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    job = create_job("defense_prep", session["email"])
+    update_job(
+        job["job_id"],
+        _filename=filename,
+        _draft_chars=len(draft_text),
+        _word_count=len(draft_text.split()),
+        _result_text=None,
+    )
+    ip = ""
+    try:
+        ip = (request.client.host if request.client else "") or ""
+    except Exception:  # noqa: BLE001
+        ip = ""
+    task = asyncio.create_task(
+        _run_defense_prep_job(
+            job["job_id"], filename, draft_text,
+            session["email"], session, ip))
+    update_job(job["job_id"], _task=task,
+               created_at=datetime.now(timezone.utc))
+    _defense_prep_bg_tasks.add(task)
+    task.add_done_callback(_defense_prep_bg_tasks.discard)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "job_id":     job["job_id"],
+            "status":     "pending",
+            "filename":   filename,
+            "word_count": len(draft_text.split()),
+        })
+
+
+@app.get("/api/v1/defense-prep/{job_id}")
+async def get_defense_prep_job(
+    job_id: str, session: dict = Depends(require_team_member),
+):
+    """Polling endpoint for the Defense Prep job created above. Returns:
+      pending  / running                — the LLM is still working;
+      complete with result_text          — the Q&A verdict is ready;
+      failed   with error                — readable reason for inline UX.
+    Owner-only: a job_id belongs to the user that created it."""
+    from datetime import datetime
+
+    from tools.generation_jobs import get_job
+
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("document_type") != "defense_prep":
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("owner_email") != session.get("email"):
+        raise HTTPException(status_code=404, detail="Job not found.")
+    created_at = job.get("created_at")
+    completed_at = job.get("completed_at")
+    elapsed = None
+    if created_at is not None:
+        end = completed_at if completed_at else datetime.now(created_at.tzinfo)
+        elapsed = round((end - created_at).total_seconds(), 1)
+    return {
+        "job_id":       job["job_id"],
+        "status":       job["status"],
+        "filename":     job.get("_filename"),
+        "word_count":   job.get("_word_count"),
+        "result_text":  (job.get("_result_text")
+                         if job["status"] == "complete" else None),
+        "error":        job.get("error") if job["status"] == "failed" else None,
+        "created_at":   created_at.isoformat() if created_at else None,
+        "completed_at": completed_at.isoformat() if completed_at else None,
+        "elapsed_seconds": elapsed,
+    }
 
 
 # ── Inline metric explainer ───────────────────────────────────────────────────
@@ -6638,14 +10349,24 @@ async def audit_resolve_finding(
     Records the team's response (resolution_note) and sets resolved. This
     is a response, not a correction: the audit's overall verdict does not
     change. Project team only.
+
+    Optional body field `disclosure_text` (June 6 2026, bridge #75) is
+    persisted to locked_disclosure_text -- the verbatim disclosure the
+    team agreed to put in the report at acknowledge time. Bob copies
+    the locked text from the finding card straight into the executive
+    brief without re-deriving. Empty / whitespace-only strings are
+    normalised to NULL (no disclosure locked).
     """
     from tools.audit_engine import resolve_finding
     note = str((body or {}).get("resolution_note") or "").strip()
     if not note:
         raise HTTPException(
             status_code=422, detail="A resolution note is required.")
+    disclosure_text = (body or {}).get("disclosure_text")
     finding = await resolve_finding(
-        finding_id, True, note, resolved_by=session["email"])
+        finding_id, True, note,
+        resolved_by=session["email"],
+        disclosure_text=str(disclosure_text) if disclosure_text else None)
     if finding is None:
         raise HTTPException(status_code=404, detail="Audit finding not found.")
     return finding
@@ -6686,15 +10407,415 @@ async def report_readiness(
         blocking_count: int,
         statistical: { unreviewed_warnings, unreviewed_failures },
         methodology: { unresolved_warnings, unresolved_failures },
-        checked_at: ISO timestamp
+        checked_at: ISO timestamp,
+        deck_story_plan_available: bool,   (June 21 2026, PR #343)
+        deck_script_available: bool,       (June 21 2026, PR #346)
       }
 
-    Auth: any authenticated user — the readiness verdict is a project
-    record visible to viewers, not a sysadmin-private surface.
+    deck_story_plan_available -- true when story_plans has a real
+    (non-fallback) row for (current_data_hash, document_type='deck').
+    Used to surface the plan-derived state on the deck regen flow.
+
+    deck_script_available -- true when the same row ALSO carries a
+    non-empty full_script. The Presentation Script card flips its
+    button state on this flag because Pass 2 (full_script) is a
+    separate Opus call from Pass 1 (slide_plan) and can fail
+    independently -- a plan_available=True / script_available=False
+    state happens when slide_plan landed but the script call timed
+    out or hit a transient API error. Treating the two as the same
+    signal would let the user download a script that doesn't exist.
+
+    Both flags computed inline here so the frontend has one round-
+    trip on page load.
     """
     from tools.report_readiness import compute_readiness
 
-    return await compute_readiness()
+    verdict = await compute_readiness()
+    plan_available, script_available = (
+        await _deck_story_plan_status())
+    verdict["deck_story_plan_available"] = plan_available
+    verdict["deck_script_available"] = script_available
+    # Layer 3b (June 21 2026) -- per-document export_verification
+    # status. Computes a {brief, deck, appendix -> verified/warned/
+    # failed/not_exported} dict from the latest editor draft's
+    # export_verification JSONB column. Drives the status pill
+    # rendered next to each document card on the Reports page. Read
+    # from the same authed user the GET is scoped to. Fail-open:
+    # any error returns {* -> 'not_exported'} so the badges stay
+    # neutral rather than 500ing the readiness endpoint.
+    verdict["export_verification"] = (
+        await _export_verification_status(session.get("email", "")))
+    return verdict
+
+
+async def _export_verification_status(
+    email: str,
+) -> dict[str, str]:
+    """Layer 3b (June 21 2026) -- per-document export_verification
+    status for the Reports-page card badges. Reads the latest editor
+    draft's export_verification JSONB column (populated at
+    /api/v1/export/verify-all time and at each in-editor export by
+    Layer 3a's _editor_export). Returns one of:
+
+      verified     -- last export passed verification, no warnings
+      warned       -- last export had a warning (e.g. stale data hash)
+      failed       -- last export had errors (missing/corrupted values)
+      not_exported -- no draft exists, or the draft has no
+                      export_verification column set yet
+
+    Fail-open: any DB / module-load error returns all-not-exported so
+    the readiness endpoint never 500s on a Layer-3-uninstalled
+    environment."""
+    out: dict[str, str] = {
+        "executive_brief": "not_exported",
+        "presentation_deck": "not_exported",
+        "analytical_appendix": "not_exported",
+    }
+    if not email:
+        return out
+    try:
+        from tools.editor_drafts import get_current_draft_with_layer3
+    except Exception as exc:  # noqa: BLE001
+        log.warning("export_verification_status_import_failed",
+                    error=str(exc))
+        return out
+
+    for doc_type in (
+            "executive_brief", "presentation_deck",
+            "analytical_appendix"):
+        try:
+            draft = await get_current_draft_with_layer3(email, doc_type)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "export_verification_draft_read_failed",
+                document_type=doc_type, error=str(exc))
+            continue
+        if not draft:
+            continue
+        ev = draft.get("export_verification") or None
+        if not ev:
+            continue
+        # ev is the verify_export_against_cache return shape.
+        if ev.get("errors"):
+            out[doc_type] = "failed"
+        elif ev.get("warnings") or ev.get("skipped"):
+            out[doc_type] = "warned"
+        else:
+            out[doc_type] = "verified"
+    return out
+
+
+async def _deck_story_plan_status() -> tuple[bool, bool]:
+    """Returns (plan_available, script_available) for the cached deck
+    story plan. Both flags read from a single get_cached_story_plan
+    call so the readiness response stays one round-trip.
+
+    plan_available is True when story_plans has a non-fallback row
+    keyed by (current_data_hash, 'deck'). The frontend uses this to
+    enable surfaces that need the locked slide_plan (the Presentation
+    Deck regenerate flow, future plan-only exports).
+
+    script_available is True when the same row ALSO carries a
+    non-empty full_script. The Presentation Script card flips its
+    button state on this flag because Pass 2 (full_script) is a
+    separate Opus call from Pass 1 (slide_plan) and can fail
+    independently -- a plan_available=True / script_available=False
+    state happens when slide_plan landed but the script call timed
+    out or hit a transient API error. Treating the two as the same
+    signal would let the user download a script that doesn't exist.
+
+    Fail-open: any error returns (False, False) and the script card
+    stays in the disabled 'Generate Deck First' state.
+
+    Supersedes the single-flag _deck_story_plan_available() helper
+    that landed with PR #343; this PR's rebase replaced it with the
+    two-flag tuple variant per the PR-body coordination plan.
+
+    June 22 2026 -- composite-hash bug fix. The previous
+    implementation queried
+    get_cached_story_plan(data_hash, "deck") with the bare
+    current_data_hash(), but refresh_story_plan PERSISTS the deck
+    row under a composite hash via
+    cache_key_with_brief_and_appendix
+    ("<data_hash>|<brief_hash>|<appendix_hash>"). The bare-hash
+    exact-match query missed every real deck row -- the gate
+    kept the script card locked even when a fresh deck plan
+    with a populated full_script was sitting in the table.
+    Replaced with get_latest_story_plan(document_type='deck',
+    exclude_fallback=True) which queries by document_type only +
+    excludes deterministic_fallback rows at the SQL layer. The
+    gate's question is "is there a fresh non-fallback deck plan
+    with full_script?" -- "latest by computed_at" is the correct
+    answer. Hash-drift staleness remains handled at export time
+    by verify_export_against_cache."""
+    try:
+        from tools.story_plan import get_latest_story_plan
+        plan = await get_latest_story_plan(
+            "deck", exclude_fallback=True)
+        if not plan:
+            return False, False
+        # exclude_fallback=True already filters fallback rows at
+        # the SQL layer; the defensive recheck below covers a
+        # future schema change where a row could land with
+        # model=NULL but still represent a fallback.
+        plan_available = plan.get("_model") != "deterministic_fallback"
+        if not plan_available:
+            return False, False
+        script_text = plan.get("full_script") or ""
+        script_available = bool(script_text and script_text.strip())
+        return True, script_available
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_story_plan_status_check_failed",
+                    error=str(exc))
+        return False, False
+
+
+# ── Layer 3 (June 21 2026) -- Pre-Submission Check ──────────────────────
+
+
+@app.post("/api/v1/export/verify-all")
+async def post_verify_all_for_submission(
+    session: dict = Depends(require_auth),
+):
+    """Layer 3 pre-submission check. For each of brief, deck,
+    appendix:
+      1. Load the latest editor draft for the owner
+      2. Run verify_export_against_cache on its content_text
+      3. Also run check_cross_deliverable_consistency across
+         all three documents
+
+    Returns a structured verdict the frontend renders as a panel:
+      ready          -- all three passed, no errors, hashes match
+      needs_attention -- warnings only (e.g. stale data_hash)
+      blocked        -- any errors, or any document not generated
+
+    `submission_recommendation` is a plain-English sentence Bob
+    and Molly can read directly without parsing the structured
+    flags.
+
+    Fail-open: any helper-import error returns a "verification
+    helpers unavailable" message rather than 500ing -- the user
+    can still submit, they just don't get the pre-flight check."""
+    try:
+        from tools.audit_assembler import current_data_hash
+        from tools.document_audit import (
+            check_cross_deliverable_consistency,
+        )
+        from tools.editor_drafts import get_current_draft
+        from tools.numeric_substitution import (
+            get_substitution_table, verify_export_against_cache,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("verify_all_imports_failed", error=str(exc))
+        return {
+            "overall": "needs_attention",
+            "submission_recommendation": (
+                "Verification helpers unavailable. The submission "
+                "can still proceed but the pre-flight check did "
+                "not run."),
+            "brief": {"status": "not_generated"},
+            "deck": {"status": "not_generated"},
+            "appendix": {"status": "not_generated"},
+            "cross_deliverable": {"passed": True, "flags": []},
+        }
+
+    email = session.get("email", "")
+    try:
+        cur_hash = await current_data_hash() or ""
+    except Exception:  # noqa: BLE001
+        cur_hash = ""
+
+    async def _verify_one(doc_type: str) -> dict:
+        try:
+            draft = await get_current_draft(email, doc_type)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("verify_all_draft_read_failed",
+                        document_type=doc_type, error=str(exc))
+            draft = None
+        if not draft or not (draft.get("content_text") or "").strip():
+            return {
+                "status": "not_generated",
+                "passed": False, "errors": [], "warnings": [],
+                "data_hash_match": False,
+                "last_verified_at": None,
+            }
+        manifest = draft.get("value_manifest") or {}
+        gen_hash = draft.get("data_hash") or ""
+        result = verify_export_against_cache(
+            content_text=draft.get("content_text") or "",
+            value_manifest=manifest,
+            current_data_hash=cur_hash or gen_hash,
+            generation_data_hash=gen_hash,
+            document_type=doc_type)
+        if result.get("errors"):
+            status = "failed"
+        elif result.get("warnings"):
+            status = "warned"
+        elif result.get("skipped"):
+            status = "warned"
+        else:
+            status = "verified"
+        return {
+            "status": status,
+            "passed": result.get("passed", True),
+            "errors": result.get("errors", []),
+            "warnings": result.get("warnings", []),
+            "data_hash_match": result.get("data_hash_match", True),
+            "last_verified_at": result.get("verified_at"),
+            "skipped": result.get("skipped"),
+            "n_values_verified": result.get("n_values_verified", 0),
+        }
+
+    brief = await _verify_one("executive_brief")
+    deck = await _verify_one("presentation_deck")
+    appendix = await _verify_one("analytical_appendix")
+    # June 23 2026 -- the script was historically skipped; the
+    # Submission Readiness Review audit identified this gap. Script
+    # generation has been writing value_manifest the whole time so
+    # the verify_export_against_cache helper works for it; the
+    # exclusion was a wiring oversight in this endpoint, not a
+    # capability gap.
+    script = await _verify_one("presentation_script")
+
+    # Cross-deliverable consistency check -- run only when at least
+    # two documents exist and we have a substitution table to compare
+    # against. The table is keyed by current data_hash; if all three
+    # documents share that hash, they used the same table at
+    # generation time (Layer 1 + Layer 2 guarantee). Drift here
+    # signals a manual edit landed post-generation.
+    cross: dict = {"passed": True, "flags": []}
+    try:
+        documents: dict[str, str] = {}
+        # Re-read draft content_text only -- the verify_one results
+        # above don't include the body text in their return shape.
+        for doc_type in (
+                "executive_brief", "presentation_deck",
+                "analytical_appendix",
+                # June 23 2026 -- include script in the cross-
+                # deliverable scan. Script narration paraphrases the
+                # deck's numeric anchors and a drift caused by a
+                # manual edit in the script is just as
+                # submission-blocking as one in the brief.
+                "presentation_script"):
+            d = await get_current_draft(email, doc_type)
+            text = (d or {}).get("content_text") or ""
+            if text.strip():
+                documents[doc_type] = text
+        if len(documents) >= 2 and cur_hash:
+            # Use the SAME table the substitution layer used; the
+            # cache key is the data_hash so this is a hit not a
+            # rebuild on the warm path.
+            try:
+                from tools.cache import get_latest_strategy_cache
+                from tools.cio_recommendation import (
+                    get_latest_recommendation,
+                )
+                from tools.academic_deck import (
+                    OOS_SHARPE_REGIME_CONDITIONAL,
+                    OOS_SHARPE_BENCHMARK,
+                    CORRELATION_PRE_2022, CORRELATION_POST_2022,
+                )
+                strategy_cache = (
+                    await get_latest_strategy_cache() or {})
+                cio_row = await get_latest_recommendation()
+                # June 22 2026 (wiring fix) -- same helper read
+                # as the document generators so the consistency
+                # check sees the same substituted values.
+                from tools.academic_export import (
+                    load_substitution_metric_sources,
+                )
+                rc_rows, fl_rows, cs_payload, crisis_payload = (
+                    await load_substitution_metric_sources())
+                table = get_substitution_table(
+                    cur_hash, strategy_cache, cio_row,
+                    oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
+                    oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                    pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
+                    post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                    regime_conditional=rc_rows,
+                    factor_loadings=fl_rows,
+                    cost_sensitivity=cs_payload,
+                    crisis_performance=crisis_payload)
+                flags = check_cross_deliverable_consistency(
+                    documents, table)
+                cross = {
+                    "passed": len(flags) == 0, "flags": flags}
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "verify_all_cross_deliverable_failed",
+                    error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "verify_all_documents_assembly_failed",
+            error=str(exc))
+
+    # Aggregate the four results into an overall verdict.
+    per_doc = [brief, deck, appendix, script]
+    any_not_generated = any(
+        d["status"] == "not_generated" for d in per_doc)
+    any_failed = any(
+        d["status"] == "failed" or d.get("errors")
+        for d in per_doc) or not cross.get("passed", True)
+    any_warned = any(d["status"] == "warned" for d in per_doc)
+    if any_not_generated:
+        overall = "blocked"
+    elif any_failed:
+        overall = "blocked"
+    elif any_warned:
+        overall = "needs_attention"
+    else:
+        overall = "ready"
+
+    # Plain-English recommendation per overall verdict.
+    if overall == "ready":
+        rec = (
+            f"All three deliverables verified against cache "
+            f"{(cur_hash or '')[:8]}. Safe to submit.")
+    elif overall == "needs_attention":
+        rec = (
+            "All deliverables generated; warnings present. Review "
+            "the stale-data-hash notices and consider regenerating "
+            "before submitting.")
+    else:
+        missing = [
+            label for d, label in (
+                (brief, "brief"), (deck, "deck"),
+                (appendix, "appendix"), (script, "script"),
+            ) if d["status"] == "not_generated"]
+        if missing:
+            rec = (
+                f"Generate {', '.join(missing)} before submitting. "
+                "All four deliverables must exist for the "
+                "pre-submission check to pass.")
+        else:
+            err_docs = [
+                label for d, label in (
+                    (brief, "brief"), (deck, "deck"),
+                    (appendix, "appendix"), (script, "script"),
+                ) if d.get("errors") or d["status"] == "failed"]
+            if err_docs:
+                rec = (
+                    f"Verification errors found in "
+                    f"{', '.join(err_docs)}. Open the editor, "
+                    "review the flagged values, and regenerate "
+                    "if needed before submitting.")
+            elif not cross.get("passed", True):
+                rec = (
+                    "Cross-deliverable inconsistency found -- a "
+                    "value appears differently across the brief / "
+                    "deck / appendix. Reconcile before submitting.")
+            else:
+                rec = (
+                    "One or more documents failed verification. "
+                    "Open the editor to investigate.")
+
+    return {
+        "brief": brief, "deck": deck, "appendix": appendix,
+        "script": script,
+        "cross_deliverable": cross,
+        "overall": overall,
+        "submission_recommendation": rec,
+    }
 
 
 @app.post("/api/v1/cache/invalidate")
@@ -7380,11 +11501,31 @@ async def advisor_analyse(
 
     try:
         from agents.academic_advisor import AcademicAdvisor
+        # Fetch the live regime + macro digest so the advisor grounds
+        # its grade-aware feedback in the same signal state the CIO
+        # and dissenters see. Both calls fail-open: if regime/macro
+        # are unavailable the advisor degrades to the prior
+        # results-only behaviour rather than refusing.
+        import asyncio
+        regime_data: dict | None = None
+        macro_context: str | None = None
+        try:
+            from tools.regime_detector import detect_current_regime
+            regime_data = await asyncio.to_thread(detect_current_regime)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("advisor_regime_unavailable", error=str(exc))
+        try:
+            from tools.macro_context import get_macro_context
+            macro_context = get_macro_context() or None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("advisor_macro_unavailable", error=str(exc))
         advisor = AcademicAdvisor()
         return advisor.analyse_findings(
             query=body.query,
             deliverable_type=body.deliverable_type,
             strategy_results=body.strategy_results,
+            regime_data=regime_data,
+            macro_context=macro_context,
         )
     except Exception as exc:
         log.error("advisor_analyse_endpoint_error", error=str(exc))
@@ -8721,6 +12862,895 @@ def _slug_for_chart(filename: str) -> str:
     return ""
 
 
+@app.get("/api/v1/export/data-reference-sheet")
+async def get_data_reference_sheet(
+    session: dict = Depends(require_auth),
+):
+    """Data Reference Sheet -- the cross-reference tool Bob,
+    Molly, and Mike use to verify every value in the submission
+    documents against the canonical strategy cache. Read-only;
+    available to any team-member session (not admin-gated).
+
+    Returns the full catalog from
+    tools/data_reference_catalog.CATALOG with each token's
+    current value (resolved via build_substitution_table) zipped
+    in. Per-strategy appendix tokens (10 strategies x 5 metrics
+    = 50 rows) and per-strategy factor loadings (10 strategies
+    x 5 columns = 50 rows) appear in their own categories.
+
+    Response shape -- the frontend DataReferenceSheetPanel
+    consumes this directly:
+      {
+        "data_hash": "f2e87dec7dcabe71"   # strategy hash
+        "platform_fingerprint": "d0b1339e..." # the value that
+                                                appears in
+                                                document footers
+        "generated_at": "ISO-8601",
+        "categories": {
+          <category_key>: {
+            "label": <human-readable label>,
+            "entries": [
+              {token, label, value, source, is_locked,
+               last_verified, document_locations}, ...
+            ]
+          }, ...
+        }
+      }
+
+    The two hashes are documented in the response so a frontend
+    tooltip can explain why the document footers (showing
+    platform_fingerprint d0b1339e) differ from the strategy
+    hash the reference sheet locks to (f2e87dec). They are
+    produced by two different functions over different inputs:
+      strategy_hash       = _compute_data_hash(n_rows,
+                                               last_date,
+                                               n_strategies)
+      platform_fingerprint = current_data_hash() = sha256 of
+                                                   market data
+                                                   table state
+
+    Fail-open: any error resolving a token leaves its value
+    as None and is_locked unchanged. The panel renders em-dash
+    for None values so a cold field is visually distinct from
+    a confirmed em-dash."""
+    from datetime import datetime, timezone
+
+    from tools.audit_assembler import current_data_hash
+    import asyncio
+    from tools.cache import (
+        get_latest_strategy_cache,
+        get_latest_strategy_hash,
+        get_monthly_returns,
+    )
+    from tools.cio_recommendation import (
+        compute_implied_asset_allocation, get_latest_recommendation,
+    )
+    from tools.regime_detector import detect_current_regime
+    from tools.data_reference_catalog import (
+        CATALOG, CATEGORY_LABELS,
+        expand_per_strategy_appendix_metrics,
+        expand_per_strategy_factor_loadings,
+    )
+    from tools.numeric_substitution import (
+        build_substitution_table,
+        get_substitution_table,
+    )
+    from tools.academic_deck import (
+        OOS_SHARPE_REGIME_CONDITIONAL,
+        OOS_SHARPE_BENCHMARK,
+        CORRELATION_PRE_2022, CORRELATION_POST_2022,
+    )
+    # June 22 2026 -- defensive import. OOS_WINDOW_PCT_OF_STUDY
+    # was added by PR #370 (Path A constants). When this endpoint
+    # ships on a branch that has not picked up the new constant
+    # yet, fall back to the documented value (53/287 = 18.5) so
+    # the endpoint doesn't 500. After both PRs merge the import
+    # will succeed and this fallback path becomes unreachable.
+    try:
+        from tools.academic_deck import OOS_WINDOW_PCT_OF_STUDY
+    except ImportError:
+        OOS_WINDOW_PCT_OF_STUDY = 18.5
+    _ = session  # session only used to enforce require_auth
+
+    # Pull the two hash flavours. strategy_hash is the value
+    # the substitution table is built from (locks every
+    # {{TOKEN}} to a specific data state). platform_fingerprint
+    # is the value the document footers carry -- a different
+    # function over different inputs (market data tables).
+    try:
+        strategy_hash = (await get_latest_strategy_hash()) or ""
+    except Exception:  # noqa: BLE001
+        strategy_hash = ""
+    try:
+        platform_fingerprint = (await current_data_hash()) or ""
+    except Exception:  # noqa: BLE001
+        platform_fingerprint = ""
+
+    # Build the substitution table with the same wiring the
+    # document generators use, so the reference values match
+    # what gets baked into the brief / appendix / deck.
+    strategy_cache: dict = {}
+    cio_row: dict | None = None
+    implied_alloc: dict | None = None
+    live_signals: dict | None = None
+    factor_loadings_row: list[dict] = []
+    cache_computed_at: str | None = None
+    try:
+        strategy_cache = (await get_latest_strategy_cache()) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_strategy_cache_failed",
+                    error=str(exc))
+    try:
+        cio_row = await get_latest_recommendation()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_cio_failed", error=str(exc))
+    try:
+        if cio_row and cio_row.get("blend_weights"):
+            implied_alloc = await compute_implied_asset_allocation(
+                cio_row.get("blend_weights"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_implied_alloc_failed",
+                    error=str(exc))
+    # June 22 2026 -- Gap A2 fix. tools.cache.get_regime_cache()
+    # reads from the regime_signals_cache TABLE with a 15-min TTL
+    # check; when the row is missing OR has expired, it returns
+    # None and the four watchpoint tokens (VIX/YIELD/CREDIT/
+    # EQUITY_TREND_CURRENT) render em-dash. detect_current_regime
+    # is the live FRED read with its own in-process 15-min cache
+    # -- guaranteed-populated source, returns the canonical dict
+    # shape build_substitution_table reads (vix_level /
+    # yield_curve_slope / credit_spread / equity_trend). Sync
+    # function (FRED HTTP calls), wrapped in asyncio.to_thread to
+    # keep the event loop free; same pattern as main.py:3022.
+    try:
+        live_signals = await asyncio.to_thread(detect_current_regime)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_regime_detect_failed",
+                    error=str(exc))
+    # June 22 2026 -- Gap C wiring. {{STUDY_MONTHS}} reads from
+    # the `study_months` kwarg; falls back to
+    # strategy_cache.get("n_observations") which the cache shape
+    # does NOT carry, so the token rendered em-dash on this
+    # endpoint. Brief / appendix / deck callsites get the count
+    # from data.study_period.n_months via gather_document_data;
+    # this endpoint reads it directly from the monthly returns
+    # length, the same source gather_document_data uses.
+    study_months_value: int | None = None
+    try:
+        monthly = await get_monthly_returns()
+        study_months_value = len((monthly or {}).get("dates") or [])
+        if study_months_value == 0:
+            study_months_value = None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_monthly_returns_failed",
+                    error=str(exc))
+    # June 22 2026 (wiring fix) -- read factor loadings from the
+    # academic_analytics cache payload, not from a live
+    # an.factor_loadings(strategy_cache, []) call. The live
+    # call passes empty FF factors and returns no rows -- the
+    # data lives in analytics_metrics_cache, written by
+    # refresh_academic_analytics. The substitution metric
+    # sources loaded below will overwrite factor_loadings_row
+    # with the cached payload (rc_rows assignment in the
+    # defensive-kwarg block).
+    try:
+        from tools import analytics as an
+        factor_loadings_row = an.factor_loadings(
+            strategy_cache, [])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_factor_loadings_failed",
+                    error=str(exc))
+
+    # June 22 2026 -- defensive kwarg forwarding. PR #370 added
+    # `oos_window_pct_of_study` and `live_signals` kwargs to
+    # build_substitution_table; this endpoint may ship before
+    # that PR lands. Inspect the signature once and forward only
+    # the kwargs the current implementation accepts so the
+    # endpoint stays 200 regardless of merge order.
+    #
+    # MUST inspect build_substitution_table, NOT get_substitution_table.
+    # The wrapper accepts the analytics kwargs only via **kwargs: Any
+    # so its `signature.parameters` dict does NOT contain
+    # `regime_conditional`, `factor_loadings`, etc. -- inspecting it
+    # would make every "in _sig.parameters" check below evaluate False
+    # and silently drop 5 kwargs (the original bug that left every
+    # token from PR #374 + the live-signals/study-pct tokens from
+    # PR #370 resolving to em-dash on the data reference sheet).
+    # build_substitution_table lists every kwarg explicitly so the
+    # signature check matches the kwargs it actually accepts.
+    import inspect
+    _sig = inspect.signature(build_substitution_table)
+    _kwargs = {
+        "oos_sharpe_blend": OOS_SHARPE_REGIME_CONDITIONAL,
+        "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
+        "pre_2022_eq_ig_correlation": CORRELATION_PRE_2022,
+        "post_2022_eq_ig_correlation": CORRELATION_POST_2022,
+        "implied_allocation": implied_alloc,
+    }
+    if "oos_window_pct_of_study" in _sig.parameters:
+        _kwargs["oos_window_pct_of_study"] = OOS_WINDOW_PCT_OF_STUDY
+    if "live_signals" in _sig.parameters:
+        _kwargs["live_signals"] = live_signals
+    if "study_months" in _sig.parameters \
+            and study_months_value is not None:
+        _kwargs["study_months"] = study_months_value
+    # June 22 2026 (wiring fix) -- thread the three analytics
+    # metric sources so pre/post 2022 Sharpe, factor loadings,
+    # and cost-sensitivity tokens resolve from the right cache.
+    # Defensive forwarding pattern matches the rest of this
+    # endpoint -- only pass kwargs the current implementation
+    # accepts, so it works regardless of merge order with other
+    # in-flight PRs that may not yet have the new signature.
+    try:
+        from tools.academic_export import (
+            load_substitution_metric_sources,
+        )
+        rc_rows, fl_rows, cs_payload, crisis_payload = (
+            await load_substitution_metric_sources())
+        if "regime_conditional" in _sig.parameters:
+            _kwargs["regime_conditional"] = rc_rows
+        if "factor_loadings" in _sig.parameters:
+            _kwargs["factor_loadings"] = fl_rows
+        if "cost_sensitivity" in _sig.parameters:
+            _kwargs["cost_sensitivity"] = cs_payload
+        if "crisis_performance" in _sig.parameters:
+            _kwargs["crisis_performance"] = crisis_payload
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_metric_sources_failed",
+                    error=str(exc))
+        rc_rows, fl_rows, cs_payload, crisis_payload = (
+            [], [], None, None)
+    # June 22 2026 -- Gap A diagnostic. After PR #379 wired the
+    # live_signals / implied_allocation / cio_row kwargs through
+    # correctly, the user reported CURRENT_*_PCT / BLEND_*_WT /
+    # VIX/CREDIT/YIELD/EQUITY_TREND_CURRENT tokens STILL rendering
+    # em-dash. This log answers in one line whether the underlying
+    # fetches actually returned data on Render or whether they
+    # came back None (cold cio_recommendations / regime_signals
+    # tables). If has_* are all False, the operator must warm the
+    # caches via admin refresh before reloading the reference
+    # sheet -- not a wiring bug.
+    log.info(
+        "data_reference_kwarg_shape",
+        has_cio_row=bool(cio_row),
+        cio_row_keys=sorted(cio_row.keys())[:10] if cio_row else [],
+        has_blend_weights=bool(
+            cio_row and cio_row.get("blend_weights")),
+        has_implied_alloc=bool(implied_alloc),
+        implied_alloc_keys=sorted(implied_alloc.keys())[:5]
+            if implied_alloc else [],
+        has_live_signals=bool(live_signals),
+        live_signals_keys=sorted(live_signals.keys())[:8]
+            if live_signals else [],
+        study_months_value=study_months_value,
+        n_rc_rows=len(rc_rows or []),
+        n_fl_rows=len(fl_rows or []),
+        cs_n_scenarios=(
+            len((cs_payload or {}).get("scenarios") or [])),
+    )
+    table = get_substitution_table(
+        strategy_hash, strategy_cache, cio_row, **_kwargs)
+
+    # When the cache row was last written -- per-row
+    # last_verified for is_locked=false entries. The
+    # strategy_results_cache schema carries computed_at on
+    # every row; the helper exposes it through the JSON blob.
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as s:
+                r = await s.execute(text(
+                    "SELECT computed_at FROM "
+                    "strategy_results_cache "
+                    "WHERE strategy_hash = :h LIMIT 1"),
+                    {"h": strategy_hash})
+                row = r.fetchone()
+                if row and row[0]:
+                    cache_computed_at = (
+                        row[0].isoformat()
+                        if hasattr(row[0], "isoformat")
+                        else str(row[0]))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_computed_at_failed",
+                    error=str(exc))
+
+    # The "locked at submission" sentinel for is_locked=true
+    # entries. Bob sees this string instead of a timestamp.
+    LOCKED_SENTINEL = "locked at submission (academic_deck.py)"
+
+    # Factor-loading row lookup keyed by strategy_name.
+    # June 22 2026 (wiring fix) -- prefer the cached payload
+    # (fl_rows from load_substitution_metric_sources) over the
+    # live-compute factor_loadings_row, which is empty when the
+    # endpoint can't pass real FF factors. Falls back to the
+    # live row only when the cache is empty.
+    fl_by_strategy: dict[str, dict] = {}
+    fl_source_rows = (
+        fl_rows if isinstance(fl_rows, list) and fl_rows
+        else factor_loadings_row)
+    for row in fl_source_rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("strategy") or row.get("strategy_name")
+        if name:
+            fl_by_strategy[name] = row
+
+    def _resolve_value(
+        token: str, source: str,
+    ) -> tuple[str | None, str | None]:
+        """Returns (value, last_verified). Value None -> render
+        em-dash; last_verified None means the source didn't
+        carry a timestamp.
+
+        June 27 2026 (Task 1) -- {{REGIME_CONFIDENCE}} and
+        {{CURRENT_REGIME}} are read DIRECTLY from cio_row (the
+        live get_latest_recommendation() result), bypassing the
+        substitution table cache. The data-reference sheet is a
+        diagnostic tool and must always reflect the true current
+        CIO state, not a cached approximation. The PR 1 v2 cache-
+        key fix (CIO identity in _cache_key, June 27 2026) closes
+        the invalidation gap on doc generation, but the sheet
+        still gets the live read here so a future cache-shape
+        bug or a TTL race never produces a stale diagnostic
+        display. The last_verified stamp 'live (from
+        cio_recommendation)' makes it visible to the reader
+        that this row bypasses the table cache."""
+        if token == "{{REGIME_CONFIDENCE}}":
+            from tools.numeric_substitution import format_pct
+            raw = cio_row.get("confidence") if cio_row else None
+            # Handle the two known cio_row.confidence shapes:
+            # scalar float (e.g. 0.954) or dict with probability
+            # field (e.g. {"probability": 0.954}). Same dispatch
+            # as numeric_substitution.py:538-541.
+            if isinstance(raw, dict):
+                raw = raw.get("probability")
+            value = format_pct(raw)
+            return (value, "live (from cio_recommendation)")
+        if token == "{{CURRENT_REGIME}}":
+            raw = cio_row.get("regime") if cio_row else None
+            value = str(raw) if raw else "—"
+            return (value, "live (from cio_recommendation)")
+        if source.startswith("data.factor_loadings."):
+            # factor_loadings.<STRATEGY>.<metric>
+            _, _, rest = source.partition(
+                "data.factor_loadings.")
+            parts = rest.split(".")
+            if len(parts) == 2:
+                strategy_name, metric_key = parts
+                row = fl_by_strategy.get(strategy_name) or {}
+                val = row.get(metric_key)
+                if val is None:
+                    return (None, cache_computed_at)
+                return (
+                    str(round(float(val), 4))
+                    if isinstance(val, (int, float))
+                    else str(val),
+                    cache_computed_at)
+        # Token-table lookup. Fall back to a cache-row computed_at
+        # for live values; the locked sentinel for academic
+        # constants.
+        value = table.get(token)
+        if value is None or value == "—":
+            return (value, None)
+        return (value, cache_computed_at)
+
+    # June 22 2026 -- locked-constant provenance lookup. For
+    # is_locked=True entries the catalog source string keys
+    # into LOCKED_CONSTANT_PROVENANCE; the structured block
+    # ships in the entry payload so the frontend can render
+    # the multi-line tooltip on hover over the lock icon.
+    from tools.data_reference_catalog import (
+        classify_submission_scope, provenance_for_source,
+        SCOPE_LEGEND,
+    )
+
+    # Walk the catalog and build the categorised response.
+    categories: dict[str, dict] = {}
+    for category_key, category_label, entries in CATALOG:
+        rendered: list[dict] = []
+        for entry in entries:
+            value, last_verified_cache = _resolve_value(
+                entry.token, entry.source)
+            last_verified = (
+                LOCKED_SENTINEL if entry.is_locked
+                else (last_verified_cache or "cache miss"))
+            provenance = (
+                provenance_for_source(entry.source)
+                if entry.is_locked else None)
+            rendered.append({
+                "token": entry.token,
+                "label": entry.label,
+                "value": value if value is not None else "—",
+                "source": entry.source,
+                "is_locked": entry.is_locked,
+                "submission_scope": classify_submission_scope(
+                    entry.token, entry.source, entry.is_locked),
+                "last_verified": last_verified,
+                "document_locations": list(entry.document_locations),
+                "provenance": provenance,
+            })
+        categories[category_key] = {
+            "label": category_label,
+            "entries": rendered,
+        }
+
+    # Per-strategy appendix tokens (10 strategies x 5 metrics).
+    per_strategy_rows: list[dict] = []
+    for entry in expand_per_strategy_appendix_metrics():
+        value, last_verified_cache = _resolve_value(
+            entry.token, entry.source)
+        per_strategy_rows.append({
+            "token": entry.token,
+            "label": entry.label,
+            "value": value if value is not None else "—",
+            "source": entry.source,
+            "is_locked": entry.is_locked,
+            "submission_scope": classify_submission_scope(
+                entry.token, entry.source, entry.is_locked),
+            "last_verified": last_verified_cache or "cache miss",
+            "document_locations": list(entry.document_locations),
+            # Per-strategy expansion is is_locked=False; no
+            # provenance entry exists for these. The frontend
+            # tooltip is skipped when provenance is None.
+            "provenance": None,
+        })
+    categories["per_strategy_appendix"] = {
+        "label": CATEGORY_LABELS["per_strategy_appendix"],
+        "entries": per_strategy_rows,
+    }
+
+    # Per-strategy factor loadings (10 strategies x 5 columns).
+    factor_rows: list[dict] = []
+    for entry in expand_per_strategy_factor_loadings():
+        value, last_verified_cache = _resolve_value(
+            entry.token, entry.source)
+        factor_rows.append({
+            "token": entry.token,
+            "label": entry.label,
+            "value": value if value is not None else "—",
+            "source": entry.source,
+            "is_locked": entry.is_locked,
+            "submission_scope": classify_submission_scope(
+                entry.token, entry.source, entry.is_locked),
+            "last_verified": last_verified_cache or "cache miss",
+            "document_locations": list(entry.document_locations),
+            "provenance": None,
+        })
+    categories["factor_loadings"] = {
+        "label": CATEGORY_LABELS["factor_loadings"],
+        "entries": factor_rows,
+    }
+
+    # ── Task 4 (June 27 2026) -- submission-scope summary ──────
+    # June 28 2026 -- auto-discovery backstop. Walk every token
+    # in the live substitution table; any token NOT already in
+    # the curated CATALOG above (or the per-strategy / factor
+    # expansions) gets surfaced under an "uncatalogued" category
+    # so the operator can see ALL tokens that can appear in a
+    # draft, not just the ones a human remembered to add to
+    # CATALOG. This makes the sheet self-healing: future token
+    # additions to numeric_substitution.py auto-appear here on
+    # the next request without a parallel catalog update.
+    #
+    # The endpoint still prefers curated entries (with labels +
+    # provenance + document_locations) when one exists -- this
+    # path is the safety net, not the primary path.
+    catalogued: set[str] = set()
+    for _ck, cat in categories.items():
+        for e in cat.get("entries", []):
+            catalogued.add(e["token"])
+    try:
+        uncatalogued_rows: list[dict] = []
+        for token, value in sorted(table.items()):
+            if not (token.startswith("{{")
+                    and token.endswith("}}")):
+                continue
+            if token in catalogued:
+                continue
+            uncatalogued_rows.append({
+                "token": token,
+                "label": (
+                    "Uncatalogued -- substitution-table only "
+                    "(add a TokenEntry in "
+                    "tools/data_reference_catalog.py for a "
+                    "human-readable label + provenance)"),
+                "value": value if value is not None else "—",
+                "source": (
+                    "tools/numeric_substitution.py:"
+                    "get_substitution_table"),
+                "is_locked": False,
+                "submission_scope": classify_submission_scope(
+                    token, None, False),
+                "last_verified": "live",
+                "document_locations": [],
+                "provenance": None,
+            })
+        if uncatalogued_rows:
+            categories["uncatalogued"] = {
+                "label": (
+                    "Uncatalogued tokens "
+                    "(present in substitution table but missing "
+                    "a curated catalog entry)"),
+                "entries": uncatalogued_rows,
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "data_reference_uncatalogued_backstop_failed",
+            error=str(exc))
+
+    # Tally every rendered entry across every category by its
+    # submission_scope so the sheet header can answer
+    # "is this figure part of the academic submission record?"
+    # at a glance.
+    scope_counts: dict[str, int] = {
+        "IN_SCOPE_LOCKED": 0,
+        "IN_SCOPE_CONSTANT": 0,
+        "IN_SCOPE_FULL_DATASET": 0,
+        "OUT_OF_SCOPE_LIVE": 0,
+    }
+    for _cat_key, cat in categories.items():
+        for entry in cat.get("entries", []):
+            scope = entry.get("submission_scope")
+            if scope in scope_counts:
+                scope_counts[scope] += 1
+    in_scope_total = (
+        scope_counts["IN_SCOPE_LOCKED"]
+        + scope_counts["IN_SCOPE_CONSTANT"]
+        + scope_counts["IN_SCOPE_FULL_DATASET"])
+    submission_scope_summary = {
+        "in_scope_total": in_scope_total,
+        "in_scope_locked": scope_counts["IN_SCOPE_LOCKED"],
+        "in_scope_constant": scope_counts["IN_SCOPE_CONSTANT"],
+        "in_scope_full_dataset": (
+            scope_counts["IN_SCOPE_FULL_DATASET"]),
+        "out_of_scope_live": scope_counts["OUT_OF_SCOPE_LIVE"],
+    }
+
+    # ── Task 4 -- freeze status surfaced at the sheet header ───
+    freeze_active = False
+    freeze_hash: str | None = None
+    try:
+        from tools.submission_freeze import get_freeze_config
+        freeze_config = await get_freeze_config()
+        freeze_active = bool(freeze_config.get("active"))
+        freeze_hash = (
+            freeze_config.get("freeze_hash")
+            if freeze_active else None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "data_reference_freeze_status_failed",
+            error=str(exc))
+
+    return {
+        "data_hash": strategy_hash,
+        "platform_fingerprint": platform_fingerprint,
+        "generated_at": datetime.now(
+            timezone.utc).isoformat(),
+        "categories": categories,
+        # Task 4 (June 27 2026) -- submission audit fields.
+        "freeze_active": freeze_active,
+        "freeze_hash": freeze_hash,
+        "submission_scope_summary": submission_scope_summary,
+        "submission_scope_legend": SCOPE_LEGEND,
+    }
+
+
+@app.get("/api/v1/export/data-reference-sheet/validate")
+async def validate_data_reference_sheet(
+    session: dict = Depends(require_auth),
+):
+    """Cross-reference validator for the Data Reference Sheet.
+
+    Runs the same build as the /data-reference-sheet endpoint,
+    then for each token compares the rendered value against the
+    authoritative source (analytics_metrics_cache row, strategy
+    cache, detect_current_regime, etc) and returns a status
+    pass / fail / warning / skipped per token.
+
+    Status rules:
+      pass    -- within tolerance (0.01 for Sharpe, 0.0001 for
+                 factor loadings, 0.5pp for percentages, exact
+                 for ints / strings)
+      fail    -- beyond tolerance; result carries delta
+      warning -- pass but source row > 24h old
+      skipped -- locked constant, missing source, or no
+                 strategy registered for the token
+
+    Each result also carries cache_freshness -- the ISO
+    timestamp of the source row, null for locked constants.
+
+    Zero LLM calls. Reads warm caches only. Sub-2-second
+    typical response.
+
+    Fail-open per token: a strategy raising returns skipped
+    with note='validator_error: <msg>'; the report still
+    completes for the remaining tokens.
+    """
+    from datetime import datetime, timezone
+
+    from tools.audit_assembler import current_data_hash
+    import asyncio
+    from tools.cache import (
+        get_latest_strategy_cache,
+        get_latest_strategy_hash,
+        get_monthly_returns,
+    )
+    from tools.cio_recommendation import (
+        compute_implied_asset_allocation,
+        get_latest_recommendation,
+    )
+    from tools.data_reference_validator import (
+        Sources, validate_reference_sheet,
+    )
+    from tools.precomputed_analytics import get_latest_metric
+    from tools.regime_detector import detect_current_regime
+    _ = session  # auth-only
+
+    # Get the rendered sheet via the same handler so any future
+    # change to the sheet shape is automatically reflected here.
+    rendered = await get_data_reference_sheet(session)
+    if not isinstance(rendered, dict):
+        # The handler should always return a dict; bail out
+        # rather than crashing the validator.
+        return {
+            "data_hash": "",
+            "validated_at": datetime.now(
+                timezone.utc).isoformat(),
+            "summary": {
+                "total": 0, "passed": 0, "failed": 0,
+                "warning": 0, "skipped": 0},
+            "results": [],
+            "error": "sheet_unavailable",
+        }
+    data_hash = rendered.get("data_hash") or ""
+
+    # Pre-load every source the strategies read so we hit each
+    # cache exactly once for the whole 153-token report rather
+    # than per-token.
+    sources = Sources()
+    try:
+        sources.strategy_cache = (
+            await get_latest_strategy_cache()) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_strategy_cache_failed",
+                    error=str(exc))
+    try:
+        sources.cio_row = await get_latest_recommendation()
+        if sources.cio_row:
+            sources.cio_computed_at = (
+                sources.cio_row.get("computed_at"))
+            if (sources.cio_row.get("blend_weights")):
+                try:
+                    sources.implied_alloc = (
+                        await compute_implied_asset_allocation(
+                            sources.cio_row.get("blend_weights")))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "validator_implied_alloc_failed",
+                        error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_cio_failed", error=str(exc))
+    try:
+        sources.live_signals = await asyncio.to_thread(
+            detect_current_regime)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_live_signals_failed",
+                    error=str(exc))
+    try:
+        sources.academic_analytics = (
+            await get_latest_metric("academic_analytics"))
+        if sources.academic_analytics:
+            sources.academic_analytics_computed_at = (
+                sources.academic_analytics.get("_computed_at"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_academic_analytics_failed",
+                    error=str(exc))
+    try:
+        sources.oos_cost_sensitivity = (
+            await get_latest_metric("oos_cost_sensitivity"))
+        if sources.oos_cost_sensitivity:
+            sources.oos_cost_sensitivity_computed_at = (
+                sources.oos_cost_sensitivity.get("_computed_at"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_oos_cost_sensitivity_failed",
+                    error=str(exc))
+    try:
+        monthly = await get_monthly_returns()
+        sources.n_monthly_months = (
+            len((monthly or {}).get("dates") or []))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_monthly_returns_failed",
+                    error=str(exc))
+    try:
+        # Pull strategy cache row's computed_at for staleness
+        # checks on per-strategy metric tokens.
+        try:
+            strategy_hash = (
+                await get_latest_strategy_hash()) or ""
+        except Exception:  # noqa: BLE001
+            strategy_hash = ""
+        if strategy_hash:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            if AsyncSessionLocal is not None:
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(text(
+                        "SELECT computed_at FROM "
+                        "strategy_results_cache "
+                        "WHERE strategy_hash = :h LIMIT 1"),
+                        {"h": strategy_hash})
+                    row = r.fetchone()
+                    if row and row[0]:
+                        sources.strategy_cache_computed_at = (
+                            row[0].isoformat()
+                            if hasattr(row[0], "isoformat")
+                            else str(row[0]))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "validator_strategy_cache_computed_at_failed",
+            error=str(exc))
+
+    rendered_categories = rendered.get("categories") or {}
+    report = validate_reference_sheet(
+        rendered_categories, sources, data_hash)
+    log.info(
+        "data_reference_sheet_validated",
+        data_hash=data_hash[:8] if data_hash else "",
+        total=report.summary.get("total"),
+        passed=report.summary.get("passed"),
+        failed=report.summary.get("failed"),
+        warning=report.summary.get("warning"),
+        skipped=report.summary.get("skipped"),
+        actor=session.get("email") if isinstance(session, dict)
+              else None)
+    return report.to_dict()
+
+
+# ── Slide guidance (June 22 2026) ───────────────────────────────────
+
+
+@app.get("/api/v1/deck/slide-guidance/template")
+async def get_slide_guidance_template(
+    session: dict = Depends(require_auth),
+):
+    """Download the default slide guidance template as JSON.
+
+    Molly opens this in any text editor, edits the string values
+    only, saves, and uploads via POST /api/v1/deck/slide-guidance.
+    The template is generated from the current SLIDE_TITLES + the
+    canonical default so_what / max_bullets / bullet_guidance /
+    speaker_note_directive per slide. Every uploaded file MUST
+    have been derived from a downloaded template -- the rigid
+    validator rejects any deviation in field set or value type.
+    """
+    from tools.deck_slide_guidance import build_default_template
+    _ = session  # auth-only
+    return build_default_template()
+
+
+@app.post("/api/v1/deck/slide-guidance")
+async def post_slide_guidance(
+    file: UploadFile = File(...),
+    session: dict = Depends(require_auth),
+):
+    """Upload a slide guidance JSON file for the authenticated
+    user. Per-user storage: only one active guidance row per
+    owner_email. Prior active row is deactivated atomically
+    when this one is accepted.
+
+    Validation rules (enforced in validate_guidance):
+      - Exact key set (no missing, no extras)
+      - All values strings
+      - All 12 slide numbers present
+      - version + generated_from match template
+      - String length limits per field
+      - max_bullets is a numeric string in [0, 3]
+
+    On validation failure returns 422 with the exact field path
+    that failed and a plain English error message.
+    """
+    import json as _json
+    from tools.deck_slide_guidance import (
+        set_active_guidance, validate_guidance,
+    )
+    owner_email = session.get("email") or ""
+    if not owner_email:
+        raise HTTPException(
+            status_code=401, detail="no_session_email")
+    try:
+        raw = await file.read()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=f"failed to read uploaded file: {exc}")
+    try:
+        payload = _json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=422,
+            detail="uploaded file is not valid UTF-8")
+    except _json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"uploaded file is not valid JSON: {exc.msg} "
+                   f"at line {exc.lineno}, column {exc.colno}")
+    clean, error = validate_guidance(payload)
+    if error or clean is None:
+        raise HTTPException(status_code=422, detail=error)
+    result = await set_active_guidance(owner_email, clean)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "failed to persist guidance: "
+                f"{result.get('error') or 'unknown error'}"))
+    log.info(
+        "deck_slide_guidance_uploaded",
+        owner_email=owner_email,
+        version=clean.get("version"),
+        generated_from=clean.get("generated_from"),
+        uploaded_at=result.get("uploaded_at"))
+    return {
+        "ok": True,
+        "uploaded_at": result.get("uploaded_at"),
+        "version": clean.get("version"),
+        "generated_from": clean.get("generated_from"),
+    }
+
+
+@app.get("/api/v1/deck/slide-guidance")
+async def get_slide_guidance(
+    session: dict = Depends(require_auth),
+):
+    """Return the active slide guidance for the authenticated
+    user, or {active: false} when none has been uploaded.
+
+    Used by the Reports page SlideGuidancePanel to render the
+    current state + populate the "download current guidance"
+    button payload."""
+    from tools.deck_slide_guidance import get_active_guidance
+    owner_email = session.get("email") or ""
+    if not owner_email:
+        return {"active": False}
+    row = await get_active_guidance(owner_email)
+    if not row:
+        return {"active": False}
+    guidance = row.get("guidance") or {}
+    return {
+        "active": True,
+        "uploaded_at": row.get("uploaded_at"),
+        "version": guidance.get("version"),
+        "generated_from": guidance.get("generated_from"),
+        "guidance": guidance,
+    }
+
+
+@app.delete("/api/v1/deck/slide-guidance")
+async def delete_slide_guidance(
+    session: dict = Depends(require_auth),
+):
+    """Deactivate the active guidance for the authenticated user,
+    reverting deck generation to the hardcoded defaults in
+    SLIDE_SPECIFICATIONS. Idempotent -- returns ok=true even
+    when no active guidance exists."""
+    from tools.deck_slide_guidance import clear_active_guidance
+    owner_email = session.get("email") or ""
+    if not owner_email:
+        raise HTTPException(
+            status_code=401, detail="no_session_email")
+    ok = await clear_active_guidance(owner_email)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail="failed to clear active guidance "
+                   "(database unreachable)")
+    log.info(
+        "deck_slide_guidance_cleared",
+        owner_email=owner_email)
+    return {"ok": True}
+
+
 @app.post("/api/v1/export/package")
 @limiter.limit("10/minute")
 async def export_package(
@@ -8868,7 +13898,7 @@ async def export_package(
 #
 # POST /api/v1/export/midpoint-paper     → 3-page midpoint submission (.docx)
 # POST /api/v1/export/executive-brief    → 5-page executive brief (.docx)
-# POST /api/v1/export/presentation-deck  → 10-slide final deck (.pptx)
+# POST /api/v1/export/presentation-deck  → 6-slide final deck (.pptx)
 #
 # Each assembles a graded deliverable as a FIRST DRAFT for Bob to refine:
 # every figure is real platform data (tools/academic_export.gather_document_
@@ -8962,17 +13992,40 @@ _CAVEAT_STATS = (
 )
 
 
-def _apply_draft_caveats(specs: list[dict]) -> list[dict]:
+def _apply_draft_caveats(
+    specs: list[dict], document_type: str | None = None,
+) -> list[dict]:
     """
     Appends the citation- and statistic-verification caveats to each
     section task prompt. Idempotent per form — a task that already
     carries the [[VERIFY CITATION]] or [[VERIFY:]] instruction is not
     given a second, conflicting copy (the midpoint methodology and
     results tasks already carry the statistic marker).
+
+    June 21 2026 -- the [[VERIFY CITATION]] caveat is skipped for
+    document_type='executive_brief' (PR #363) AND for
+    document_type='analytical_appendix' (this PR). Both writers
+    cite only from data/references.json (web search disabled in
+    PR #362; the registry is the only permitted source); every
+    citation is pre-verified by construction. Injecting the
+    caveat still drove the writers to mark every citation with
+    [[VERIFY CITATION: ...]] blocks that surfaced as submission
+    blockers in the audit AND fed the editor's marker-counting
+    progress meter (sections C/D/E/G showed 0% completion in
+    production despite carrying full prose, because the
+    citation markers stayed unresolved).
+
+    The statistic caveat ([[VERIFY: ...]] markers for uncertain
+    numerics) is retained for ALL document types because
+    numerics can still drift between the writer's prose and the
+    locked cache values -- the substitution architecture
+    catches most, the marker flow catches the rest.
     """
+    skip_citation_caveat = document_type in (
+        "executive_brief", "analytical_appendix")
     for spec in specs:
         task = spec.get("task", "")
-        if "[[VERIFY CITATION" not in task:
+        if not skip_citation_caveat and "[[VERIFY CITATION" not in task:
             task += _CAVEAT_CITATION
         if "[[VERIFY:" not in task:
             task += _CAVEAT_STATS
@@ -9046,7 +14099,11 @@ _MIDPOINT_S2_KEY_FINDINGS = (
 
 
 async def _generate_narratives(
-    specs: list[dict], *, n_strategies: int | None = None,
+    specs: list[dict], *,
+    n_strategies: int | None = None,
+    substitution_table: dict[str, str] | None = None,
+    document_type: str | None = None,
+    defer_substitution: bool | None = None,
 ) -> dict[str, str]:
     """
     Generates a set of narrative sections concurrently.
@@ -9062,10 +14119,40 @@ async def _generate_narratives(
     (it counts the cache, not the section). Threaded through to
     harness_narrative once per spec so the chart-vision scope sentences
     render the precise count instead of the count-omitted fallback.
+
+    substitution_table -- the {token -> value} map produced by
+    tools.numeric_substitution.get_substitution_table. When supplied,
+    threaded through to every per-section harness_narrative call so
+    the post-Sonnet text is substituted before the evaluator scores
+    it. None preserves legacy behaviour for callers that don't yet
+    pass the table (Layer-2 PR wires the deck + appendix paths).
     """
     import asyncio
 
     from tools.academic_export import DATA_PENDING, harness_narrative
+
+    # June 28 2026 -- resolve the DEFER_SUBSTITUTION_TO_EXPORT
+    # flag ONCE in this async caller before launching the
+    # asyncio.to_thread jobs. Threading the bool into harness_
+    # narrative eliminates the failed asyncio.run-from-worker
+    # path that raised "Future attached to a different loop"
+    # (SQLAlchemy's async session is bound to the main loop;
+    # a fresh asyncio.run inside the worker thread cannot
+    # reuse those connections). The caller may also pre-resolve
+    # it themselves and pass through; only query when not
+    # supplied.
+    if defer_substitution is None:
+        try:
+            from tools.platform_flags import (
+                is_defer_substitution_enabled,
+            )
+            defer_substitution = (
+                await is_defer_substitution_enabled())
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(
+                "defer_flag_resolve_failed",
+                error=str(_exc))
+            defer_substitution = False
 
     out: dict[str, str] = {}
     jobs: list[tuple[str, Any]] = []
@@ -9074,9 +14161,43 @@ async def _generate_narratives(
             out[spec["key"]] = spec.get(
                 "pending", f"{DATA_PENDING} — source data unavailable.")
             continue
+        kwargs: dict[str, Any] = {
+            "n_strategies": n_strategies,
+            "substitution_table": substitution_table,
+        }
+        # June 21 2026 -- per-spec max_tokens override. The two
+        # longest brief sections (key_findings ~550 words,
+        # visuals 4 chart paragraphs) were truncating mid-
+        # sentence at the default 1500. The spec dict carries an
+        # optional max_tokens that flows through to call_claude.
+        if "max_tokens" in spec:
+            kwargs["max_tokens"] = spec["max_tokens"]
+        # June 21 2026 -- per-section anchor allow-list. When the
+        # spec carries a numeric_anchors dict (brief sections via
+        # _inject_brief_section_plan), it flows through to
+        # harness_narrative's post-pass story-plan-violation
+        # check. The check re-runs the generator ONCE more with
+        # explicit "unauthorized numbers: X, Y, Z" feedback when
+        # the first draft emits too many numbers outside the
+        # anchor set. See Issue 2 in the post-regen audit
+        # (Option 2: harness retry on flag count).
+        if "numeric_anchors" in spec:
+            kwargs["numeric_anchors"] = spec["numeric_anchors"]
+        # June 28 2026 -- thread document_type so harness_narrative
+        # can enable the hard-lock untoken-numeric guardrail on
+        # protected document types (executive_brief +
+        # analytical_appendix). Deck + script paths are unaffected.
+        if document_type is not None:
+            kwargs["document_type"] = document_type
+        # June 28 2026 -- thread the pre-resolved deferral flag
+        # so the worker thread never tries to query
+        # platform_config from inside its own asyncio.run (the
+        # SQLAlchemy session is bound to the main loop +
+        # raises "Future attached to a different loop").
+        kwargs["defer_substitution"] = bool(defer_substitution)
         jobs.append((spec["key"], asyncio.to_thread(
             harness_narrative, spec["agent_id"], spec["task"], spec["context"],
-            n_strategies=n_strategies)))
+            **kwargs)))
     if jobs:
         results = await asyncio.gather(*[j for _, j in jobs],
                                        return_exceptions=True)
@@ -9109,34 +14230,357 @@ async def _editor_export(editor_draft_id: int) -> Response:
         # Render each chart element's PNG server-side (an async path) and
         # hand the {element_id: png} map to the sync .pptx builder. A
         # failed render is left out — the builder degrades it gracefully.
+        #
+        # Bridge #86 — render concurrently with asyncio.gather. The
+        # previous implementation awaited each render serially in the
+        # for-loop, so a deck with N chart elements at distinct sizes
+        # paid N × (gather_document_data + matplotlib) wall-clock.
+        # gather() runs the renders in parallel; the per-(chart_key,
+        # theme, w, h) render cache means concurrent calls for the same
+        # signature still only execute once. Critical on Render where
+        # the editor export sits inside the user-facing request and a
+        # serial tail can clip Cloudflare's 100 s gateway timeout.
         content_json = draft.get("content_json") or {}
         deck_slides = (content_json.get("slides", [])
                        if isinstance(content_json, dict) else [])
-        chart_pngs: dict[str, bytes] = {}
+
+        async def _render_one(el: dict) -> tuple[str, bytes] | None:
+            try:
+                w = min(2000, max(80, int(el.get("width") or 360) * 2))
+                h = min(2000, max(80, int(el.get("height") or 220) * 2))
+                # June 26 2026 -- chart_config flows through so
+                # editor overrides (title / axis / colors / series
+                # visibility) reach the matplotlib output. Legacy
+                # elements without chart_config pass None and the
+                # renderer falls back to its hardcoded defaults.
+                cfg = el.get("chart_config")
+                cfg_dict = cfg if isinstance(cfg, dict) else None
+                png = await render_chart_png(
+                    str(el["chartKey"]), "light", w, h,
+                    chart_config=cfg_dict)
+                return (str(el.get("id")), png)
+            except Exception:  # noqa: BLE001 — skip, builder degrades
+                return None
+
+        chart_elements: list[dict] = []
         for sl in deck_slides:
             for el in (sl.get("elements") or [] if isinstance(sl, dict) else []):
                 if (isinstance(el, dict) and el.get("type") == "chart"
                         and is_known_chart(str(el.get("chartKey", "")))):
-                    try:
-                        # Render at 2x the element box for print quality.
-                        w = min(2000, max(80, int(el.get("width") or 360) * 2))
-                        h = min(2000, max(80, int(el.get("height") or 220) * 2))
-                        chart_pngs[str(el.get("id"))] = await render_chart_png(
-                            str(el["chartKey"]), "light", w, h)
-                    except Exception:  # noqa: BLE001 — skip, builder degrades
-                        pass
+                    chart_elements.append(el)
+
+        rendered = await asyncio.gather(
+            *(_render_one(el) for el in chart_elements),
+            return_exceptions=False)
+        chart_pngs: dict[str, bytes] = {
+            eid: png for r in rendered if r is not None
+            for eid, png in (r,)}
+
         content = await asyncio.to_thread(build_editor_pptx, draft, chart_pngs)
         media, ext = _PPTX_MEDIA, "pptx"
     else:
         from tools.academic_docx import build_editor_docx
-        content = await asyncio.to_thread(build_editor_docx, draft)
+        # Analytical Appendix is table-heavy by design — re-inject the
+        # eight evidence tables after the editor prose so the in-editor
+        # export carries the full evidentiary record. Tables read from
+        # caches (no recompute) via gather_analytical_appendix_data.
+        appendix_data = None
+        if draft.get("document_type") == "analytical_appendix":
+            from tools.academic_export import gather_analytical_appendix_data
+            appendix_data = await gather_analytical_appendix_data()
+        # June 25 2026 -- the brief's four APA chart figures
+        # (cumulative return, rolling correlation, efficient
+        # frontier, OOS Sharpe comparison) are NOT persisted to
+        # editor_drafts.content_json -- they're matplotlib PNGs
+        # rendered fresh from the analytics snapshot at brief
+        # generation time. The editor export used to walk only the
+        # TipTap prose nodes and drop the images on the floor.
+        # Pull the analytics snapshot now so build_editor_docx can
+        # re-render the four figures inline, matching the
+        # non-editor regen DOCX.
+        brief_data = None
+        brief_substitution_table: dict[str, str] | None = None
+        # June 28 2026 -- the editor-export substitution table
+        # is needed for BOTH brief AND appendix documents.
+        # Appendix tokens like {{STUDY_START}}, {{STUDY_END}},
+        # {{REGIME_SWITCHING_SHARPE}} would otherwise render
+        # literally. Build the same full kwarg set when the
+        # draft is either type.
+        _needs_sub_table = (
+            draft.get("document_type")
+            in ("executive_brief", "analytical_appendix"))
+        if _needs_sub_table:
+            from tools.academic_export import gather_document_data
+            brief_data = await gather_document_data()
+            # June 25 2026 -- build the substitution table so the
+            # four APA figure captions (Figure 1-4 Note. lines)
+            # render with substituted cache values instead of
+            # leaving literal {{DATA_HASH}} / {{OOS_SHARPE_BLEND}} /
+            # {{PRE_2022_EQ_IG_CORR}} / {{N_STRATEGIES}} /
+            # {{OOS_WINDOW}} / {{PLAY_BY_PLAY_EVENTS}} markers.
+            # PR #403 wired _embed_brief_figures into the editor
+            # export but passed substitution_table=None; without
+            # the table the figure captions show raw placeholders.
+            try:
+                # June 28 2026 (Issue 1) -- the editor-export
+                # substitution table previously omitted many
+                # kwargs that the generation-time call supplies
+                # (study_months, implied_allocation, live_signals,
+                # oos_window_pct_of_study, hash_verified, freeze-
+                # aware data_hash). Result: tokens like
+                # {{STUDY_START}} / {{STUDY_END}} /
+                # {{CURRENT_REGIME}} / {{REGIME_CONFIDENCE}} /
+                # {{SENSITIVITY_COST_BPS_*}} resolved to em-dash
+                # or were missing entirely, leaving literal
+                # {{TOKEN}} strings in the exported DOCX
+                # (operator-reported on draft 80). Mirror the
+                # full generation-time kwarg set so EVERY token
+                # that resolves at generation also resolves at
+                # editor-export.
+                from tools.academic_export import (
+                    load_substitution_metric_sources,
+                )
+                from tools.audit_assembler import (
+                    current_data_hash as _ee_cur_hash,
+                )
+                from tools.cio_recommendation import (
+                    compute_implied_asset_allocation as _ee_alloc,
+                    get_latest_recommendation as _ee_cio,
+                )
+                from tools.numeric_substitution import (
+                    get_substitution_table,
+                )
+                from tools.submission_freeze import (
+                    get_effective_data_hash as _ee_eff_hash,
+                )
+                from tools.cache import (
+                    get_regime_cache as _ee_regime,
+                )
+                from tools.academic_deck import (
+                    CORRELATION_POST_2022,
+                    CORRELATION_PRE_2022,
+                    OOS_SHARPE_BENCHMARK,
+                    OOS_SHARPE_REGIME_CONDITIONAL,
+                )
+                # Freeze-aware hash so the editor-export table
+                # matches what generation produced when a freeze
+                # was active.
+                _ee_live_hash = await _ee_cur_hash() or ""
+                cur_hash = (
+                    await _ee_eff_hash(_ee_live_hash)
+                    or _ee_live_hash)
+                cio_row = await _ee_cio()
+                # Implied allocation for the {{CURRENT_*_PCT}}
+                # token family (needs CIO blend weights).
+                _ee_implied: dict | None = None
+                try:
+                    if cio_row and cio_row.get("blend_weights"):
+                        _ee_implied = await _ee_alloc(
+                            cio_row.get("blend_weights"))
+                except Exception:  # noqa: BLE001
+                    _ee_implied = None
+                # Live regime signals for the 5 watchpoint tokens
+                # ({{VIX_CURRENT}} / {{YIELD_CURVE_CURRENT}} /
+                # {{CREDIT_SPREAD_CURRENT}} /
+                # {{EQUITY_TREND_CURRENT}} / {{ESS_CURRENT}}).
+                _ee_signals: dict | None = None
+                try:
+                    _ee_signals = await _ee_regime()
+                except Exception:  # noqa: BLE001
+                    _ee_signals = None
+                rc_rows, fl_rows, cs_payload, crisis_payload = (
+                    await load_substitution_metric_sources(
+                        data_hash=cur_hash or None))
+                # Study-period months -- mirror the generation
+                # call's source preference (validated_constants
+                # OR strategy_results aggregate). Editor export
+                # doesn't carry validated_constants; fall back
+                # to the strategy cache's n_observations.
+                _ee_study_months: int | None = None
+                _ee_strats = (
+                    brief_data.get("strategy_results") or {})
+                if isinstance(_ee_strats, dict):
+                    _n_obs = _ee_strats.get("n_observations")
+                    if isinstance(_n_obs, int):
+                        _ee_study_months = _n_obs
+                # OOS_WINDOW_PCT_OF_STUDY -- constant on
+                # academic_deck (53/287 = 18.5).
+                try:
+                    from tools.academic_deck import (
+                        OOS_WINDOW_PCT_OF_STUDY,
+                    )
+                    _ee_oos_pct = OOS_WINDOW_PCT_OF_STUDY
+                except Exception:  # noqa: BLE001
+                    _ee_oos_pct = 18.5
+                brief_substitution_table = get_substitution_table(
+                    cur_hash,
+                    brief_data.get("strategy_results") or {},
+                    cio_row,
+                    oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
+                    oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                    pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
+                    post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                    oos_window_pct_of_study=_ee_oos_pct,
+                    study_months=_ee_study_months,
+                    implied_allocation=_ee_implied,
+                    live_signals=_ee_signals,
+                    regime_conditional=rc_rows,
+                    factor_loadings=fl_rows,
+                    cost_sensitivity=cs_payload,
+                    crisis_performance=crisis_payload,
+                    hash_verified=True)
+            except Exception as _exc:  # noqa: BLE001
+                # Fail-open: a substitution-table build failure
+                # leaves the figure captions with literal
+                # placeholders, but the rest of the brief still
+                # exports. Same posture as the audit -- it'll
+                # surface the unresolved placeholders on the next
+                # regen.
+                log.warning(
+                    "editor_export_substitution_table_failed",
+                    error=str(_exc))
+                brief_substitution_table = None
+        content = await asyncio.to_thread(
+            build_editor_docx, draft, appendix_data,
+            brief_data=brief_data,
+            brief_substitution_table=brief_substitution_table)
         media, ext = _DOCX_MEDIA, "docx"
+
+    # PR #336 Gap D -- re-run the audit on the EDITED content_text
+    # before the export downloads. Edits between generation and export
+    # can introduce numeric errors, break citation references, or
+    # drop a section heading; re-running the audit on the way out
+    # catches those before they leave the platform.
+    #
+    # Best-effort: a missing content_text or any audit exception
+    # logs and proceeds with the export. The audit warnings are
+    # persisted onto the draft row so the editor's AuditWarningsBanner
+    # surfaces them on the next render.
+    try:
+        edited_text = draft.get("content_text") or ""
+        if edited_text:
+            owner_email = draft.get("owner_email") or ""
+            new_warnings = await _run_document_audit(
+                edited_text,
+                draft["document_type"],
+                owner_email)
+            try:
+                from tools.editor_drafts import (
+                    update_audit_warnings as _update_audit_warnings,
+                )
+                await _update_audit_warnings(
+                    editor_draft_id, new_warnings)
+            except Exception as exc:  # noqa: BLE001
+                # The update helper may not exist in older deploys;
+                # fall back to a direct UPDATE so the draft row stays
+                # current. The export must NEVER fail because of this.
+                log.warning(
+                    "editor_export_audit_persist_warning",
+                    error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_export_audit_failed",
+            draft_id=editor_draft_id, error=str(exc))
+
+    # Layer 3 (June 21 2026) -- export-time verification. Runs
+    # verify_export_against_cache against the value_manifest snapshot
+    # persisted on this draft at generation time. Catches manual
+    # edits that introduce drift (e.g. "1.24" -> "1.23") and stale
+    # data_hash (the cache has moved on since generation). Result
+    # is persisted on editor_drafts.export_verification AND surfaces
+    # in the response headers (X-Verification-Status,
+    # X-Verification-Errors, X-Verification-Warnings) so the
+    # frontend can show a status badge without a second round-trip.
+    #
+    # FAIL-OPEN: the export NEVER blocks because of verification.
+    # Errors surface as a header for the frontend; the file ships
+    # either way. The user retains agency to download a flagged
+    # document if they choose.
+    verification: dict[str, Any] = {
+        "passed": True, "warnings": [], "errors": [],
+        "skipped": "no_manifest_or_helper_unavailable",
+    }
+    try:
+        from tools.audit_assembler import current_data_hash
+        from tools.editor_drafts import (
+            get_draft_with_layer3 as _get_layer3,
+            update_export_verification as _update_verification,
+        )
+        from tools.numeric_substitution import (
+            verify_export_against_cache,
+        )
+        # Re-read the draft with the Layer-3 columns so we have
+        # value_manifest + data_hash for the verification check.
+        # Falls back to the legacy shape (value_manifest=None) on
+        # pre-migration-057 environments; verification then
+        # short-circuits cleanly.
+        layer3_draft = (
+            await _get_layer3(editor_draft_id) or draft)
+        manifest = layer3_draft.get("value_manifest") or {}
+        gen_hash = layer3_draft.get("data_hash") or ""
+        try:
+            cur_hash = await current_data_hash()
+        except Exception:  # noqa: BLE001
+            cur_hash = ""
+        verification = verify_export_against_cache(
+            content_text=draft.get("content_text") or "",
+            value_manifest=manifest,
+            current_data_hash=cur_hash or gen_hash,
+            generation_data_hash=gen_hash,
+            document_type=draft["document_type"])
+        # Persist the verification result on the draft -- frontend
+        # status badges read it on the next draft load.
+        try:
+            await _update_verification(
+                editor_draft_id, verification)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "editor_export_verification_persist_warning",
+                error=str(exc))
+        if verification.get("passed") and not verification.get(
+                "warnings"):
+            log.info("export_verification_passed",
+                     document_type=draft["document_type"],
+                     data_hash_match=verification.get(
+                         "data_hash_match", True))
+        elif verification.get("errors"):
+            log.warning(
+                "export_verification_failed",
+                document_type=draft["document_type"],
+                error_count=len(verification["errors"]),
+                errors=verification["errors"][:5])
+        else:
+            log.info(
+                "export_verification_warned",
+                document_type=draft["document_type"],
+                warning_count=len(verification.get("warnings", [])))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_export_verification_failed",
+            draft_id=editor_draft_id, error=str(exc))
+
+    # Status header value for the frontend badge: passed / warned /
+    # failed. "warned" means the verification was clean except for
+    # stale-data-hash warnings; "failed" means at least one error.
+    if verification.get("errors"):
+        status_header = "failed"
+    elif verification.get("warnings"):
+        status_header = "warned"
+    else:
+        status_header = "passed"
 
     slug = draft["document_type"].replace("_", "-")
     filename = f"forest-capital-{slug}-{date.today().isoformat()}.{ext}"
     return Response(
         content=content, media_type=media,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Verification-Status": status_header,
+            "X-Verification-Errors": str(
+                len(verification.get("errors") or [])),
+            "X-Verification-Warnings": str(
+                len(verification.get("warnings") or [])),
+        })
 
 
 # ── Async document generation — job system ────────────────────────────────────
@@ -9150,25 +14594,28 @@ async def _require_report_ready(
     exclude_methodology_check_ids: set[str] | None = None,
 ) -> None:
     """
-    Workstream C report gate (May 28 2026). Raises 422 with a structured
-    detail when either audit surface has unreviewed blocking items.
+    Workstream C report gate. Raises 422 ONLY when caches are not
+    warm (a legitimate hard block: there's no data to generate
+    against, so generation would produce [DATA PENDING] placeholders).
 
-    A 422 is the right status here — the request is well-formed, but it
-    asks the platform to publish a deliverable that the audit subsystem
-    has flagged as not-yet-reviewed. The frontend reads detail.blockers
-    and shows them in a blocking modal so the user can navigate back to
-    the audit panel and act on each.
+    June 25 2026 -- audit findings (statistical IN/AN checks +
+    methodology checks) no longer hard-block generation. Per the
+    platform's fail-open architecture, audit findings are advisory:
+    the team makes the final call. Previously this function raised
+    422 with error='report_not_ready' when blocking_count > 0;
+    every regen was gated behind an explicit acknowledge / mark-
+    intentional / revoke pass on the QA Audit tab. That gate is now
+    a frontend WARNING (an amber banner above the regen cards) not
+    a hard block.
 
-    exclude_methodology_check_ids (May 25 2026) — passed through to
-    compute_readiness so per-document advisory rules can downgrade a
-    specific methodology check. Midpoint generation passes {"IN02"} so
-    Academic Review completeness is advisory (the score is shown in the
-    editor instead of blocking generation); other deliverables keep the
-    full set of blockers.
+    exclude_methodology_check_ids -- passed through to
+    compute_readiness so per-document advisory rules can downgrade
+    a specific methodology check. Today only midpoint generation
+    uses this with {"IN02"}.
 
-    Fail-open: the readiness module returns empty lists on any read
-    error, so a database outage or an empty audit history reports
-    is_ready=true and the gate does not block.
+    Fail-open: the readiness module returns empty lists on any
+    read error, so a database outage or an empty audit history
+    reports is_ready=true and the gate does not block.
     """
     from tools.report_readiness import compute_readiness, summarise_blockers
 
@@ -9176,21 +14623,144 @@ async def _require_report_ready(
         exclude_methodology_check_ids=exclude_methodology_check_ids)
     if readiness.get("is_ready"):
         return
-    raise HTTPException(
-        status_code=422,
-        detail={
-            "error": "report_not_ready",
-            "message": (
-                f"{readiness.get('blocking_count', 0)} audit item"
-                f"{'s' if readiness.get('blocking_count') != 1 else ''} "
-                "must be reviewed or revoked before a report can be "
-                "generated."),
-            "blocking_count": readiness.get("blocking_count", 0),
-            "blockers": summarise_blockers(readiness),
-            "statistical": readiness.get("statistical"),
-            "methodology": readiness.get("methodology"),
-        },
+    # Caches not warm -- the ONE remaining hard block. Without a
+    # warm analytics cache there's literally no data for the
+    # generators to read, so a regen produces [DATA PENDING] all
+    # the way through. The Warm Caches action button in the modal
+    # is the user's path forward.
+    caches_warm = readiness.get("caches_warm")
+    if caches_warm is False:
+        cold_caches = readiness.get("cold_caches") or []
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "caches_not_warm",
+                "message": (
+                    "Caches are not warm — generation would produce "
+                    "[DATA PENDING] placeholders. Click Warm Caches "
+                    "before generating."),
+                "blocking_count": readiness.get("blocking_count", 0),
+                "blockers": summarise_blockers(readiness),
+                "caches_warm": False,
+                "cold_caches": cold_caches,
+                "warm_status": readiness.get("warm_status"),
+                "statistical": readiness.get("statistical"),
+                "methodology": readiness.get("methodology"),
+            },
+        )
+    # Audit findings unacknowledged -- WARN, do not block. The
+    # frontend surfaces an amber banner above the regen cards via
+    # its own read of /api/v1/report/readiness; the response
+    # already carries blocking_count + blockers for that banner to
+    # render. Generation proceeds.
+    log.info(
+        "report_readiness_audit_warning_not_block",
+        blocking_count=readiness.get("blocking_count", 0),
+        blockers=summarise_blockers(readiness)[:5],
     )
+
+
+async def _auto_resolve_stale_findings_on_regen(
+    reviewer_email: str,
+) -> int:
+    """June 25 2026 -- before a regeneration job spawns, auto-
+    resolve every unresolved audit finding that came from a NON-
+    LATEST audit run. Rationale: regeneration produces a fresh
+    artifact that supersedes whatever the older runs flagged; any
+    finding from an older run that the new regen will rebuild
+    should clear automatically rather than accumulate as a
+    blocker.
+
+    Findings are marked:
+      resolved          TRUE
+      auto_acknowledged TRUE
+      resolution_note   'Auto-resolved: superseded by document
+                         regeneration triggered by <email> at
+                         <ISO timestamp>'
+      resolved_by       <reviewer_email>
+      resolved_at       NOW()
+
+    Scope:
+      audit_run_id IN (every completed run EXCEPT the latest by id).
+
+    Fail-open: any DB error returns 0 and logs. The regen still
+    proceeds; the only side-effect is that the older findings
+    keep their resolved=false state.
+
+    Returns the row count actually updated."""
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        if AsyncSessionLocal is None:
+            return 0
+        async with AsyncSessionLocal() as session:
+            from datetime import datetime as _dt, timezone as _tz
+            note = (
+                f"Auto-resolved: superseded by document regeneration "
+                f"triggered by {reviewer_email} at "
+                f"{_dt.now(_tz.utc).isoformat()}")
+            # Try the full migration-044 column set first; fall
+            # back to the legacy UPDATE on column-missing errors.
+            try:
+                result = await session.execute(text(
+                    "UPDATE audit_findings SET "
+                    "resolved = TRUE, "
+                    "auto_acknowledged = TRUE, "
+                    "resolution_note = :note, "
+                    "resolved_by = :who, "
+                    "resolved_at = NOW() "
+                    "WHERE resolved = FALSE "
+                    "AND audit_run_id IN ("
+                    "  SELECT id FROM audit_runs "
+                    "  WHERE status = 'complete' "
+                    "  AND id < ("
+                    "    SELECT COALESCE(MAX(id), 0) "
+                    "    FROM audit_runs "
+                    "    WHERE status = 'complete'"
+                    "  )"
+                    ")"),
+                    {"note": note, "who": reviewer_email})
+                await session.commit()
+                resolved = (
+                    result.rowcount
+                    if hasattr(result, "rowcount") else 0)
+            except Exception:  # noqa: BLE001
+                try:
+                    await session.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                result = await session.execute(text(
+                    "UPDATE audit_findings SET "
+                    "resolved = TRUE, "
+                    "resolution_note = :note "
+                    "WHERE resolved = FALSE "
+                    "AND audit_run_id IN ("
+                    "  SELECT id FROM audit_runs "
+                    "  WHERE status = 'complete' "
+                    "  AND id < ("
+                    "    SELECT COALESCE(MAX(id), 0) "
+                    "    FROM audit_runs "
+                    "    WHERE status = 'complete'"
+                    "  )"
+                    ")"),
+                    {"note": note})
+                await session.commit()
+                resolved = (
+                    result.rowcount
+                    if hasattr(result, "rowcount") else 0)
+            if resolved:
+                log.info(
+                    "audit_findings_auto_resolved_on_regen",
+                    reviewer_email=reviewer_email,
+                    resolved_count=resolved)
+            return int(resolved or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_auto_resolve_on_regen_failed",
+            reviewer_email=reviewer_email, error=str(exc))
+        return 0
 
 
 def _start_generation_job(
@@ -9202,6 +14772,14 @@ def _start_generation_job(
     Academic Writer harness calls inside _generate_async (which run on
     the same loop, inheriting this context) populate it. The task ends
     by calling _log_interaction_bg which reads collect_usage().
+
+    June 25 2026 -- before spawning the job, auto-resolve any
+    unresolved audit findings from PRIOR audit runs (non-latest
+    completed runs). The fresh regen will rebuild whatever those
+    older findings flagged; leaving them resolved=false caused
+    the readiness banner to accumulate stale blockers across the
+    May/June audit history. The auto-resolve runs in a fire-and-
+    forget task so it can't slow the regen kickoff.
     """
     import asyncio
 
@@ -9209,6 +14787,19 @@ def _start_generation_job(
     from agents.usage import start_usage_capture
 
     start_usage_capture()
+    # Best-effort auto-resolve. The task is fire-and-forget; we
+    # don't await its completion so a transient DB hiccup never
+    # delays the 202 response.
+    try:
+        resolve_task = asyncio.create_task(
+            _auto_resolve_stale_findings_on_regen(
+                session.get("email") or ""))
+        _generation_bg_tasks.add(resolve_task)
+        resolve_task.add_done_callback(_generation_bg_tasks.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_auto_resolve_kickoff_failed",
+            error=str(exc))
     job = create_job(document_type, session["email"])
     task = asyncio.create_task(
         _generate_async(job["job_id"], document_type, session, request))
@@ -9270,10 +14861,29 @@ async def _run_auto_academic_review(
         n_strategies = ctx["analytics"].get("strategy_count")
         peer_responses = await run_peer_fan_out(
             context_block, multi_user, n_strategies)
+        # PR — document-type-specific rubrics. When the auto-fire
+        # targets an executive_brief / presentation_deck /
+        # analytical_appendix draft, route the arbiter through the
+        # corresponding rubric and score the verdict with the
+        # matching mode so the editor pill reflects the deliverable's
+        # weighted aggregate rather than the midpoint's equal-weight
+        # 5.5/10 floor.
+        is_brief = document_type == "executive_brief"
+        is_deck = document_type == "presentation_deck"
+        is_appendix = document_type == "analytical_appendix"
         arbiter_text = await asyncio.to_thread(
             run_arbiter_with_harness, context_block, peer_responses,
-            multi_user, False, n_strategies)
-        scored = compute_review_score(arbiter_text)
+            multi_user, False, n_strategies,
+            is_brief, is_deck, is_appendix)  # positional: brief/deck/appendix
+        if is_brief:
+            score_mode = "brief_review"
+        elif is_deck:
+            score_mode = "deck_review"
+        elif is_appendix:
+            score_mode = "appendix_review"
+        else:
+            score_mode = "midpoint"
+        scored = compute_review_score(arbiter_text, mode=score_mode)
         agents = list(peer_responses.keys()) + ["academic_advisor"]
         metadata: dict[str, Any] = {
             "draft_id": draft_id,
@@ -9284,6 +14894,7 @@ async def _run_auto_academic_review(
             "overall_rating": scored["rating"],
             "section_ratings": scored["section_ratings"],
             "sections_rated": scored["sections_rated"],
+            "parse_error": scored.get("parse_error", False),
         }
         harness_meta = collect_harness_metrics()
         if harness_meta:
@@ -9319,13 +14930,49 @@ def _schedule_auto_academic_review(
     real Anthropic calls, and the contract tests check the endpoint
     shape, not the review wiring). Otherwise spawns a task on the
     loop and stashes a strong reference so the GC doesn't reclaim
-    the coroutine mid-run."""
+    the coroutine mid-run.
+
+    June 21 2026 -- auto-fire DISABLED for every document type.
+    The five in-scope deliverables (executive brief, presentation
+    deck, presentation script, analytical appendix, Jupyter
+    notebook) do not consume the academic-review output as part of
+    their workflows. Each generation was firing ~8-10 LLM calls
+    (7 peer agents + arbiter with up to 3 retries) purely to
+    populate the editor pill + the IN02 attestation row -- both
+    surfaces are still reachable via the manual SSE endpoint at
+    POST /api/council/academic-review.
+    Midpoint paper is past its deadline (May 27) and no longer
+    generated. The allow-list below is empty by design; the
+    function stays in place so a future opt-in is a one-line
+    additive change rather than re-plumbing.
+
+    IN02 attestation dependency: the QA audit panel's IN02 check
+    requires an academic_review row in agent_interactions within
+    the last 14 days. Operators (Bob / Molly) must click "Run
+    Academic Review" in the editor at least once during the
+    submission window to keep IN02 PASS. The auto-fire was
+    satisfying this implicitly; the manual click satisfies it
+    explicitly. See PR body for the operator-action note."""
     import asyncio
     if not draft_id:
         return
     if os.getenv("ENVIRONMENT") == "test":
         return
-    if document_type not in ("midpoint_paper", "executive_brief"):
+    # Allow-list is intentionally empty -- no document type
+    # auto-fires the academic review. The branch below is
+    # structurally preserved so a future opt-in (e.g. add
+    # "midpoint_paper" back if a future course reuses the
+    # midpoint check) is a one-line edit. Log the skip so the
+    # operator can confirm the gate is doing what's intended.
+    auto_fire_document_types: set[str] = set()
+    if document_type not in auto_fire_document_types:
+        log.info(
+            "auto_academic_review_skipped_by_design",
+            draft_id=draft_id, document_type=document_type,
+            note=(
+                "auto-fire disabled June 21 2026; run Academic "
+                "Review manually before submission to populate "
+                "IN02 attestation"))
         return
     try:
         task = asyncio.create_task(
@@ -9353,12 +15000,18 @@ async def _generate_async(
 
     update_job(job_id, status="running")
     try:
-        if document_type == "midpoint_paper":
-            file_bytes, filename, media, draft_id = \
-                await _generate_midpoint_document(session["email"])
-        elif document_type == "executive_brief":
+        if document_type == "executive_brief":
             file_bytes, filename, media, draft_id = \
                 await _generate_brief_document(session["email"])
+        elif document_type == "analytical_appendix":
+            file_bytes, filename, media, draft_id = \
+                await _generate_appendix_document(session["email"])
+        elif document_type == "presentation_script":
+            # June 25 2026 -- script joined the async job pattern
+            # so the tile inherits the standard inProgress /
+            # complete / failed / idle chrome.
+            file_bytes, filename, media, draft_id = \
+                await _generate_script_document(session["email"])
         else:
             file_bytes, filename, media, draft_id = \
                 await _generate_deck_document(session["email"])
@@ -9366,8 +15019,21 @@ async def _generate_async(
         raise
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
-        log.error("generation_job_failed", job_id=job_id,
-                  document_type=document_type, ref=ref, error=str(exc))
+        # Bridge #86 — include the exception class and a short traceback
+        # excerpt so the Render log reveals the failure surface without
+        # forcing a Render-shell session. The ref ties the user-facing
+        # generic "Generation failed" to the structured server log.
+        import traceback as _tb
+        tb_lines = _tb.format_exception_only(type(exc), exc)
+        tb_summary = "".join(tb_lines).strip()[:300]
+        log.error("generation_job_failed",
+                  job_id=job_id,
+                  document_type=document_type,
+                  ref=ref,
+                  exc_type=type(exc).__name__,
+                  exc_module=type(exc).__module__,
+                  error=str(exc),
+                  traceback_excerpt=tb_summary)
         update_job(job_id, status="failed",
                    error=f"Generation failed (ref: {ref})",
                    completed_at=datetime.now(timezone.utc))
@@ -9392,350 +15058,2403 @@ async def _generate_async(
 @limiter.limit("6/minute")
 async def export_midpoint_paper(
     request: Request,
-    body: dict | None = None,
     session: dict = Depends(require_permission("generate_documents")),
 ):
+    """RETIRED (PR-B, June 2026).
+
+    The midpoint submission shipped May 27 2026 and the frontend
+    surfaces were removed in PR #338. Returns 410 Gone so existing
+    clients receive a clear "this existed and is now gone" signal
+    rather than a 404 connection error.
+
+    The helper functions _validate_midpoint_word_counts() and
+    _generate_midpoint_document() were deleted alongside this
+    handler; the build_midpoint_paper docx assembler was deleted
+    from tools/academic_docx.py.
     """
-    Starts midpoint-paper generation.
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "gone",
+            "message": (
+                "Midpoint paper generation has been retired. The "
+                "final submission deadline is July 1."),
+            "canonical_path": "/api/v1/export/executive-brief",
+        })
 
-    With an editor_draft_id in the body the .docx is built synchronously
-    from that draft's current content (the in-editor Export path).
-    Otherwise generation — the four Academic Writer sections, 30-60s —
-    runs as a background job and the endpoint returns 202 with a job_id;
-    poll GET /api/v1/jobs/{id}.
+
+# ── Concern 7m: audit chain export ────────────────────────────
+
+
+async def _assemble_audit_payload(
+    document_type: str,
+) -> dict[str, Any]:
+    """Assembles the structured audit chain for the given scope.
+
+    Joins council_debates + editor_drafts so the rounds list is
+    ordered chronologically and each round links to its
+    source_draft + resulting_draft. Concern 7m-i shape.
+
+    document_type='full_package' returns rows where context is
+    'academic_review' AND document_type is 'full_package'.
+    Otherwise returns rows for the specific doc_type.
     """
-    editor_draft_id = (body or {}).get("editor_draft_id")
-    if editor_draft_id:
-        # Editor exports are a faithful render of what the author has
-        # already saved; the gate runs only on fresh AI generation.
-        return await _editor_export(int(editor_draft_id))
-    # IN02 (Academic Review complete) is advisory for the midpoint
-    # paper — the auto-fired review post-generation produces a score
-    # surfaced in the editor header, with an amber banner below 6.0.
-    # Other blockers (statistical FAIL, methodology FAIL on anything
-    # else) still gate generation.
-    await _require_report_ready(exclude_methodology_check_ids={"IN02"})
-    return _start_generation_job("midpoint_paper", session, request)
-
-
-# ── Midpoint word-count validation (May 25 2026) ──────────────────────────────
-#
-# The midpoint paper is 3 pages double-spaced 12pt — roughly 750-900 words
-# total. The four sections have their own targets (per the user spec):
-#   methodology  250-300 words
-#   results      250-300 words
-#   roles        125-150 words
-#   next_steps   125-150 words
-# Each task prompt names its target, but the harness retries up to a
-# quality threshold rather than a length one — so a generated section can
-# still drift outside its range. This validator scores the post-generation
-# narratives, surfaces section-by-section warnings into the editor draft
-# (so the user sees the problem before submitting), and logs a structured
-# warning so a Render scan reports drift over time.
-
-# Per-section word targets (May 25 2026 — shaved 15 from each end of
-# every section to leave room for the empirical-citation overhead
-# (4 findings × ~15-25 words per inline citation ≈ 60-100 words).
-# The total stays at 750-900 — the paper's physical-length constraint
-# — and the gap between section sums (690-840) and the total (750-900)
-# is precisely where the citation overhead lives. A paper whose
-# sections hit the floor + carries 60-100 words of citations lands at
-# the total floor; the validator accepts that as valid because both
-# the section and total checks pass independently.
-_MIDPOINT_WORD_TARGETS: dict[str, tuple[int, int]] = {
-    "methodology":  (235, 285),
-    "results":      (235, 285),
-    "roles":        (110, 135),
-    "next_steps":   (110, 135),
-}
-_MIDPOINT_TOTAL_TARGET = (750, 900)
-
-
-def _count_words(text: str) -> int:
-    """Whitespace-split word count — same convention Word's status bar
-    uses. [[VERIFY: …]] / [[BOB: …]] markers count as words; they are
-    written by the AI and will be resolved by the user before
-    submission, so counting them keeps the post-resolution count
-    realistic rather than systematically over-counting."""
-    if not text:
-        return 0
-    return len([w for w in text.split() if w.strip()])
-
-
-def _validate_midpoint_word_counts(
-    narratives: dict[str, str],
-) -> dict[str, object]:
-    """Returns a structured validation result for a generated midpoint
-    paper's narratives. Used to (a) log a warning when generation lands
-    out-of-range, and (b) inject a banner into the editor draft so the
-    user sees the discrepancy on first open. Always returns a usable
-    dict — never raises on missing keys.
-
-    Shape:
-      { valid: bool,
-        total_words: int,
-        total_target: (lo, hi),
-        sections: {
-          key: { words, target: (lo, hi), in_range, label }
+    payload: dict[str, Any] = {
+        "document_type": document_type,
+        "data_hash": "",
+        "generated_at": (
+            __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc).isoformat()),
+        "rounds": [],
+        "final_draft": None,
+        "summary": {
+            "total_rounds": 0,
+            "total_fatal_raised": 0,
+            "total_fatal_addressed": 0,
+            "total_fatal_rebutted": 0,
+            "total_major_raised": 0,
+            "total_major_addressed": 0,
+            "total_major_rebutted": 0,
+            "total_fixes_applied": 0,
+            "manual_edits_made": False,
         },
-        warnings: [ "Methodology 220 words is below the 250-300 target.",
-                    "Total 670 words is below the 750-900 target.", ... ],
-      }
-    """
-    section_labels = {
-        "methodology": "Data and Methodology",
-        "results":     "Preliminary Results and Diagnostics",
-        "roles":       "Roles and Division of Labor",
-        "next_steps":  "Next Steps and Open Questions",
     }
-    sections: dict[str, dict[str, object]] = {}
-    warnings_list: list[str] = []
-    total_words = 0
-    for key, (lo, hi) in _MIDPOINT_WORD_TARGETS.items():
-        text = narratives.get(key) or ""
-        words = _count_words(text)
-        total_words += words
-        in_range = lo <= words <= hi
-        label = section_labels.get(key, key)
-        sections[key] = {
-            "words": words,
-            "target": [lo, hi],
-            "in_range": in_range,
-            "label": label,
-        }
-        if not in_range:
-            direction = "below" if words < lo else "above"
-            warnings_list.append(
-                f"{label} ran {words} words — {direction} the "
-                f"{lo}-{hi} target."
-            )
-    total_lo, total_hi = _MIDPOINT_TOTAL_TARGET
-    total_in_range = total_lo <= total_words <= total_hi
-    if not total_in_range:
-        direction = "below" if total_words < total_lo else "above"
-        warnings_list.append(
-            f"Total ran {total_words} words — {direction} the "
-            f"{total_lo}-{total_hi} target for a 3-page double-spaced "
-            f"paper."
+    if ENVIRONMENT == "test":
+        return payload
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
         )
-    valid = total_in_range and all(s["in_range"] for s in sections.values())
-    return {
-        "valid": valid,
-        "total_words": total_words,
-        "total_target": [total_lo, total_hi],
-        "sections": sections,
-        "warnings": warnings_list,
-    }
+        if AsyncSessionLocal is None:
+            return payload
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "SELECT id, context, document_type, critic_model, "
+                "critic_findings, fatal_count, major_count, "
+                "minor_count, peer_responses, arbiter_resolution, "
+                "was_addressed, counter_arguments, fix_proposals, "
+                "fix_applied, fix_applied_at, new_draft_id, "
+                "source_draft_id, parent_debate_id, data_hash, "
+                "created_at "
+                "FROM council_debates "
+                "WHERE document_type = :t "
+                "ORDER BY created_at ASC"),
+                {"t": document_type})
+            rows = r.fetchall()
+        round_idx = 0
+        for row in rows:
+            round_idx += 1
+            (
+                rid, ctx, dt, model, findings, fatal, major, minor,
+                peers, arbiter, addressed, counters,
+                proposals, applied, applied_at, new_id, source_id,
+                parent_id, dh, created,
+            ) = row
+            payload["rounds"].append({
+                "round": round_idx,
+                "debate_id": rid,
+                "context": ctx,
+                "data_hash": dh,
+                "created_at": (
+                    created.isoformat() if created else None),
+                "source_draft_id": source_id,
+                "parent_debate_id": parent_id,
+                "critic_findings": {
+                    "fatal_count": fatal,
+                    "major_count": major,
+                    "minor_count": minor,
+                    "findings": findings or [],
+                    "model": model,
+                },
+                "council_response": arbiter or "",
+                "counter_arguments": counters or [],
+                "fix_proposals": proposals or [],
+                "fix_applied": bool(applied),
+                "fix_applied_at": (
+                    applied_at.isoformat() if applied_at else None),
+                "resulting_draft_id": new_id,
+            })
+            payload["summary"]["total_fatal_raised"] += int(
+                fatal or 0)
+            payload["summary"]["total_major_raised"] += int(
+                major or 0)
+            for i, addr in enumerate(addressed or []):
+                f = (findings or [])[i] if (
+                    findings and i < len(findings)) else {}
+                sev = str(f.get("severity") or "").capitalize()
+                if addr:
+                    if sev == "Fatal":
+                        payload["summary"][
+                            "total_fatal_addressed"] += 1
+                    elif sev == "Major":
+                        payload["summary"][
+                            "total_major_addressed"] += 1
+            for ca in (counters or []):
+                sev = (
+                    str((ca.get("finding") or {})
+                        .get("severity") or "").capitalize())
+                if sev == "Fatal":
+                    payload["summary"][
+                        "total_fatal_rebutted"] += 1
+                elif sev == "Major":
+                    payload["summary"][
+                        "total_major_rebutted"] += 1
+            if applied:
+                payload["summary"]["total_fixes_applied"] += 1
+            if dh and not payload["data_hash"]:
+                payload["data_hash"] = dh
+        payload["summary"]["total_rounds"] = round_idx
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_export_assembly_failed", error=str(exc))
+    return payload
 
 
-async def _generate_midpoint_document(
-    email: str,
-) -> tuple[bytes, str, str, int | None]:
+@app.get("/api/v1/documents/audit-export")
+@limiter.limit("10/minute")
+async def get_audit_export(
+    request: Request,
+    document_type: str = "full_package",
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7m-i. Returns the full audit chain for the requested
+    scope as structured JSON. Joins council_debates rows ordered by
+    created_at; each round carries critic_findings, council_response,
+    counter_arguments, fix_proposals, and (when fix was applied) the
+    resulting_draft_id link.
+
+    document_type=full_package -- cross-document review chain.
+    document_type=<editor type> -- per-doc chain.
     """
-    Generates the three-page midpoint submission. Returns (file bytes,
-    filename, media type, editor draft id). Raises on failure — the job
-    wrapper records it.
+    if document_type not in (
+            "full_package", "executive_brief",
+            "presentation_deck", "analytical_appendix",
+            "presentation_script"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be full_package or one of the "
+                "four editor doc types"))
+    return await _assemble_audit_payload(document_type)
 
-    Four sections per the FNA 670 brief — Data & Methodology, Preliminary
-    Results (with the summary-statistics and regime-conditional tables
-    embedded), Roles & Division of Labor (from real Team Activity counts),
-    and Next Steps (from the last Academic Review verdict).
+
+@app.post("/api/v1/documents/audit-export/docx")
+@limiter.limit("6/minute")
+async def post_audit_export_docx(
+    request: Request,
+    document_type: str = "full_package",
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7m-ii. Same payload as the JSON endpoint, rendered
+    as a formatted .docx file download.
+
+    The DOCX uses python-docx (same library the brief / appendix
+    rendering chain already uses -- no new dependency). Structure:
+
+      Title + subtitle + data hash header
+      Executive summary table
+      Per-round sections (critic findings table, council response
+      block, fix-applied row)
+      Counter-arguments on record (all rebuttals across all rounds)
+      Revision history table
+      Data integrity footer
     """
-    import asyncio
-    from datetime import date
+    if document_type not in (
+            "full_package", "executive_brief",
+            "presentation_deck", "analytical_appendix",
+            "presentation_script"):
+        raise HTTPException(
+            status_code=422, detail="invalid document_type")
+    payload = await _assemble_audit_payload(document_type)
 
-    from tools.academic_docx import build_midpoint_paper
-    from tools.academic_export import (
-        DATA_PENDING, gather_document_data, gather_roles_activity,
-    )
+    if ENVIRONMENT == "test":
+        return {"ok": True, "rounds": 0, "test_environment": True}
 
     try:
-        data = await gather_document_data()
-        period = data["study_period"]
-        has_results = bool(data["summary_statistics"] or data["regime_conditional"])
-        has_review = bool(data["last_review_text"])
+        from docx import Document
+        from docx.shared import Pt
+        from io import BytesIO
+        from datetime import date as _date
+        doc = Document()
+        # Title
+        doc.add_heading(
+            "Forest Capital -- Adversarial Review Audit Trail",
+            level=0)
+        sub = doc.add_paragraph(
+            "FNA 670 | McColl School of Business | "
+            "Queens University of Charlotte")
+        sub.runs[0].italic = True
+        doc.add_paragraph(
+            f"Data hash: {payload.get('data_hash') or '(none)'} "
+            f"| Generated: {_date.today().isoformat()}")
 
-        # Section 3 (Roles) is pre-seeded from real per-member platform
-        # activity — commits, council runs, reviews, uploads, UAT — so Bob
-        # personalises a factual draft rather than writing from scratch.
-        roles_activity = await gather_roles_activity(data["team_summary"])
-        has_roles = any(
-            v.get("commits") or v.get("council_sessions_run")
-            or v.get("academic_review_sessions") or v.get("documents_uploaded")
-            or v.get("uat_sections_attested")
-            for v in roles_activity.values()
-        )
+        summary = payload.get("summary") or {}
+        doc.add_heading("Executive Summary", level=1)
+        t = doc.add_table(rows=1, cols=2)
+        t.style = "Light Grid Accent 1"
+        t.rows[0].cells[0].text = "Metric"
+        t.rows[0].cells[1].text = "Value"
+        for label, key in [
+            ("Rounds",                "total_rounds"),
+            ("Fatal raised",          "total_fatal_raised"),
+            ("Fatal addressed",       "total_fatal_addressed"),
+            ("Fatal rebutted",        "total_fatal_rebutted"),
+            ("Major raised",          "total_major_raised"),
+            ("Major addressed",       "total_major_addressed"),
+            ("Major rebutted",        "total_major_rebutted"),
+            ("Fixes applied",         "total_fixes_applied"),
+        ]:
+            row = t.add_row().cells
+            row[0].text = label
+            row[1].text = str(summary.get(key, 0))
 
-        specs = [
-            {"key": "methodology", "available": True,
-             "agent_id": "midpoint_methodology",
-             "task": (
-                 "Write the Data and Methodology section of a graduate "
-                 "finance midpoint paper. TARGET LENGTH: 235-285 words "
-                 "of prose (this is a 3-page double-spaced 12-point "
-                 "paper; the section must land in that range — under "
-                 "235 is too thin, over 285 squeezes the other three "
-                 "sections; the 15-word headroom from a 250-300 target "
-                 "absorbs the empirical-citation overhead — each inline "
-                 "(Author, Year) citation adds 15-25 words to the "
-                 "section's actual length). APA style, past tense, "
-                 "third person. "
-                 "Cover the data sources (aligned "
-                 "monthly returns for equity, investment-grade and high-yield "
-                 "bonds; Carhart factor series), the study period, the "
-                 "portfolio constraints (long-only, fully invested, no cash, "
-                 "quarterly rebalancing), the ten strategies grouped as "
-                 "static versus dynamic, and the Carhart four-factor "
-                 "attribution model. When discussing portfolio turnover, "
-                 "always clarify: turnover is reported as one-way annualised "
-                 "turnover (the standard institutional convention) and "
-                 "two-way round-trip turnover is approximately double the "
-                 "reported figures; true turnover is computed from the "
-                 "drift-inclusive weight schedule at each quarterly "
-                 "rebalance, capturing both signal-driven reallocation and "
-                 "drift-correction trading back to target. Note that "
-                 "Black-Litterman, despite its dynamic classification, "
-                 "exhibits static-like turnover (4.7%) reflecting the "
-                 "framework's modest weight adjustments from its equilibrium "
-                 "prior — a genuine analytical finding, not a data issue. "
-                 "If you are uncertain about any specific numeric value, do "
-                 "NOT insert it silently — wrap it in an inline verification "
-                 "marker of the form [[VERIFY: <claim>]] (for example "
-                 "[[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) so a "
-                 "team member checks it before submission."
-                 + _MIDPOINT_S1_KEY_FINDINGS),
-             "context": {"study_period": period,
-                         "strategy_metadata": data.get("strategy_metadata"),
-                         "risk_free_rate": data["risk_free_rate"]}},
-            {"key": "results", "available": has_results,
-             "pending": (f"{DATA_PENDING} — preliminary results require the "
-                         "analytics caches. Load the dashboard once to warm "
-                         "them, then regenerate this paper."),
-             "agent_id": "midpoint_results",
-             "task": (
-                 "Write the Preliminary Results section. TARGET LENGTH: "
-                 "235-285 words of prose (under 235 is too thin; over "
-                 "285 leaves no room for Roles and Next Steps; the "
-                 "15-word headroom from a 250-300 target absorbs "
-                 "empirical-citation overhead — each inline (Author, "
-                 "Year) citation adds 15-25 words). "
-                 "Interpret the summary statistics and the regime-conditional "
-                 "performance; do not merely list numbers. You MUST explicitly "
-                 "discuss the 2022 equity-bond correlation break and what the "
-                 "pre- versus post-2022 Sharpe ratios reveal. Reference "
-                 "Table 1 (summary statistics) and Table 2 (regime-conditional "
-                 "performance). If you are uncertain about any specific "
-                 "numeric value, do NOT insert it silently — wrap it in an "
-                 "inline verification marker of the form [[VERIFY: <claim>]] "
-                 "(for example [[VERIFY: Sharpe ratio for Regime Switching = "
-                 "0.63]]) so a team member checks it before submission."
-                 + _MIDPOINT_S2_KEY_FINDINGS),
-             "context": {"summary_statistics": data["summary_statistics"],
-                         "regime_conditional": data["regime_conditional"],
-                         "correlation_pre_post": {
-                             "pre_2022": data["rolling_correlation"].get("pre_2022"),
-                             "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            # Section 3 (Roles and Division of Labor) is built from real
-            # Team Activity counts — commits, council sessions, reviews,
-            # UAT attestations, documents uploaded. The Academic Writer
-            # produces the full section directly; the placeholder callout
-            # that previously deferred this to a manual rewrite was
-            # removed May 26 2026 (the rubric requires interpretation to
-            # be PRESENT, not human-authored).
-            {"key": "roles", "available": has_roles,
-             "pending": (f"{DATA_PENDING} — no platform activity on record "
-                         "yet. Run council sessions, reviews and UAT, then "
-                         "regenerate; meanwhile describe the roles directly."),
-             "agent_id": "midpoint_roles",
-             "task": (
-                 "Write the Roles and Division of Labor section. "
-                 "TARGET LENGTH: 110-135 words (this is a shorter "
-                 "section — keep it tight; citations are rarely needed "
-                 "here so the headroom is for the prose itself). "
-                 "APA style, past tense, third person. Use ONLY the "
-                 "team_activity_summary data provided. State each team "
-                 "member's role and attribute their documented platform "
-                 "activity — commits, council sessions run, academic review "
-                 "sessions, documents uploaded, UAT sections attested. Do "
-                 "NOT invent contributions the data does not show; if a "
-                 "count is zero, omit it rather than guessing. This is a "
-                 "factual pre-seed for the team to personalise — write it "
-                 "plainly and let each member's actual activity counts "
-                 "carry the section."),
-             "context": {"team_activity_summary": roles_activity}},
-            {"key": "next_steps", "available": has_review,
-             "pending": (f"{DATA_PENDING} — no Academic Review verdict on "
-                         "record. Run an Academic Review on the Council "
-                         "screen, then regenerate; meanwhile list next steps "
-                         "as planned work."),
-             "agent_id": "midpoint_next_steps",
-             "task": (
-                 "Write the Next Steps and Open Questions section. "
-                 "TARGET LENGTH: 110-135 words (keep it tight — the "
-                 "section closes the paper and shouldn't bloat; "
-                 "citations are rare here, so the headroom is for "
-                 "actual next-steps content). "
-                 "Convert the supplied Academic Review verdict — its "
-                 "Priority Areas for Further Investigation and any Developing "
-                 "or Needs Work ratings — into a forward-looking next-steps "
-                 "narrative."),
-             "context": {"academic_review_verdict":
-                         (data["last_review_text"] or "")[:4000]}},
-        ]
-        narratives = await _generate_narratives(
-            _apply_draft_caveats(specs),
-            n_strategies=len(data.get("strategy_results") or {}))
+        for r in payload.get("rounds") or []:
+            doc.add_heading(
+                f"Round {r['round']} -- {r['created_at'] or ''}",
+                level=1)
+            cf = r.get("critic_findings") or {}
+            doc.add_paragraph(
+                f"Source draft id: {r.get('source_draft_id')}")
+            doc.add_paragraph(
+                f"Model: {cf.get('model', 'unknown')}  |  "
+                f"Fatal {cf.get('fatal_count', 0)}  /  "
+                f"Major {cf.get('major_count', 0)}  /  "
+                f"Minor {cf.get('minor_count', 0)}")
+            findings = cf.get("findings") or []
+            if findings:
+                doc.add_heading(
+                    "Adversarial Critic Findings", level=2)
+                tbl = doc.add_table(rows=1, cols=5)
+                tbl.style = "Light Grid Accent 1"
+                hdr = tbl.rows[0].cells
+                hdr[0].text = "Severity"
+                hdr[1].text = "Category"
+                hdr[2].text = "Location"
+                hdr[3].text = "Description"
+                hdr[4].text = "Raised by"
+                for f in findings:
+                    row = tbl.add_row().cells
+                    row[0].text = str(f.get("severity") or "")
+                    row[1].text = str(f.get("category") or "")
+                    row[2].text = str(f.get("location") or "")
+                    row[3].text = str(f.get("description") or "")
+                    row[4].text = str(f.get("raised_by") or "")
+            response_text = r.get("council_response") or ""
+            if response_text.strip():
+                doc.add_heading("Council Response", level=2)
+                doc.add_paragraph(response_text)
+            if r.get("fix_applied"):
+                doc.add_heading("Fix Applied", level=2)
+                doc.add_paragraph(
+                    f"Resulting draft id: "
+                    f"{r.get('resulting_draft_id')}")
+                doc.add_paragraph(
+                    f"Applied at: "
+                    f"{r.get('fix_applied_at') or ''}")
 
-        # Word-count validation (May 25 2026). Three pages double-spaced
-        # 12pt is ~750-900 words; each section has its own target. If
-        # any section or the total drifts outside the range, log a
-        # structured warning AND surface it as a banner in the editor
-        # draft so the user sees it before submitting.
-        word_validation = _validate_midpoint_word_counts(narratives)
-        if not word_validation["valid"]:
-            log.warning(
-                "midpoint_word_count_validation_failed",
-                total_words=word_validation["total_words"],
-                section_words={
-                    k: v["words"]
-                    for k, v in word_validation["sections"].items()
-                },
-                warnings=word_validation["warnings"],
-            )
-        else:
-            log.info(
-                "midpoint_word_count_validation_passed",
-                total_words=word_validation["total_words"],
-            )
+        # Counter-arguments on record -- aggregated across rounds.
+        all_counters: list[dict[str, Any]] = []
+        for r in payload.get("rounds") or []:
+            all_counters.extend(r.get("counter_arguments") or [])
+        if all_counters:
+            doc.add_heading(
+                "Counter-Arguments on Record", level=1)
+            doc.add_paragraph(
+                "The following critic findings were reviewed and "
+                "intentionally not addressed based on the council's "
+                "rebuttal -- these are documented rebuttals showing "
+                "the team considered and responded to the critique.")
+            for ca in all_counters:
+                f = ca.get("finding") or {}
+                doc.add_heading(
+                    f"{f.get('severity', '')} "
+                    f"{f.get('category', '')} -- "
+                    f"{f.get('location', '')}", level=2)
+                doc.add_paragraph(
+                    f"Critic raised: {f.get('description', '')}")
+                doc.add_paragraph(
+                    f"Council response: {ca.get('rebuttal', '')}")
+                doc.add_paragraph(
+                    f"Model source: "
+                    f"{ca.get('model_source', 'unknown')}")
 
-        docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
+        # Data integrity footer
+        doc.add_heading("Data Integrity", level=1)
+        doc.add_paragraph(
+            f"Canonical data hash: "
+            f"{payload.get('data_hash') or '(none)'}")
+        doc.add_paragraph(
+            "All figures in submitted documents verified against "
+            "this hash via the verify-all endpoint.")
 
-        # Load the generated content into an editor draft so the frontend
-        # can open it directly in the editor. The draft_id rides back in
-        # the X-Draft-Id response header (the body is the binary .docx).
-        # A draft-storage failure never fails the download.
-        draft_id: int | None = None
-        try:
-            from tools.editor_content import midpoint_to_editor
-            from tools.editor_drafts import create_draft
-            content_json, content_text = midpoint_to_editor(
-                narratives,
-                word_validation=word_validation,
-            )
-            draft = await create_draft(
-                "midpoint_paper", email,
-                f"Midpoint Paper — {date.today().isoformat()}",
-                content_json, content_text, created_from="generated")
-            if draft is not None:
-                draft_id = draft["id"]
-        except Exception as exc:  # noqa: BLE001
-            log.warning("midpoint_draft_create_failed", error=str(exc))
+        # Bump default font size for legibility.
+        for p in doc.paragraphs:
+            for run in p.runs:
+                if not run.font.size:
+                    run.font.size = Pt(10)
 
-        filename = f"forest-capital-midpoint-paper-{date.today().isoformat()}.docx"
-        return docx_bytes, filename, _DOCX_MEDIA, draft_id
-    except Exception as exc:  # noqa: BLE001
-        log.error("midpoint_paper_generation_error", error=str(exc))
+        buf = BytesIO()
+        doc.save(buf)
+        body = buf.getvalue()
+        from fastapi.responses import Response as _Resp
+        filename = (
+            f"forest_capital_audit_trail_{document_type}_"
+            f"{_date.today().isoformat()}.docx")
+        return _Resp(
+            content=body,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"),
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"{filename}\""),
+            })
+    except HTTPException:
         raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_export_docx_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"DOCX render failed: {exc}")
+
+
+# ── Concern 7k-iii + 7k-viii: apply-fix + propose-fix endpoints ──
+
+@app.post("/api/v1/documents/propose-fix")
+@limiter.limit("20/minute")
+async def post_propose_fix(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7k-viii. Generates a fix proposal for a single
+    Major finding on demand. Fatal findings auto-fire during the
+    debate round; this endpoint serves the Major case (the UI
+    Propose Fix button on a Major finding card).
+
+    Body: {
+      document_type: <type>,
+      finding_id:    <int -- index into the debate's
+                     merged_findings>,
+      finding:       <finding object>,
+      debate_id:     <int -- council_debates row id>
+    }
+
+    Returns the FixProposal as JSON. Also appends the proposal to
+    council_debates.fix_proposals so the UI keeps a single source
+    of truth for what's been proposed.
+    """
+    from agents.academic_review import (
+        run_arbiter_fix_proposal, write_fix_proposals_to_debate,
+    )
+    document_type = str(body.get("document_type") or "")
+    if document_type not in {
+            "executive_brief", "analytical_appendix",
+            "presentation_deck", "presentation_script"}:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be one of executive_brief / "
+                "analytical_appendix / presentation_deck / "
+                "presentation_script"))
+    finding = body.get("finding") or {}
+    if not isinstance(finding, dict):
+        raise HTTPException(
+            status_code=422, detail="finding must be an object")
+    finding_id = int(body.get("finding_id") or 0)
+    debate_id = body.get("debate_id")
+    proposal = await run_arbiter_fix_proposal(
+        finding=finding, finding_id=finding_id,
+        document_type=document_type,
+        reviewer_email=session.get("email"))
+    if proposal is None:
+        return {
+            "ok": False,
+            "message": (
+                "Could not generate a fix proposal for this "
+                "finding -- the arbiter response was not parseable. "
+                "You can still edit the document manually."),
+        }
+    if debate_id is not None:
+        try:
+            await write_fix_proposals_to_debate(
+                int(debate_id), [proposal])
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "propose_fix_write_failed", error=str(exc))
+    return {
+        "ok": True,
+        "finding_id": proposal.finding_id,
+        "target": proposal.target,
+        "section_name": proposal.section_name,
+        "rationale": proposal.rationale,
+        "patch_instruction": proposal.patch_instruction,
+        "severity": proposal.severity,
+        "auto_proposed": proposal.auto_proposed,
+        "target_document": proposal.target_document,
+        "source_of_truth_document": (
+            proposal.source_of_truth_document),
+    }
+
+
+# ── June 26 2026 -- direct section-patch path for apply-fix ──────────────
+#
+# Background. The legacy apply-fix flow (a) patched a story_plans row by
+# appending the patch_instruction to a section's `guidance` field, then
+# (b) kicked off a FULL document regeneration. That round-trip was
+# necessary when the fix changed the story plan's structural anchors
+# (numeric_anchors, central_argument), but for a localised correction
+# to one slide's prose / numbers it was overkill -- and it failed
+# outright on the deck because the story_plans row lookup was 409ing
+# (apply-fix story-plan-lookup PR #443 fixed the hash join, but Apply
+# Fix still 409s on any deck draft generated before a story plan was
+# computed -- pre-#332 drafts in particular).
+#
+# This path side-steps the regen requirement for fixes that can be
+# applied directly to the current draft's content_json. Branches by
+# document_type:
+#
+#   presentation_deck  -- find the slide by section_name (title match),
+#     send its elements array to Sonnet with the patch_instruction,
+#     replace the elements with the corrected version.
+#   executive_brief / analytical_appendix -- find the TipTap section by
+#     section_name (heading text match), send its nodes to Sonnet,
+#     replace the section's nodes with the corrected version.
+#   presentation_script -- no first-class section concept (per-slide
+#     regen lives at a different endpoint); falls through to the legacy
+#     path.
+#
+# Returns the response dict on success; the caller short-circuits the
+# legacy story-plan + regen block. Returns None when the direct path
+# can't apply (no current draft, section not found, Sonnet output
+# unparseable, target='document' on a section-only fix proposal) so the
+# caller falls back to the legacy path -- preserves the existing
+# regen-the-whole-doc behaviour as the safety net.
+
+
+_DECK_SLIDE_PATCH_SYSTEM_PROMPT = (
+    "You are a precise JSON editor for a presentation slide. You "
+    "will receive a slide title, a patch instruction describing a "
+    "targeted correction, and the slide's current `elements` array "
+    "as JSON.\n\n"
+    "Apply ONLY the change requested by the patch instruction. "
+    "Preserve every other field, every other element, and the "
+    "overall structure exactly. Do not rephrase prose that the "
+    "instruction does not touch; do not change colors, positions, "
+    "ids, types, or any element the instruction doesn't name.\n\n"
+    "Return ONLY the corrected elements array as valid JSON. No "
+    "commentary, no markdown fence, no explanation -- just the "
+    "array."
+)
+
+
+_TIPTAP_SECTION_PATCH_SYSTEM_PROMPT = (
+    "You are a precise JSON editor for one section of a document "
+    "written in TipTap JSON format. You will receive the section "
+    "name, a patch instruction describing a targeted correction, "
+    "and the section's current TipTap nodes as a JSON array "
+    "(starting with the heading node and ending just before the "
+    "next heading).\n\n"
+    "Apply ONLY the change requested by the patch instruction. "
+    "Preserve every other paragraph, the heading, marks, the node "
+    "ordering, and the TipTap structure exactly. Keep marker "
+    "callouts ([[BOB: ...]], [[VERIFY: ...]]) intact unless the "
+    "instruction explicitly says to remove them.\n\n"
+    "Return ONLY the corrected node array as valid JSON. No "
+    "commentary, no markdown fence, no explanation -- just the "
+    "array."
+)
+
+
+def _norm_title(s: str) -> str:
+    """Case-insensitive whitespace-collapsed title normalisation
+    for the slide / section title match. The fix proposal's
+    section_name often comes from the LLM's free-text description
+    of the finding; we accept moderate punctuation drift."""
+    import re as _re
+    return _re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+
+def _extract_json_array(raw: str) -> list | None:
+    """Tolerantly extract the first JSON array from a Sonnet
+    response. Strips a markdown ```json fence if present, then
+    falls back to the longest [...] span. Returns None on parse
+    failure or when the result isn't a list."""
+    import re as _re
+    if not raw:
+        return None
+    # Strip markdown fence.
+    fence = _re.search(
+        r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw)
+    candidate = fence.group(1) if fence else None
+    if candidate is None:
+        # Longest array span: from the first '[' to the last ']'.
+        first = raw.find("[")
+        last = raw.rfind("]")
+        if first == -1 or last == -1 or last <= first:
+            return None
+        candidate = raw[first:last + 1]
+    try:
+        parsed = json.loads(candidate)
+    except Exception:  # noqa: BLE001
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def _find_deck_slide_idx(
+    slides: list, section_name: str,
+) -> int | None:
+    """Find a slide by title match. Returns the index or None.
+
+    Match algorithm (case-insensitive, whitespace-collapsed):
+      1. Exact match  -- target == slide title
+      2. Substring    -- target appears in slide title OR
+                         slide title appears in target
+      3. Slide-number prefix -- 'Slide N' / 'Slide N:' in the
+         target matches the slide at index N-1 (defensive: works
+         even when the title in the finding has drifted)
+
+    June 27 2026 -- relaxed from exact-only to fuzzy substring.
+    The fix-proposal's section_name comes from an LLM's free-text
+    description of the finding (e.g. 'Slide 4: Why Static Failed
+    in 2022') and frequently drifts from the slide's actual title
+    (e.g. 'Why Static Allocation Failed in 2022') by a word or
+    two. The exact-match version 422'd those clicks; this fuzzy
+    matcher recovers them."""
+    import re as _re
+    target = _norm_title(section_name)
+    if not target:
+        return None
+    # 1. + 2. Exact and substring matches.
+    for i, sl in enumerate(slides):
+        if not isinstance(sl, dict):
+            continue
+        title = _norm_title(sl.get("title"))
+        if not title:
+            continue
+        if target == title or target in title or title in target:
+            return i
+    # 3. 'Slide N' prefix fallback.
+    m = _re.search(r"slide\s+(\d+)", target)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= len(slides) and isinstance(slides[n - 1], dict):
+            return n - 1
+    return None
+
+
+def _node_text_for_match(node: Any) -> str:
+    """Flatten a TipTap node's text content recursively for
+    heading-title matching."""
+    if not isinstance(node, dict):
+        return ""
+    if node.get("text"):
+        return str(node["text"])
+    return "".join(
+        _node_text_for_match(c) for c in (node.get("content") or []))
+
+
+def _find_tiptap_section_range(
+    nodes: list, section_name: str,
+) -> tuple[int, int] | None:
+    """Returns (start_idx, end_idx_exclusive) of the matching
+    section -- from its heading node up to (but not including) the
+    next heading. None when no heading matches or the section is
+    empty.
+
+    Match algorithm (case-insensitive, whitespace-collapsed):
+      1. Exact match.
+      2. Substring (either direction).
+      3. 'Slide N' / 'Slide N:' prefix match -- when the target
+         carries a slide-number prefix and any heading text starts
+         with the same 'Slide N' / 'Slide N:' / 'Slide N -' token,
+         that heading wins. Defensive against LLM drift on the
+         script's per-slide H2 markers.
+      4. Word-set overlap fallback -- when no direct match, accept
+         a heading whose normalised word set shares >= 60% of the
+         target's words (rounded down, minimum 2 shared words).
+         Catches the 'Why Static Failed' vs 'Why Static Allocation
+         Failed in 2022' drift that fuzzy substring alone would
+         miss when neither string is a substring of the other.
+
+    June 27 2026 -- expanded from exact + substring to a 4-tier
+    fuzzy match. Heading-text drift from the fix-proposal LLM is
+    the leading cause of apply-fix 422s in production; this matcher
+    closes the gap so Bob's evening editing pass doesn't die on a
+    section-name comma."""
+    import re as _re
+    target = _norm_title(section_name)
+    if not target:
+        return None
+    target_slide_n: int | None = None
+    sm = _re.search(r"slide\s+(\d+)", target)
+    if sm:
+        target_slide_n = int(sm.group(1))
+    # Bare 'Section X' / 'Section 4' identifier (letter or digit)
+    # so we can match a heading prefixed with the same ID when no
+    # body text was provided alongside the label -- analytical
+    # appendix headings are 'A. Strategy Universe', 'B. Performance
+    # & Risk Metrics' and a finding may name them as 'Section B'.
+    target_section_id: str | None = None
+    bare_m = _re.match(
+        r"^section\s+([a-z\d]+)\s*[:.\-]?\s*$", target)
+    if bare_m:
+        target_section_id = bare_m.group(1)
+    target_words = set(_re.findall(r"\w+", target))
+
+    # First pass: collect every heading + its index for fuzzy
+    # comparison, then pick the best match per the tiers above.
+    headings: list[tuple[int, str]] = []
+    for i, n in enumerate(nodes):
+        if not isinstance(n, dict) or n.get("type") != "heading":
+            continue
+        title = _norm_title(_node_text_for_match(n))
+        if title:
+            headings.append((i, title))
+
+    if not headings:
+        return None
+
+    chosen_start: int | None = None
+
+    # 1. Exact match.
+    for i, title in headings:
+        if title == target:
+            chosen_start = i
+            break
+
+    # 2. Substring match.
+    if chosen_start is None:
+        for i, title in headings:
+            if target in title or title in target:
+                chosen_start = i
+                break
+
+    # 3. Slide-number prefix match.
+    if chosen_start is None and target_slide_n is not None:
+        slide_token_re = _re.compile(
+            rf"^slide\s+{target_slide_n}\b")
+        for i, title in headings:
+            if slide_token_re.search(title):
+                chosen_start = i
+                break
+
+    # 3b. Bare 'Section X' identifier prefix match. Catches
+    # 'Section B' -> 'B. Strategy Universe' even when neither
+    # substring nor word-overlap matches.
+    if chosen_start is None and target_section_id is not None:
+        id_prefix_re = _re.compile(
+            rf"^{_re.escape(target_section_id)}[.)]\s+\S")
+        for i, title in headings:
+            if id_prefix_re.match(title):
+                chosen_start = i
+                break
+
+    # 4. Word-set overlap fallback. The needle's coverage of the
+    # heading's words (or vice versa) must be >= 60% AND at least
+    # 2 words must be shared (avoids false positives on single
+    # common words like 'the'). Coverage is computed as
+    #   shared / len(target_words)
+    # so 'Why Static Failed' (3 words) vs 'Why Static Allocation
+    # Failed in 2022' (6 words) gives 3/3 = 1.0 -- the needle is
+    # fully contained in the heading. This is the canonical Bob-
+    # tonight tripwire case.
+    if chosen_start is None and len(target_words) >= 2:
+        best_idx: int | None = None
+        best_share = 0.0
+        for i, title in headings:
+            tw = set(_re.findall(r"\w+", title))
+            if not tw:
+                continue
+            shared = target_words & tw
+            if len(shared) < 2:
+                continue
+            share = len(shared) / len(target_words)
+            if share >= 0.6 and share > best_share:
+                best_idx = i
+                best_share = share
+        if best_idx is not None:
+            chosen_start = best_idx
+
+    if chosen_start is None:
+        return None
+
+    # Determine the section's exclusive end: index of the next
+    # heading after chosen_start, or len(nodes).
+    for i, _title in headings:
+        if i > chosen_start:
+            return chosen_start, i
+    return chosen_start, len(nodes)
+
+
+async def _patch_deck_slide_via_sonnet(
+    slide: dict, patch_instruction: str,
+) -> list | None:
+    """Sends the slide's elements + the patch instruction to
+    Sonnet; returns the corrected elements array or None on
+    parse / validation failure. Validates that every returned
+    element is a dict carrying at minimum `id` and `type` keys
+    (preserves the canvas-element shape contract)."""
+    import asyncio as _asyncio
+    from agents.base import SONNET_MODEL, call_claude
+
+    elements = slide.get("elements") or []
+    user_message = (
+        f"SLIDE TITLE: {slide.get('title') or ''}\n\n"
+        f"PATCH INSTRUCTION:\n{patch_instruction}\n\n"
+        "CURRENT ELEMENTS JSON:\n"
+        f"{json.dumps(elements, indent=2)}\n\n"
+        "Return ONLY the corrected elements array as JSON."
+    )
+    try:
+        raw = await _asyncio.to_thread(
+            call_claude, SONNET_MODEL,
+            _DECK_SLIDE_PATCH_SYSTEM_PROMPT, user_message, 4000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_deck_sonnet_failed", error=str(exc))
+        return None
+    parsed = _extract_json_array(raw)
+    if parsed is None:
+        log.warning(
+            "apply_fix_deck_sonnet_unparseable",
+            raw_preview=(raw or "")[:200])
+        return None
+    if not all(
+        isinstance(e, dict) and "id" in e and "type" in e
+        for e in parsed
+    ):
+        log.warning("apply_fix_deck_element_shape_violation")
+        return None
+    return parsed
+
+
+async def _patch_tiptap_section_via_sonnet(
+    section_nodes: list, section_name: str,
+    patch_instruction: str,
+) -> list | None:
+    """Sends the section's TipTap nodes + the patch instruction to
+    Sonnet; returns the corrected node array or None on parse /
+    validation failure. Validates that every returned node is a
+    dict with a `type` field."""
+    import asyncio as _asyncio
+    from agents.base import SONNET_MODEL, call_claude
+
+    user_message = (
+        f"SECTION NAME: {section_name}\n\n"
+        f"PATCH INSTRUCTION:\n{patch_instruction}\n\n"
+        "CURRENT SECTION NODES (TipTap JSON):\n"
+        f"{json.dumps(section_nodes, indent=2)}\n\n"
+        "Return ONLY the corrected node array as JSON."
+    )
+    try:
+        raw = await _asyncio.to_thread(
+            call_claude, SONNET_MODEL,
+            _TIPTAP_SECTION_PATCH_SYSTEM_PROMPT,
+            user_message, 4000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_tiptap_sonnet_failed", error=str(exc))
+        return None
+    parsed = _extract_json_array(raw)
+    if parsed is None:
+        log.warning(
+            "apply_fix_tiptap_sonnet_unparseable",
+            raw_preview=(raw or "")[:200])
+        return None
+    if not all(
+        isinstance(n, dict) and "type" in n for n in parsed
+    ):
+        log.warning("apply_fix_tiptap_node_shape_violation")
+        return None
+    return parsed
+
+
+def _derive_content_text_from_tiptap(doc: dict) -> str:
+    """Plain-text projection of a TipTap doc for content_text.
+    Mirrors the editor's save-flow shape."""
+    out = []
+    for n in (doc.get("content") or []):
+        text = _node_text_for_match(n).strip()
+        if text:
+            out.append(text)
+    return "\n\n".join(out)
+
+
+def _derive_content_text_from_deck(deck: dict) -> str:
+    """Plain-text projection of a canvas deck for content_text.
+    Concatenates each slide's title + body text."""
+    out = []
+    for sl in (deck.get("slides") or []):
+        if not isinstance(sl, dict):
+            continue
+        out.append(f"Slide {sl.get('id', '')}: {sl.get('title', '')}")
+        for el in (sl.get("elements") or []):
+            if isinstance(el, dict) and el.get("type") == "text":
+                content = str(el.get("content") or "").strip()
+                if content:
+                    out.append(content)
+    return "\n".join(out)
+
+
+async def _mark_council_debate_fix_applied(
+    debate_id: int, new_draft_id: int | None,
+) -> None:
+    """Mark the council_debates row as applied. Best-effort: a
+    write failure logs but does not unwind the patch."""
+    try:
+        from sqlalchemy import text as _text
+        from database import (
+            AsyncSessionLocal as _ASL,  # type: ignore
+        )
+        if _ASL is None:
+            return
+        async with _ASL() as s:
+            await s.execute(_text(
+                "UPDATE council_debates SET "
+                "fix_applied = TRUE, "
+                "fix_applied_at = NOW(), "
+                "new_draft_id = COALESCE(:n, new_draft_id) "
+                "WHERE id = :id"),
+                {"id": int(debate_id),
+                 "n": new_draft_id})
+            await s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_mark_debate_failed", error=str(exc))
+
+
+_APPLY_FIX_DOC_LABEL = {
+    "presentation_deck": "Presentation Deck",
+    "executive_brief": "Executive Brief",
+    "analytical_appendix": "Analytical Appendix",
+    "presentation_script": "Presentation Script",
+}
+
+
+class _ApplyFixSkip(Exception):
+    """Raised by _try_direct_section_patch when the inline path can
+    NOT apply the fix and the user should be told to edit directly.
+
+    June 27 2026 -- replaces the previous None-return + fall-through
+    to a legacy regenerate-the-whole-document path. The legacy path
+    was removed (apply-fix no longer triggers a full regen under
+    any circumstance); a clean failure surfaces as a 422 to the
+    frontend with detail / hint / section_name so the UI can show a
+    \"Open in editor\" deep link to the right section.
+
+    Attributes
+        detail:        Plain-English reason -- 'Section \"X\" not
+                       found in the current draft.'
+        hint:          Actionable next step -- 'Open the editor and
+                       edit the section directly.'
+        section_name:  Best-known section identifier so the frontend
+                       can deep-link to the editor section header.
+                       None when the failure precedes any section
+                       match (no current draft, wrong target).
+    """
+
+    def __init__(
+        self, detail: str, *, hint: str | None = None,
+        section_name: str | None = None,
+    ):
+        super().__init__(detail)
+        self.detail = detail
+        self.hint = hint or (
+            "Open the document in the editor and apply the change "
+            "directly. The Apply Fix workflow only handles "
+            "section-level edits the AI can locate; structural "
+            "edits (story-arc anchors, numeric_anchors) must be "
+            "applied manually.")
+        self.section_name = section_name
+
+
+async def _try_direct_section_patch(
+    *, document_type: str, target: str | None,
+    section_name: str | None, patch_instruction: str,
+    debate_id: int | None,
+) -> dict | None:
+    """Apply the fix as a direct in-place patch to the current
+    draft's content_json. Returns the response dict on success.
+
+    June 27 2026 -- legacy regenerate-the-whole-document fallback
+    removed. This path is now the ONLY apply-fix execution path; a
+    clean failure raises _ApplyFixSkip which the caller turns into
+    a 422 telling the user to edit in the editor directly.
+
+    Coverage post-refactor:
+      target='section' + section_name set:
+        deck                 -> _find_deck_slide_idx + Sonnet-patch
+                                that slide's elements
+        brief / appendix     -> _find_tiptap_section_range (H1
+                                heading match) + Sonnet-patch that
+                                section's nodes
+        script               -> _find_tiptap_section_range (H2
+                                'Slide N' heading match) + Sonnet-
+                                patch that slide's prose nodes
+      target='document':
+        deck                 -> per-slide walk; Sonnet-patch every
+                                slide in parallel; reassemble
+        brief / appendix /
+        script               -> per-section walk over the heading
+                                ranges; Sonnet-patch each;
+                                reassemble nodes preserving
+                                ordering
+
+    Raises _ApplyFixSkip when:
+      * No current draft exists for the document type
+      * target='section' but section_name is empty
+      * target is neither 'section' nor 'document'
+      * Section / slide title doesn't match any heading in the
+        draft (target='section')
+      * Sonnet patch is unparseable / shape-invalid AND it's the
+        only call (target='section'). target='document' tolerates
+        per-section Sonnet failures by skipping that section and
+        continuing -- a complete failure (every section failed)
+        raises.
+      * update_draft persists fails
+
+    No silent fall-through. The legacy regen path has been deleted.
+    """
+    if target not in ("section", "document"):
+        raise _ApplyFixSkip(
+            f"Unknown fix target '{target}'.")
+    if target == "section" and not section_name:
+        raise _ApplyFixSkip(
+            "Section-scoped fix requires a section_name.")
+
+    if document_type not in (
+        "presentation_deck", "executive_brief",
+        "analytical_appendix", "presentation_script",
+    ):
+        raise _ApplyFixSkip(
+            f"Apply Fix does not support document_type "
+            f"'{document_type}'.")
+
+    from tools.editor_drafts import (
+        get_current_draft_by_type, update_draft,
+    )
+
+    draft = await get_current_draft_by_type(document_type)
+    if draft is None:
+        raise _ApplyFixSkip(
+            f"No current draft found for "
+            f"{_APPLY_FIX_DOC_LABEL.get(document_type, document_type)}. "
+            "Generate the document before applying a fix.")
+    content = draft.get("content_json")
+    if not isinstance(content, dict):
+        raise _ApplyFixSkip(
+            f"Current draft for "
+            f"{_APPLY_FIX_DOC_LABEL.get(document_type, document_type)} "
+            "has no content to patch.")
+
+    is_deck = document_type == "presentation_deck"
+    is_tiptap = document_type in (
+        "executive_brief", "analytical_appendix",
+        "presentation_script")
+
+    # ── Section-scoped patch ──────────────────────────────────────
+    if target == "section":
+        if is_deck:
+            slides = content.get("slides")
+            if not isinstance(slides, list):
+                raise _ApplyFixSkip(
+                    "Deck draft has no slides to patch.")
+            idx = _find_deck_slide_idx(slides, section_name)
+            if idx is None:
+                raise _ApplyFixSkip(
+                    f"Slide '{section_name}' not found in the "
+                    "current deck draft.",
+                    section_name=section_name)
+            new_elements = await _patch_deck_slide_via_sonnet(
+                slides[idx], patch_instruction)
+            if new_elements is None:
+                raise _ApplyFixSkip(
+                    f"AI could not produce a valid patch for "
+                    f"slide '{section_name}'. Try editing in "
+                    "the editor directly.",
+                    section_name=section_name)
+            new_slides = list(slides)
+            new_slides[idx] = {
+                **slides[idx], "elements": new_elements}
+            new_content = {**content, "slides": new_slides}
+            new_text = _derive_content_text_from_deck(new_content)
+        elif is_tiptap:
+            nodes = content.get("content")
+            if not isinstance(nodes, list):
+                raise _ApplyFixSkip(
+                    "Current draft has no TipTap content to "
+                    "patch.")
+            rng = _find_tiptap_section_range(nodes, section_name)
+            if rng is None:
+                raise _ApplyFixSkip(
+                    f"Section '{section_name}' not found in the "
+                    "current draft. Confirm the section heading "
+                    "matches.",
+                    section_name=section_name)
+            start, end = rng
+            section_nodes = nodes[start:end]
+            new_section = await _patch_tiptap_section_via_sonnet(
+                section_nodes, section_name, patch_instruction)
+            if new_section is None:
+                raise _ApplyFixSkip(
+                    f"AI could not produce a valid patch for "
+                    f"section '{section_name}'. Try editing in "
+                    "the editor directly.",
+                    section_name=section_name)
+            new_nodes = nodes[:start] + new_section + nodes[end:]
+            new_content = {**content, "content": new_nodes}
+            new_text = _derive_content_text_from_tiptap(new_content)
+        else:  # pragma: no cover - guarded above
+            raise _ApplyFixSkip(
+                f"Unhandled document_type '{document_type}'.")
+
+    # ── Document-scoped patch (target='document') ────────────────
+    else:
+        new_content, new_text, sections_patched, sections_skipped = (
+            await _patch_entire_document_via_sonnet(
+                document_type=document_type,
+                content=content,
+                patch_instruction=patch_instruction))
+        if sections_patched == 0:
+            raise _ApplyFixSkip(
+                "AI could not apply the patch to any section of "
+                f"{_APPLY_FIX_DOC_LABEL.get(document_type, document_type)}. "
+                "Try editing in the editor directly, or scope the "
+                "fix to a single section.")
+
+    ok = await update_draft(
+        int(draft["id"]), new_content, new_text)
+    if not ok:
+        log.warning(
+            "apply_fix_update_draft_failed",
+            document_type=document_type,
+            draft_id=draft.get("id"))
+        raise _ApplyFixSkip(
+            "Patch was generated but could not be written to the "
+            "draft. Reload and try again, or edit in the editor.")
+
+    if debate_id is not None:
+        await _mark_council_debate_fix_applied(
+            int(debate_id), int(draft["id"]))
+
+    log.info(
+        "apply_fix_direct_patch_applied",
+        document_type=document_type,
+        target=target,
+        section_name=section_name,
+        draft_id=draft.get("id"))
+
+    if target == "document":
+        label = (
+            f"Document-wide fix applied "
+            f"({sections_patched} sections updated, "
+            f"{sections_skipped} skipped)")
+    else:
+        label = f"Direct fix applied to '{section_name}'"
+
+    return {
+        "ok": True,
+        "new_draft_id": int(draft["id"]),
+        "draft_label": label,
+        "scope": target,
+        "section_regenerated": (
+            section_name if target == "section" else None),
+        "in_place": True,
+    }
+
+
+# ── June 27 2026 -- shared content_json splice helpers ────────────
+#
+# Both Apply Fix (apply-fix endpoint) and Preview Inline Edit
+# (propose-fix-text + accept-fix-text endpoints) operate on the
+# current draft's content_json with surgical splice semantics:
+#
+#   1. Locate the section in content_json (slide for decks; node
+#      range for TipTap docs).
+#   2. Render the section as plain text for diff display.
+#   3. Sonnet-patch the JSON section (not the rendered text).
+#   4. Render the patched section as plain text for diff display.
+#   5. Splice the patched JSON section back into the full
+#      content_json at the same anchor; everything else verbatim.
+#
+# The helpers below are pure-data (no DB, no LLM) so the two
+# endpoints share the same locate / render / splice logic. The
+# Sonnet call lives in _patch_section_via_sonnet -- a thin
+# dispatcher around the deck- and TipTap-specific patch helpers
+# already in this file.
+
+
+def _locate_section_in_content(
+    document_type: str, content_json: dict, section_name: str,
+) -> tuple[Any, list | dict] | None:
+    """Locate a section in a draft's content_json. Returns
+    (anchor, original_section_json) on a successful match, None
+    otherwise.
+
+    Anchor shape per document type:
+      deck   -> int (slide index in content_json['slides'])
+      brief / appendix / script -> tuple[int, int] (start, end
+                                   exclusive) into content_json
+                                   ['content'] node list
+
+    The anchor is what _splice_section_into_content uses to write
+    the patched section back into the right position.
+    """
+    if document_type == "presentation_deck":
+        slides = content_json.get("slides")
+        if not isinstance(slides, list):
+            return None
+        idx = _find_deck_slide_idx(slides, section_name)
+        if idx is None:
+            return None
+        slide = slides[idx]
+        if not isinstance(slide, dict):
+            return None
+        return idx, slide
+    # TipTap (brief / appendix / script)
+    nodes = content_json.get("content")
+    if not isinstance(nodes, list):
+        return None
+    rng = _find_tiptap_section_range(nodes, section_name)
+    if rng is None:
+        return None
+    start, end = rng
+    return (start, end), nodes[start:end]
+
+
+def _render_section_as_text(
+    document_type: str, section_json: list | dict,
+) -> str:
+    """Render a section as plain text for diff display.
+
+    Deck slide -> title + each text-element's content, one per line.
+    TipTap nodes -> _node_text_for_match flattened, one node per
+                    paragraph break.
+    """
+    if document_type == "presentation_deck":
+        # section_json is a single slide dict.
+        if not isinstance(section_json, dict):
+            return ""
+        out: list[str] = []
+        title = str(section_json.get("title") or "").strip()
+        if title:
+            out.append(title)
+        for el in (section_json.get("elements") or []):
+            if (isinstance(el, dict)
+                    and el.get("type") == "text"):
+                content = str(el.get("content") or "").strip()
+                if content:
+                    out.append(content)
+        return "\n".join(out)
+    # TipTap nodes
+    if not isinstance(section_json, list):
+        return ""
+    out2: list[str] = []
+    for n in section_json:
+        text = _node_text_for_match(n).strip()
+        if text:
+            out2.append(text)
+    return "\n\n".join(out2)
+
+
+async def _patch_section_via_sonnet(
+    document_type: str, section_json: list | dict,
+    section_name: str, patch_instruction: str,
+) -> list | dict | None:
+    """Dispatcher around the deck- and TipTap-specific patch
+    helpers. Returns the patched section JSON in the same shape as
+    section_json, or None on Sonnet failure / shape violation.
+
+    Deck slide: returns a dict {...slide, elements: <patched
+                elements array>} (the slide envelope is preserved
+                so id / title / background / speaker_notes ride
+                through unchanged).
+    TipTap nodes: returns the patched node array.
+    """
+    if document_type == "presentation_deck":
+        if not isinstance(section_json, dict):
+            return None
+        new_elements = await _patch_deck_slide_via_sonnet(
+            section_json, patch_instruction)
+        if new_elements is None:
+            return None
+        return {**section_json, "elements": new_elements}
+    # TipTap
+    if not isinstance(section_json, list):
+        return None
+    return await _patch_tiptap_section_via_sonnet(
+        section_json, section_name, patch_instruction)
+
+
+def _splice_section_into_content(
+    document_type: str, content_json: dict, anchor: Any,
+    patched_section_json: list | dict,
+) -> dict:
+    """Splice the patched section back into the full content_json
+    at the supplied anchor. Returns the new content_json -- every
+    other section is preserved verbatim.
+
+    Per spec (June 27 2026): the write-back must always splice,
+    never overwrite. A wrong-shape patch is rejected upstream
+    (_patch_section_via_sonnet returns None); by the time we reach
+    splice the JSON is shape-valid for the document type.
+    """
+    if document_type == "presentation_deck":
+        slides = list(content_json.get("slides") or [])
+        idx = int(anchor)
+        if not (0 <= idx < len(slides)):
+            return content_json
+        if not isinstance(patched_section_json, dict):
+            return content_json
+        slides[idx] = patched_section_json
+        return {**content_json, "slides": slides}
+    # TipTap
+    nodes = list(content_json.get("content") or [])
+    start, end = anchor
+    if not isinstance(patched_section_json, list):
+        return content_json
+    new_nodes = nodes[:start] + patched_section_json + nodes[end:]
+    return {**content_json, "content": new_nodes}
+
+
+async def _patch_entire_document_via_sonnet(
+    *, document_type: str, content: dict,
+    patch_instruction: str,
+) -> tuple[dict, str, int, int]:
+    """Walk every section / slide in the content and Sonnet-patch
+    each one with the same patch_instruction. Returns
+    (new_content, new_text, sections_patched, sections_skipped).
+
+    Per-section failures are tolerated (the section keeps its
+    original content and skipped is incremented) so a single
+    Sonnet hiccup doesn't drop the entire document. The caller
+    raises _ApplyFixSkip when sections_patched == 0.
+
+    Parallelism: each section's Sonnet call goes through
+    asyncio.gather so wall-clock stays bounded by the slowest
+    single section rather than summing every section."""
+    import asyncio as _asyncio
+
+    is_deck = document_type == "presentation_deck"
+    if is_deck:
+        slides = content.get("slides")
+        if not isinstance(slides, list):
+            return content, _derive_content_text_from_deck(content), 0, 0
+        tasks = [
+            _patch_deck_slide_via_sonnet(sl, patch_instruction)
+            for sl in slides if isinstance(sl, dict)
+        ]
+        results = await _asyncio.gather(
+            *tasks, return_exceptions=True)
+        new_slides: list = []
+        sections_patched = 0
+        sections_skipped = 0
+        for sl, res in zip(slides, results):
+            if (isinstance(res, list)
+                    and not isinstance(res, BaseException)):
+                new_slides.append({**sl, "elements": res})
+                sections_patched += 1
+            else:
+                new_slides.append(sl)
+                sections_skipped += 1
+        new_content = {**content, "slides": new_slides}
+        return (
+            new_content,
+            _derive_content_text_from_deck(new_content),
+            sections_patched, sections_skipped)
+
+    # TipTap path (brief / appendix / script)
+    nodes = content.get("content")
+    if not isinstance(nodes, list):
+        return (
+            content,
+            _derive_content_text_from_tiptap(content), 0, 0)
+    # Build the section ranges from heading-to-heading. For each
+    # heading-bounded range, Sonnet-patch the nodes; reassemble.
+    ranges: list[tuple[int, int, str]] = []
+    last_start: int | None = None
+    last_title: str = ""
+    for i, n in enumerate(nodes):
+        if isinstance(n, dict) and n.get("type") == "heading":
+            if last_start is not None:
+                ranges.append((last_start, i, last_title))
+            last_start = i
+            last_title = _node_text_for_match(n).strip() or (
+                f"section_{len(ranges) + 1}")
+    if last_start is not None:
+        ranges.append((last_start, len(nodes), last_title))
+    if not ranges:
+        # No headings at all -- patch the entire node list as a
+        # single section.
+        ranges = [(0, len(nodes), "document")]
+
+    tasks = [
+        _patch_tiptap_section_via_sonnet(
+            nodes[s:e], title, patch_instruction)
+        for s, e, title in ranges
+    ]
+    results = await _asyncio.gather(
+        *tasks, return_exceptions=True)
+    new_nodes: list = []
+    sections_patched = 0
+    sections_skipped = 0
+    for (s, e, _title), res in zip(ranges, results):
+        if (isinstance(res, list)
+                and not isinstance(res, BaseException)):
+            new_nodes.extend(res)
+            sections_patched += 1
+        else:
+            new_nodes.extend(nodes[s:e])
+            sections_skipped += 1
+    new_content = {**content, "content": new_nodes}
+    return (
+        new_content,
+        _derive_content_text_from_tiptap(new_content),
+        sections_patched, sections_skipped)
+
+
+# ── /apply-fix/refine -- multi-round proposal refinement ──────────────
+#
+# June 27 2026. The council proposes a fix; the user may want to
+# refine the proposal text across multiple cheap Sonnet calls
+# BEFORE the surgical splice runs against the document. The
+# refinement loop operates purely on the proposal text -- editor_
+# drafts is never touched until the user clicks Apply This Fix in
+# the modal (which then POSTs /apply-fix with refined_proposal_text).
+#
+# Why a separate endpoint: keeps the refine call cheap + fast
+# (target <5s). One Sonnet call with low max_tokens. The endpoint
+# never reads or writes editor_drafts, council_debates, or
+# story_plans -- it's a stateless text-rewrite.
+
+_REFINEMENT_SYSTEM_PROMPT = (
+    "You are refining a fix proposal for a section of an academic "
+    "document. The current proposed fix is:\n"
+    "{current_proposal_text}\n\n"
+    "The author requests this adjustment:\n"
+    "{refinement_note}\n\n"
+    "Return only the revised fix proposal text. Do not apply the "
+    "fix to the document. Do not add commentary.")
+
+REFINEMENT_NOTE_MAX_CHARS = 500
+REFINEMENT_PROPOSAL_MAX_CHARS = 4000
+
+
+@app.post("/api/v1/apply-fix/refine")
+@limiter.limit("30/minute")
+async def post_apply_fix_refine(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Refine a fix proposal's text with a single targeted Sonnet
+    call. The endpoint is stateless -- it accepts the current
+    working proposal text + a refinement note, returns the rewrite,
+    and never touches editor_drafts / council_debates / story_plans.
+
+    Body: {
+      fix_proposal_id:        int,
+      current_proposal_text:  str (the working proposal),
+      refinement_note:        str (max 500 chars),
+      document_type:          str,
+      section_name:           str,
+      refinement_round?:      int (client-supplied; just for logging)
+    }
+
+    Returns: { refined_proposal_text: str }
+
+    Target wall-clock: <5s. Sonnet model claude-sonnet-4-6,
+    max_tokens=1000. The proposal is short; this is a trivial call.
+
+    Validation:
+      422 -- missing fix_proposal_id / refinement_note /
+             current_proposal_text
+      413 -- refinement_note > 500 chars OR
+             current_proposal_text > 4000 chars
+      502 -- Sonnet call failed
+    """
+    import asyncio as _asyncio
+    from agents.base import SONNET_MODEL, call_claude
+
+    fix_proposal_id = body.get("fix_proposal_id")
+    current_proposal_text = body.get("current_proposal_text") or ""
+    refinement_note = body.get("refinement_note") or ""
+    document_type = str(body.get("document_type") or "")
+    section_name = body.get("section_name")
+    refinement_round = body.get("refinement_round")
+
+    if fix_proposal_id is None:
+        raise HTTPException(
+            status_code=422, detail="fix_proposal_id is required")
+    if not isinstance(current_proposal_text, str) or not current_proposal_text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="current_proposal_text is required")
+    if not isinstance(refinement_note, str) or not refinement_note.strip():
+        raise HTTPException(
+            status_code=422, detail="refinement_note is required")
+    current_proposal_text = current_proposal_text.strip()
+    refinement_note = refinement_note.strip()
+
+    if len(refinement_note) > REFINEMENT_NOTE_MAX_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"refinement_note exceeds "
+                f"{REFINEMENT_NOTE_MAX_CHARS} chars"))
+    if len(current_proposal_text) > REFINEMENT_PROPOSAL_MAX_CHARS:
+        # Defence in depth -- the proposal text upstream is
+        # patch_instruction, capped at a few hundred chars in
+        # practice. A 4000-char ceiling is a tight bound that still
+        # tolerates a verbose council proposal.
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"current_proposal_text exceeds "
+                f"{REFINEMENT_PROPOSAL_MAX_CHARS} chars"))
+
+    log.info(
+        "apply_fix_refine_invoked",
+        fix_proposal_id=fix_proposal_id,
+        document_type=document_type,
+        section_name=section_name,
+        refinement_round=refinement_round,
+        refinement_chars=len(refinement_note),
+        proposal_chars=len(current_proposal_text))
+
+    if ENVIRONMENT == "test":
+        # Deterministic stub so tests can exercise the endpoint
+        # without round-tripping a live LLM.
+        return {
+            "refined_proposal_text": (
+                f"{current_proposal_text}\n\n"
+                f"[refined: {refinement_note}]"),
+        }
+
+    user_message = _REFINEMENT_SYSTEM_PROMPT.format(
+        current_proposal_text=current_proposal_text,
+        refinement_note=refinement_note)
+    try:
+        raw = await _asyncio.to_thread(
+            call_claude,
+            SONNET_MODEL,
+            "You are a precise editor of fix-proposal text.",
+            user_message,
+            max_tokens=1000,
+            trigger="apply_fix_refine")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_refine_call_failed",
+            fix_proposal_id=fix_proposal_id, error=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Refinement call failed: {exc}")
+    refined = (raw or "").strip()
+    if not refined:
+        log.warning(
+            "apply_fix_refine_empty_response",
+            fix_proposal_id=fix_proposal_id)
+        raise HTTPException(
+            status_code=502,
+            detail="Refinement produced an empty response.")
+    return {"refined_proposal_text": refined}
+
+
+@app.post("/api/v1/documents/apply-fix")
+@limiter.limit("6/minute")
+async def post_apply_fix(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7k-iii + 7l-i. Apply a confirmed fix proposal:
+
+      1. Patch the story_plans row for (data_hash, document_type)
+         by appending patch_instruction to the target section's
+         guidance field (target=section) or to plan_json
+         .central_argument (target=document).
+      2. Re-run the affected generator (section-level: just the
+         affected section's harness call; document-level: full
+         document generator).
+      3. Save the result as a NEW editor_drafts row with a
+         "Post-critic revision v<n>" label. The existing draft is
+         preserved -- the team picks which version to keep.
+      4. Update council_debates with fix_applied=true,
+         fix_applied_at=NOW(), new_draft_id=<new id>.
+      5. Return the new draft_id + label + scope.
+
+    Body: {
+      document_type:  <type>,
+      finding_id:     <int>,
+      fix_proposal:   <FixProposal object>,
+      debate_id:      <int>,
+      confirmed:      true (must be true to apply)
+    }
+
+    Returns: { new_draft_id, draft_label, scope, section_regenerated }
+    """
+    if not body.get("confirmed"):
+        raise HTTPException(
+            status_code=422,
+            detail="confirmed must be true to apply the fix")
+    document_type = str(body.get("document_type") or "")
+    if document_type not in {
+            "executive_brief", "analytical_appendix",
+            "presentation_deck", "presentation_script"}:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be one of executive_brief / "
+                "analytical_appendix / presentation_deck / "
+                "presentation_script"))
+    fix = body.get("fix_proposal") or {}
+    if not isinstance(fix, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="fix_proposal must be an object")
+    target = fix.get("target")
+    if target not in ("section", "document"):
+        raise HTTPException(
+            status_code=422,
+            detail="fix_proposal.target must be 'section' or 'document'")
+    patch_instruction = str(fix.get("patch_instruction") or "")
+    if not patch_instruction.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="fix_proposal.patch_instruction is required")
+    debate_id = body.get("debate_id")
+    section_name = fix.get("section_name")
+    email = session.get("email") or ""
+    # June 27 2026 -- the refinement flow does NOT flow through
+    # this endpoint. Refined patch text is sent to
+    # /propose-fix-text via the refined_proposal_text field so the
+    # mandatory diff preview always renders before any write.
+    # Sending refined_proposal_text here is rejected to prevent a
+    # direct-commit path that skips the diff.
+    if isinstance(body.get("refined_proposal_text"), str) and (
+            body["refined_proposal_text"].strip()):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "refined_proposal_text is not accepted on "
+                "apply-fix -- refined patches must flow through "
+                "/propose-fix-text so the diff preview always "
+                "renders before write. Call /propose-fix-text "
+                "with refined_proposal_text instead."))
+    if ENVIRONMENT == "test":
+        # In test, return a deterministic stub so the apply-fix
+        # endpoint shape is exercised without running the live
+        # generators.
+        return {
+            "ok": True,
+            "new_draft_id": -1,
+            "draft_label": "Post-critic revision v1 (test)",
+            "scope": target,
+            "section_regenerated": (
+                section_name if target == "section" else None),
+        }
+
+    # June 27 2026 -- inline-only apply-fix flow.
+    #
+    # The endpoint now ALWAYS routes through _try_direct_section_patch
+    # which applies the fix as a surgical section-level splice on the
+    # current draft's content_json. No story_plans lookup. No full-
+    # document regeneration. No fall-through safety net.
+    #
+    # If the patch can't be applied (no current draft, section can't
+    # be matched, Sonnet output unusable, write failed) the helper
+    # raises _ApplyFixSkip which we translate into a 422 carrying:
+    #   detail        -- plain-English reason
+    #   hint          -- "open the editor and edit directly"
+    #   section_name  -- best-known section identifier so the
+    #                    frontend can deep-link to that section
+    # The frontend's FixProposalCard catches the 422 and surfaces an
+    # inline "Open in editor" link instead of regenerating.
+    #
+    # Removed in this revision: the entire legacy story-plan SELECT/
+    # UPDATE/_start_generation_job block (was here -> now gone). It
+    # paired a buggy hash join (PR #443 patched the deck case but
+    # appendix/script never had a story_plans row to find) with a
+    # full-document regen that discarded manual edits in the current
+    # draft. Both were footguns; both are gone.
+    try:
+        result = await _try_direct_section_patch(
+            document_type=document_type, target=target,
+            section_name=str(section_name) if section_name else None,
+            patch_instruction=patch_instruction,
+            debate_id=int(debate_id) if debate_id else None)
+    except _ApplyFixSkip as skip:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "detail": skip.detail,
+                "hint": skip.hint,
+                "section_name": skip.section_name,
+                "document_type": document_type,
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "apply_fix_unexpected_error",
+            error=str(exc), document_type=document_type)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Unexpected error applying the fix. Reload and "
+                "try again, or edit the document in the editor "
+                "directly."))
+    return result
+
+
+
+# ── June 25 2026: Copilot-style inline fix-text flow ─────────────
+#
+# The legacy /apply-fix path regenerates the ENTIRE document via the
+# generator pipeline (an opaque ~60-90s job). That's appropriate when
+# the fix is a structural change to the story plan, but for a
+# localised paragraph edit it's overkill and the user can't preview
+# the change before committing. These two endpoints add a tighter
+# loop: propose-fix-text returns a section-scoped diff (original_text
+# + suggested_text); accept-fix-text marks the council_debates row
+# applied and the frontend PATCHes the draft with the resolved text
+# via the existing /drafts/{id} endpoint. Idempotent: the suggested
+# text is cached on council_debates.fix_proposals[i].suggested_text
+# so a second propose call returns the same result.
+
+_PROPOSE_FIX_TEXT_SYSTEM = (
+    "You are an editor revising a single section of an academic "
+    "executive brief or appendix. You will be given the current "
+    "section text and a specific change instruction. Apply the "
+    "change as a minimal, surgical edit -- preserve voice, "
+    "structure, citations, and any unaffected sentences. Do NOT "
+    "rewrite the whole section. Do NOT add commentary, headers, "
+    "or framing. Return ONLY the revised section text, verbatim, "
+    "ready to drop back into the document. If the change "
+    "instruction cannot be applied without losing meaningful "
+    "content, return the original text unchanged.")
+
+
+def _extract_section_text(
+    content_text: str, section_name: str | None,
+) -> str | None:
+    """Best-effort section extractor. Searches content_text for a
+    line whose stripped form matches section_name (case-insensitive,
+    leading number / markdown header stripped) and returns the text
+    from that line up to (but not including) the next heading-like
+    line OR end of document.
+
+    Returns None when the section cannot be located.
+
+    June 27 2026 (URGENT) -- behavioural change. The previous
+    contract said the caller "falls back to the full document text
+    (less ideal but safe)". That fallback was NOT safe: when the
+    section couldn't be located the caller wired the WHOLE document
+    as the 'CURRENT SECTION TEXT' to Sonnet, which returned just the
+    patched section, and the frontend then performed
+      content_text.replace(WHOLE_DOC, PATCHED_SECTION)
+    -- silently overwriting the entire document with only the
+    patched section. The caller has been updated to return a 409
+    on a None response instead. This docstring is updated to
+    reflect the new contract.
+
+    Letter-label sections ('Section A', 'Section B', ...) are now
+    also normalised by the same prefix-stripper so the analytical
+    appendix's letter-keyed headings match. Substring fallback
+    (case-insensitive) catches headings that drift from the
+    finding's section_name by a word or two."""
+    if not section_name or not content_text:
+        return None
+    import re as _re
+    needle_raw = section_name.strip().lower()
+    # Capture a bare 'Section X' / 'Section 4' identifier so we can
+    # still match a heading prefixed with that letter / digit when
+    # the needle carries no body text after the label.
+    bare_id_m = _re.match(
+        r"^section\s+([a-z\d]+)\s*[:.\-]?\s*$", needle_raw)
+    section_id: str | None = (
+        bare_id_m.group(1) if bare_id_m else None)
+    # Strip leading 'Section N[:.] ', 'Section X[:.] ' (letter),
+    # '# ', '## ', '1. ', '1) ', 'A. ', 'a) ' etc. from both the
+    # needle and each candidate line so 'Section B: Strategy
+    # Universe' matches a draft heading like 'B. Strategy Universe'
+    # or 'Strategy Universe'.
+    _PREFIX_RE = _re.compile(
+        r"^(section\s+[a-z\d]+[:.\-]?\s*|#+\s*|"
+        r"[a-z\d]+[.)]\s+)")
+    needle = _PREFIX_RE.sub("", needle_raw).strip()
+    # Bare 'Section X' with no body falls through to the section-id
+    # prefix matcher below.
+    if not needle and not section_id:
+        return None
+    lines = content_text.splitlines()
+    start_idx: int | None = None
+    # Pass 1: exact-after-strip match.
+    if needle:
+        for i, line in enumerate(lines):
+            clean = _PREFIX_RE.sub(
+                "", line.strip().lower()).strip()
+            if clean == needle and len(line.strip()) < 200:
+                start_idx = i
+                break
+    # Pass 2: case-insensitive substring fallback (either
+    # direction) -- catches mild heading drift like 'Limitations'
+    # vs 'Honest Limitations' that exact match misses.
+    if start_idx is None and needle:
+        for i, line in enumerate(lines):
+            clean = _PREFIX_RE.sub(
+                "", line.strip().lower()).strip()
+            if not clean or len(line.strip()) >= 200:
+                continue
+            if (needle in clean or clean in needle) and len(clean) >= 3:
+                start_idx = i
+                break
+    # Pass 3: 'Section X' bare-ID prefix match -- find a heading
+    # line that STARTS with the same letter/digit followed by
+    # '.' / ')' / whitespace. Catches 'Section B' -> 'B. Strategy
+    # Universe' even when no body text was provided.
+    if start_idx is None and section_id is not None:
+        id_prefix_re = _re.compile(
+            rf"^{_re.escape(section_id)}[.)]\s+\S")
+        for i, line in enumerate(lines):
+            if (id_prefix_re.match(line.strip().lower())
+                    and len(line.strip()) < 200):
+                start_idx = i
+                break
+    if start_idx is None:
+        return None
+    # Walk forward to the next heading-like line (markdown # / ##
+    # / 'Section N' / 'A. ' / a bold-only line). The slice is from
+    # start_idx to end_idx exclusive.
+    end_idx = len(lines)
+    for j in range(start_idx + 1, len(lines)):
+        ln = lines[j].strip()
+        if not ln:
+            continue
+        if (ln.startswith("#")
+                or _re.match(r"^section\s+[a-z\d]+\b", ln,
+                             flags=_re.IGNORECASE)
+                or _re.match(r"^[a-z\d]+[.)]\s+\S", ln,
+                             flags=_re.IGNORECASE)
+                or (ln.startswith("**") and ln.endswith("**")
+                    and len(ln) < 120)):
+            end_idx = j
+            break
+    extracted = "\n".join(lines[start_idx:end_idx]).strip()
+    # Guard: if the extracted span covers more than ~80% of the
+    # document, the section bounds collapsed and the caller would
+    # effectively be patching the whole doc. Refuse instead of
+    # returning an unsafe span.
+    if len(extracted) >= 0.8 * len(content_text):
+        return None
+    return extracted
+
+
+@app.post(
+    "/api/v1/council/debates/{debate_id}/propose-fix-text")
+@limiter.limit("20/minute")
+async def post_propose_fix_text(
+    debate_id: int, request: Request, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Generate a section-scoped JSON splice preview for one fix
+    proposal. Operates on content_json (NOT content_text). The
+    write-back to the draft happens on accept-fix-text -- this
+    endpoint just produces the preview.
+
+    Body: {finding_id: int}
+
+    Returns: {finding_id, section_name, original_text,
+              suggested_text, proposal_id, cached, document_type}
+
+    The original_text / suggested_text fields are PLAIN-TEXT
+    renderings of the located section (before and after the
+    patch) -- intended only for the diff display. The actual
+    splice that accept-fix-text writes back uses the JSON cached
+    here on council_debates.fix_proposals[i] (alongside the legacy
+    text fields kept for backward compatibility).
+
+    Idempotent: the cached suggested_section_json + suggested_text
+    are returned on a second call without re-running Sonnet.
+
+    Errors:
+      404 -- debate row not found
+      422 -- no fix proposal for the finding_id / empty patch
+             instruction
+      409 -- no current draft / no content_json / section name
+             could not be located in the current content_json /
+             Sonnet shape violation
+      502 -- Sonnet call failed
+
+    A 409 carries a structured detail with section_name + hint so
+    the frontend can show an editor deep-link instead of silently
+    falling back to a full-document overwrite (the June 27 2026
+    bug that prompted this rewrite)."""
+    from sqlalchemy import text as _text
+    from database import (
+        AsyncSessionLocal,  # type: ignore[attr-defined]
+    )
+    from tools.editor_drafts import get_current_draft_by_type
+
+    finding_id = body.get("finding_id")
+    if finding_id is None:
+        raise HTTPException(
+            status_code=422, detail="finding_id is required")
+    finding_id = int(finding_id)
+
+    if AsyncSessionLocal is None:
+        raise HTTPException(
+            status_code=503, detail="Database unavailable.")
+
+    async with AsyncSessionLocal() as s:
+        r = await s.execute(_text(
+            "SELECT document_type, fix_proposals, source_draft_id "
+            "FROM council_debates WHERE id = :id"),
+            {"id": debate_id})
+        row = r.fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail="Debate row not found.")
+        document_type = row[0] or ""
+        fix_proposals = row[1] or {}
+        _ = row[2]
+
+    proposal, proposal_key = _lookup_fix_proposal(
+        fix_proposals, finding_id)
+    if proposal is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No fix proposal for that finding_id. Generate one "
+                "first via /api/v1/documents/propose-fix."))
+    patch_instruction = str(
+        proposal.get("patch_instruction") or "").strip()
+    section_name = proposal.get("section_name")
+    if not patch_instruction:
+        raise HTTPException(
+            status_code=422,
+            detail="patch_instruction is empty on this proposal.")
+    # June 27 2026 -- multi-round refinement. The frontend
+    # RefinementModal iteratively rewrites the proposal text via
+    # cheap /apply-fix/refine calls, then sends the final working
+    # text here as refined_proposal_text. When present + non-empty,
+    # it OVERRIDES the stored patch_instruction for THIS preview
+    # only -- the council's stored proposal is unchanged. The user
+    # still sees the mandatory diff preview before any write, and
+    # accept-fix-text writes the cached suggested_section_json
+    # against the current draft. This is the ONLY entry point for
+    # the refined patch; apply-fix rejects the field outright.
+    refined_raw = body.get("refined_proposal_text")
+    refined_proposal_text: str | None = None
+    if isinstance(refined_raw, str) and refined_raw.strip():
+        refined_proposal_text = refined_raw.strip()
+        patch_instruction = refined_proposal_text
+    log.info(
+        "propose_fix_text_invoked",
+        debate_id=debate_id,
+        finding_id=finding_id,
+        section_name=section_name,
+        document_type=document_type,
+        refined=bool(refined_proposal_text),
+        refinement_chars=(
+            len(refined_proposal_text)
+            if refined_proposal_text else 0))
+    if not section_name:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "Fix proposal has no section_name -- inline "
+                    "preview requires a specific section to splice. "
+                    "Edit the document in the editor directly."),
+                "hint": (
+                    "Open the document in the editor and apply the "
+                    "change manually."),
+                "section_name": None,
+                "document_type": document_type,
+            })
+
+    # Idempotency cache -- if we previously computed the preview
+    # for this proposal, return it verbatim (no Sonnet call).
+    cached_suggested = proposal.get("suggested_text")
+    cached_original = proposal.get("original_text")
+    cached_suggested_json = proposal.get("suggested_section_json")
+    # June 27 2026 -- refinement bypass. The idempotency cache
+    # holds the preview computed against the ORIGINAL stored
+    # patch_instruction. A refinement round changed the input, so
+    # the cached preview no longer matches -- recompute and DO NOT
+    # write through to the cache (the next non-refined call should
+    # still get the original preview back unless explicitly
+    # invalidated upstream).
+    if (cached_suggested and cached_original
+            and cached_suggested_json is not None
+            and refined_proposal_text is None):
+        log.info(
+            "propose_fix_text_cache_hit",
+            debate_id=debate_id, finding_id=finding_id)
+        return {
+            "finding_id": finding_id,
+            "section_name": section_name,
+            "original_text": cached_original,
+            "suggested_text": cached_suggested,
+            "proposal_id": debate_id,
+            "cached": True,
+            "document_type": document_type,
+        }
+
+    # Fetch the current draft (team-shared per PR #410).
+    draft = await get_current_draft_by_type(document_type)
+    if draft is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "No current draft for this document type. "
+                    "Generate the document before previewing a "
+                    "fix."),
+                "hint": (
+                    "Generate the document from the Documents "
+                    "panel, then try Preview Inline Edit again."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    content_json = draft.get("content_json")
+    if not isinstance(content_json, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "Current draft has no content_json to patch."),
+                "hint": (
+                    "Open the document in the editor and apply "
+                    "the change directly."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+
+    # Locate the section in content_json. June 27 2026 -- this
+    # replaces the previous content_text-based extractor that, when
+    # the section couldn't be located, fell back to the WHOLE
+    # document and silently overwrote everything with only the
+    # patched section. The new helper returns None instead; we 409
+    # with an actionable hint.
+    located = _locate_section_in_content(
+        document_type, content_json, str(section_name))
+    if located is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    f"Section '{section_name}' could not be "
+                    "located in the current draft. Section "
+                    "heading may have drifted from the finding's "
+                    "section name."),
+                "hint": (
+                    "Open the document in the editor and apply "
+                    "the change directly."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    anchor, original_section_json = located
+    original_text = _render_section_as_text(
+        document_type, original_section_json)
+
+    # Sonnet patch -- under test, deterministic stub appends the
+    # instruction so tests can assert the splice happened without
+    # round-tripping a live LLM.
+    if ENVIRONMENT == "test":
+        suggested_section_json = (
+            _apply_test_stub_patch(
+                document_type, original_section_json,
+                patch_instruction))
+    else:
+        try:
+            suggested_section_json = await _patch_section_via_sonnet(
+                document_type, original_section_json,
+                str(section_name), patch_instruction)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "propose_fix_text_call_failed",
+                debate_id=debate_id, finding_id=finding_id,
+                error=str(exc))
+            raise HTTPException(
+                status_code=502,
+                detail=f"Sonnet call failed: {exc}")
+    if suggested_section_json is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "AI could not produce a valid patch for "
+                    f"section '{section_name}'."),
+                "hint": (
+                    "Open the document in the editor and apply "
+                    "the change directly."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    suggested_text = _render_section_as_text(
+        document_type, suggested_section_json)
+
+    # Cache the JSON + text on council_debates.fix_proposals[i].
+    # The text fields stay populated for backward compatibility
+    # with any frontend code still reading them; the JSON fields
+    # are the source of truth for the splice that accept-fix-text
+    # performs.
+    try:
+        if (proposal_key is not None
+                and AsyncSessionLocal is not None):
+            updated = (
+                fix_proposals.copy()
+                if isinstance(fix_proposals, dict)
+                else list(fix_proposals))
+            cached_payload = {
+                **proposal,
+                "suggested_text": suggested_text,
+                "original_text": original_text,
+                "suggested_section_json": suggested_section_json,
+                "original_section_json": original_section_json,
+                "section_name": section_name,
+            }
+            if isinstance(updated, dict):
+                updated[str(proposal_key)] = cached_payload
+            else:
+                updated[int(proposal_key)] = cached_payload
+            async with AsyncSessionLocal() as s2:
+                await s2.execute(_text(
+                    "UPDATE council_debates "
+                    "SET fix_proposals = CAST(:p AS JSONB) "
+                    "WHERE id = :id"),
+                    {"p": json.dumps(updated), "id": debate_id})
+                await s2.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "propose_fix_text_cache_write_failed",
+            debate_id=debate_id, finding_id=finding_id,
+            error=str(exc))
+
+    return {
+        "finding_id": finding_id,
+        "section_name": section_name,
+        "original_text": original_text,
+        "suggested_text": suggested_text,
+        "proposal_id": debate_id,
+        "cached": False,
+        "document_type": document_type,
+    }
+
+
+def _lookup_fix_proposal(
+    fix_proposals: Any, finding_id: int,
+) -> tuple[dict | None, str | int | None]:
+    """Two-shape lookup: fix_proposals may be a dict keyed by
+    str(finding_id) or a list of FixProposal dicts. Returns
+    (proposal, key) on a successful match, (None, None) otherwise.
+    Used by propose-fix-text + accept-fix-text."""
+    if isinstance(fix_proposals, dict):
+        key = str(finding_id)
+        if key in fix_proposals:
+            p = fix_proposals[key]
+            if isinstance(p, dict):
+                return p, key
+    elif isinstance(fix_proposals, list):
+        for p in fix_proposals:
+            if isinstance(p, dict) and (
+                    int(p.get("finding_id", -1)) == finding_id):
+                return p, fix_proposals.index(p)
+    return None, None
+
+
+def _apply_test_stub_patch(
+    document_type: str, section_json: list | dict,
+    patch_instruction: str,
+) -> list | dict:
+    """In ENVIRONMENT=test, the Sonnet call is replaced with a
+    deterministic stub so tests can assert the splice happened
+    end-to-end without round-tripping a live LLM. The stub
+    appends '[Inline edit applied: <instruction>]' to the section
+    in a shape-preserving way."""
+    marker = f"[Inline edit applied: {patch_instruction}]"
+    if document_type == "presentation_deck":
+        if not isinstance(section_json, dict):
+            return section_json
+        # Append a text element carrying the marker.
+        elements = list(section_json.get("elements") or [])
+        elements.append({
+            "id": f"s{section_json.get('id', 0)}_test_stub",
+            "type": "text",
+            "x": 60, "y": 600, "width": 840, "height": 40,
+            "content": marker,
+            "fontSize": 14, "fontWeight": "normal",
+            "fontStyle": "italic", "color": "#666666",
+            "locked": False,
+        })
+        return {**section_json, "elements": elements}
+    # TipTap: append a paragraph node carrying the marker.
+    if not isinstance(section_json, list):
+        return section_json
+    return list(section_json) + [{
+        "type": "paragraph",
+        "content": [{"type": "text", "text": marker}],
+    }]
+
+
+@app.post(
+    "/api/v1/council/debates/{debate_id}/accept-fix-text")
+@limiter.limit("20/minute")
+async def post_accept_fix_text(
+    debate_id: int, request: Request, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Splice the previously-proposed section patch back into the
+    current draft's content_json + mark the council_debates row
+    applied.
+
+    Body: {finding_id: int}
+
+    June 27 2026 -- behavioural change. Previously the frontend
+    PATCHed /drafts/{id} with content_text and this endpoint just
+    flipped fix_applied. That path could overwrite the entire
+    document when the section couldn't be located cleanly. The
+    write-back has moved server-side: this endpoint reads the
+    cached suggested_section_json (computed by propose-fix-text),
+    re-locates the section in the CURRENT content_json (so a
+    manual edit between propose and accept is respected), splices,
+    and writes via update_draft. The frontend no longer touches
+    content_text directly for this flow.
+
+    The optional new_draft_id body field is accepted but ignored
+    in this revision -- the new id comes from the splice itself.
+
+    Returns: {ok, new_draft_id, applied_at, section_name,
+              document_type}
+
+    Errors:
+      404 -- debate row not found
+      422 -- no fix proposal for finding_id
+      409 -- proposal hasn't been previewed yet (no cached
+             suggested_section_json) / no current draft / section
+             could not be re-located in current content_json"""
+    from sqlalchemy import text as _text
+    from database import (
+        AsyncSessionLocal,  # type: ignore[attr-defined]
+    )
+    from tools.editor_drafts import (
+        get_current_draft_by_type, update_draft,
+    )
+
+    finding_id = body.get("finding_id")
+    if finding_id is None:
+        raise HTTPException(
+            status_code=422, detail="finding_id is required")
+    finding_id = int(finding_id)
+
+    if AsyncSessionLocal is None:
+        raise HTTPException(
+            status_code=503, detail="Database unavailable.")
+
+    # Lookup the debate row + the cached suggested section JSON.
+    async with AsyncSessionLocal() as s_lookup:
+        r = await s_lookup.execute(_text(
+            "SELECT document_type, fix_proposals "
+            "FROM council_debates WHERE id = :id"),
+            {"id": debate_id})
+        row = r.fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404, detail="Debate row not found.")
+        document_type = row[0] or ""
+        fix_proposals = row[1] or {}
+    proposal, _ = _lookup_fix_proposal(fix_proposals, finding_id)
+    if proposal is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No fix proposal for that finding_id. Generate a "
+                "preview via /propose-fix-text first."))
+    suggested_section_json = proposal.get(
+        "suggested_section_json")
+    section_name = proposal.get("section_name")
+    if (suggested_section_json is None
+            or not isinstance(suggested_section_json,
+                              (list, dict))):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "No cached preview for this fix. Run "
+                    "Preview Inline Edit first to generate one."),
+                "hint": (
+                    "Click 'Preview Inline Edit' to generate the "
+                    "patch, then 'Accept' to apply it."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+
+    # Splice into the CURRENT draft's content_json. Re-locating
+    # against the current state means manual edits between propose
+    # and accept don't surprise us -- the section is always written
+    # at its current position, not the position cached at preview
+    # time.
+    draft = await get_current_draft_by_type(document_type)
+    if draft is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "No current draft to write the patch to."),
+                "hint": (
+                    "Re-generate the document and retry."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    content_json = draft.get("content_json")
+    if not isinstance(content_json, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    "Current draft has no content_json to splice "
+                    "into."),
+                "hint": (
+                    "Open the document in the editor and apply "
+                    "the change directly."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    located = _locate_section_in_content(
+        document_type, content_json, str(section_name))
+    if located is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    f"Section '{section_name}' was edited in the "
+                    "draft between preview and accept -- the "
+                    "heading no longer matches. Re-preview to "
+                    "refresh the patch."),
+                "hint": (
+                    "Click 'Preview Inline Edit' again to regen "
+                    "the patch against the current draft state."),
+                "section_name": section_name,
+                "document_type": document_type,
+            })
+    anchor, _orig = located
+    new_content_json = _splice_section_into_content(
+        document_type, content_json, anchor,
+        suggested_section_json)
+    if document_type == "presentation_deck":
+        new_text = _derive_content_text_from_deck(new_content_json)
+    else:
+        new_text = _derive_content_text_from_tiptap(
+            new_content_json)
+
+    ok = await update_draft(
+        int(draft["id"]), new_content_json, new_text)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Patch was generated but the draft write failed. "
+                "Reload and retry."))
+
+    try:
+        async with AsyncSessionLocal() as s:
+            await s.execute(_text(
+                "UPDATE council_debates SET "
+                "fix_applied = TRUE, "
+                "fix_applied_at = NOW(), "
+                "new_draft_id = COALESCE(:nd, new_draft_id) "
+                "WHERE id = :id"),
+                {"nd": int(draft["id"]), "id": debate_id})
+            await s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "accept_fix_text_mark_failed",
+            debate_id=debate_id, finding_id=int(finding_id),
+            error=str(exc))
+        # Splice was already written successfully -- don't unwind
+        # it on a debate-marker failure. Log + continue.
+
+    log.info(
+        "accept_fix_text_spliced",
+        debate_id=debate_id, finding_id=int(finding_id),
+        document_type=document_type,
+        section_name=section_name,
+        draft_id=int(draft["id"]))
+
+    from datetime import datetime as _dt, timezone as _tz
+    return {
+        "ok": True,
+        "new_draft_id": int(draft["id"]),
+        "applied_at": _dt.now(_tz.utc).isoformat(),
+        "section_name": section_name,
+        "document_type": document_type,
+    }
+
+
+# ── Concern 7l-ii: re-run critic on a specific draft ──────────
+
+@app.post("/api/v1/documents/rerun-critic")
+@limiter.limit("10/minute")
+async def post_rerun_critic_for_draft(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7l-ii. Triggers a fresh academic review (which
+    includes the critic) scoped to a specific draft. The new
+    council_debates row gets parent_debate_id pointing at the
+    most recent debate for the same document_type, building the
+    iteration chain.
+
+    This is the cheapest re-run path: it doesn't regen the
+    document, it just re-reviews the existing content_text. Use
+    apply-fix to actually patch + regen.
+
+    Body: {
+      document_type: <type>,
+      source_draft_id: <int -- the draft to review>,
+      parent_debate_id: <int | null -- the prior round's id>
+    }
+
+    Returns the SSE URL the frontend should hit. The frontend
+    then opens an EventSource on the regular academic-review
+    endpoint with a query param that pins the source draft.
+
+    NOTE: This is currently a stub that returns the URL the
+    frontend should hit. The actual draft-pinning + parent
+    chaining is wired by the SSE handler reading these query
+    params; the academic-review endpoint already takes
+    document_type, so this stub returns the right URL with the
+    document_type + source_draft_id + parent_debate_id encoded.
+    """
+    document_type = str(body.get("document_type") or "")
+    source_draft_id = body.get("source_draft_id")
+    parent_debate_id = body.get("parent_debate_id")
+    if document_type and document_type not in {
+            "executive_brief", "analytical_appendix",
+            "presentation_deck", "presentation_script"}:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be one of the four "
+                "deliverable types or omitted"))
+    qp = []
+    if document_type:
+        qp.append(f"document_type={document_type}")
+    if source_draft_id is not None:
+        qp.append(f"source_draft_id={int(source_draft_id)}")
+    if parent_debate_id is not None:
+        qp.append(f"parent_debate_id={int(parent_debate_id)}")
+    qs = ("?" + "&".join(qp)) if qp else ""
+    return {
+        "ok": True,
+        "sse_url": f"/api/council/academic-review{qs}",
+    }
 
 
 @app.post("/api/v1/export/executive-brief")
@@ -9761,6 +17480,93 @@ async def export_executive_brief(
     return _start_generation_job("executive_brief", session, request)
 
 
+# ── Executive brief tone rules (May 30 2026) ───────────────────────────────
+# The brief addresses the rubric trap: the platform executes, the
+# judgment is human. Every section is generated with these rules
+# threaded into the agent prompt so the prose never says "the
+# platform found X" — it says "our analysis shows X". The platform
+# is cited as source of DATA, never as source of CONCLUSIONS.
+_BRIEF_NUMERIC_GROUNDING = (
+    "\n\nNUMERIC GROUNDING (CRITICAL):\n"
+    "  - All numeric values in your response must come exactly from the "
+    "data context provided in this section. Do not estimate, interpolate, "
+    "round beyond two decimal places, or substitute figures from prior "
+    "knowledge.\n"
+    "  - Sharpe ratios, max drawdowns, CAGR figures, OOS Sharpe values, "
+    "and correlation coefficients MUST be quoted from the data block "
+    "verbatim or else replaced with [DATA PENDING].\n"
+    "  - If a value is not in the data context, write [DATA PENDING] "
+    "rather than inventing a number.\n"
+    "  - Numeric accuracy is verified against the source cache after "
+    "generation -- a Sharpe attributed to the wrong strategy or a "
+    "drawdown that disagrees with the cache flags in the audit panel."
+)
+
+_BRIEF_TONE_RULES_BASE = (
+    "\n\nTONE AND LANGUAGE RULES (non-negotiable):\n"
+    "  - Never write 'the platform found' or 'the AI council "
+    "determined'. Always write 'our analysis shows', 'we interpret', "
+    "or 'we conclude'.\n"
+    "  - Cite the platform as the source of DATA, never as the source "
+    "of conclusions. Conclusions are ours.\n"
+    "  - Plain financial English. No technical platform language.\n"
+    "  - No data hashes in the body text — those belong in the "
+    "appendix.\n"
+    "  - No em dashes (project-wide prose rule).\n"
+    "\nHEADING DISCIPLINE (non-negotiable):\n"
+    "  - Emit ONLY ONE heading per section: the H2 in the form "
+    "'## Section N: Title' (e.g. '## Section 1: Executive Summary'). "
+    "Do NOT also emit a numbered H1 like '# 1. Executive Summary' "
+    "above it. The DOCX assembler builds the H1 chapter heading "
+    "downstream from the section key; duplicate model-emitted "
+    "headings render as 'Executive Summary' followed by 'Section 1: "
+    "Executive Summary' in the final document and read as a defect.\n"
+    "  - Wrong: '# 1. Executive Summary\\n## Section 1: Executive Summary'.\n"
+    "  - Right: '## Section 1: Executive Summary'.\n"
+    "\nCITATION DISCIPLINE -- Benjamin vs Benjamini (non-negotiable):\n"
+    "Two different papers, two different claims; never swap or "
+    "conflate them in-text or in the reference list.\n"
+    "  - Benjamini & Hochberg (1995) -- the FDR (false discovery "
+    "rate) CORRECTION METHODOLOGY. Cite this whenever you reference "
+    "the q-value control, the BH procedure, or the multiple-"
+    "hypothesis correction technique. Reference list entry: "
+    "'Benjamini, Y., & Hochberg, Y. (1995). Controlling the false "
+    "discovery rate: A practical and powerful approach to multiple "
+    "testing. Journal of the Royal Statistical Society: Series B, "
+    "57(1), 289-300.'\n"
+    "  - Benjamin et al. (2018) -- the p < 0.005 THRESHOLD "
+    "PROPOSAL (Redefine Statistical Significance, Nature Human "
+    "Behaviour). Cite this whenever you reference the 0.005 cutoff "
+    "itself as the bar for declaring a finding significant. "
+    "Reference list entry: 'Benjamin, D. J., et al. (2018). "
+    "Redefine statistical significance. Nature Human Behaviour, "
+    "2(1), 6-10.'\n"
+    "  - Wrong: 'no strategy clears p < 0.005 under Benjamin et "
+    "al. (2018) FDR correction' (conflates the methodology with "
+    "the threshold paper).\n"
+    "  - Right: 'no strategy clears p < 0.005 (Benjamin et al., "
+    "2018) under Benjamini-Hochberg FDR correction (Benjamini & "
+    "Hochberg, 1995)' -- two citations, each on the claim they "
+    "actually support.\n"
+    "\nSENTENCE COMPLETION (HARD CONSTRAINT):\n"
+    "You must complete every sentence you begin. If you are running "
+    "long, end the current paragraph cleanly rather than starting a "
+    "new one. NEVER end mid-sentence or mid-word. The section must "
+    "end with a complete sentence followed by terminating punctuation "
+    "(period, question mark, or exclamation point). A truncated "
+    "section will be flagged by the post-generation audit and "
+    "blocks publication."
+)
+
+# The composite tone-rules string actually threaded into every
+# section spec. Composes the base tone rules with the numeric-
+# grounding directive so each section automatically picks up both
+# contracts -- the grounding is not optional and propagating it via
+# the same constant means a future section addition can never forget
+# to apply it.
+_BRIEF_TONE_RULES = _BRIEF_TONE_RULES_BASE + _BRIEF_NUMERIC_GROUNDING
+
+
 # Four-component recommendation structure required on every recommendation
 # in the executive brief. Mirrors the CFA Institute disclosure spirit:
 # full disclosure, balanced presentation, material limitations stated.
@@ -9779,7 +17585,8 @@ _BRIEF_RECOMMENDATION_STRUCTURE = (
     "the regime sample size, say so explicitly.\n"
     "4. THE LIMITATIONS: what the model cannot see. Always include all "
     "four of: the three-asset universe constraint; the post-2022 sample "
-    "size (40 months, about 14% of the full window); transaction costs "
+    "size ({{OOS_WINDOW_MONTHS}} months, about "
+    "{{OOS_WINDOW_PCT_OF_STUDY}}% of the full window); transaction costs "
     "not yet applied; and the absence of formal statistical significance "
     "(economic significance only).\n"
     "This structure meets the spirit of CFA Institute disclosure "
@@ -9792,16 +17599,34 @@ async def _generate_brief_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
     """
-    Generates the five-page executive brief. Returns (file bytes,
-    filename, media type, editor draft id). Raises on failure — the job
-    wrapper records it.
+    Generates the executive brief. Returns (file bytes, filename, media
+    type, editor draft id). Raises on failure -- the job wrapper records it.
 
-    A title page, then Executive Summary, Methodology Overview, four Key
-    Findings (with the regime-conditional, summary-statistics, drawdown
-    and factor-loadings tables embedded), Limitations and Risks, and
-    Final Recommendations. The Executive Summary and Final
-    Recommendations sections carry the four-component recommendation
-    structure (_BRIEF_RECOMMENDATION_STRUCTURE).
+    Rewritten June 18 2026 to the FNA 670 rubric's six required sections,
+    in rubric order. The earlier (June 6) structure led with "The Answer"
+    + a "Five Human Decisions" section + a "Part II preview"; rubric
+    review flagged the latter two as non-rubric content ("next steps
+    rather than final recommendations") and the section ordering as
+    out-of-spec. The six sections below match the rubric exactly:
+
+      1. EXECUTIVE SUMMARY      -- verdict + headline figures
+      2. METHODOLOGY OVERVIEW   -- HMM + OOS window + validation layers
+      3. KEY FINDINGS           -- three-strategy comparison + honest 2-of-9
+      4. LIMITATIONS AND RISKS  -- four mandatory limitations (no Part II)
+      5. FINAL RECOMMENDATIONS  -- investment conclusions drawn from the
+         OOS Sharpe + diversification evidence (NOT a point-in-time
+         portfolio position). Uses the cached-regime fallback assembled
+         in academic_export so the section is data-independent and never
+         renders [DATA PENDING] under a degraded live build.
+      6. VISUALS                -- captioned roster of the platform's
+         chart surfaces (cumulative return, implied asset allocation,
+         efficient frontier) with a one-paragraph interpretation each.
+
+    Target length: 1,800-2,200 words. Every section is generated with
+    _BRIEF_TONE_RULES threaded into the agent prompt so the prose never
+    says "the platform found X" -- it says "our analysis shows X". The
+    platform is cited as the source of DATA, conclusions are framed
+    as ours.
     """
     import asyncio
     from datetime import date
@@ -9809,99 +17634,552 @@ async def _generate_brief_document(
     from tools.academic_docx import build_executive_brief
     from tools.academic_export import DATA_PENDING, gather_document_data
 
+    # June 23 2026 -- the brief is the narrative anchor for all
+    # downstream documents (deck, appendix, script). Their story
+    # plans were grounded against the prior brief; once the brief
+    # is regenerated those plans are stale and would conflict with
+    # the new central argument. The story_plans table has no user
+    # scope (one row per data_hash + document_type, shared across
+    # the team), so the clear is global -- correct semantic: when
+    # the brief changes, the SHARED downstream plans are stale for
+    # everyone. First-gen is a no-op since those rows do not exist.
+    # Fail-open: the clear logs a warning but does NOT block brief
+    # generation if the DB delete fails.
     try:
-        data = await gather_document_data()
-        avail = data["available"]
-        pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
-                   "dashboard once, then regenerate this brief.")
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as _db:
+                await _db.execute(text(
+                    "DELETE FROM story_plans WHERE document_type IN ("
+                    "'presentation_deck', "
+                    "'analytical_appendix', "
+                    "'presentation_script')"))
+                await _db.commit()
+            log.info(
+                "Cleared downstream story plans on brief regeneration")
+    except Exception as _exc:
+        log.warning(
+            "Could not clear downstream story plans: %s", _exc)
 
+    try:
+        # June 27 2026 (PR 1 v3, LEAK 1 closer) -- compute the
+        # effective data_hash inline so gather_document_data can
+        # route the strategy_results_cache read through the hash-
+        # aware path. Under freeze, a miss raises
+        # StrategyCacheMissingForHashError which the outer except
+        # translates to a 500.
+        from tools.audit_assembler import (
+            current_data_hash as _brief_current_hash,
+        )
+        from tools.submission_freeze import (
+            get_effective_data_hash as _brief_eff_hash,
+        )
+        _brief_live = await _brief_current_hash()
+        _brief_data_hash = await _brief_eff_hash(_brief_live)
+        data = await gather_document_data(
+            data_hash=_brief_data_hash or None)
+        avail = data["available"]
+        pending = (f"{DATA_PENDING} -- analytics caches not warm. Load the "
+                   "dashboard once, then regenerate this brief.")
+        live = data.get("live_recommendation") or {}
+
+        # FNA 670 rubric, six sections in rubric order. Each spec
+        # threads _BRIEF_TONE_RULES so the prose stays in the
+        # appropriate first-person-plural analytical voice.
         specs = [
-            {"key": "exec_summary", "available": avail, "pending": pending,
-             "agent_id": "brief_exec_summary",
+            {"key": "executive_summary", "available": avail,
+             "pending": pending,
+             "agent_id": "brief_executive_summary",
              "task": (
-                 "Write the Executive Summary of an investment brief — about "
-                 "220 words, for a senior investment audience. State the "
-                 "central question (does diversification across equities and "
-                 "fixed income improve risk-adjusted performance, and does "
-                 "that answer change after 2022), the key finding (the 2022 "
-                 "equity-bond correlation break), the best-performing "
-                 "strategies with their metrics, and the strategic "
-                 "recommendation."
-                 + _BRIEF_RECOMMENDATION_STRUCTURE),
+                 "Write Section 1: EXECUTIVE SUMMARY. Approximately 250 "
+                 "words. The senior investment audience reads this page "
+                 "first and may stop here, so it MUST stand alone.\n\n"
+                 "Lead with the verdict in the first sentence. Use this "
+                 "exact opener: 'A regime-conditional diversified blend "
+                 "outperforms a 100% equity allocation on a risk-"
+                 "adjusted basis over the post-2022 out-of-sample "
+                 "window.'\n\n"
+                 "Immediately follow with the headline figures in plain "
+                 "language (no preamble): OOS Sharpe {{OOS_SHARPE_BLEND}} "
+                 "(blend) vs {{OOS_SHARPE_BENCHMARK}} (benchmark); maximum "
+                 "drawdown {{REGIME_SWITCHING_MAX_DD}} (blend) vs "
+                 "{{BENCHMARK_MAX_DD}} (benchmark); the regime-conditional "
+                 "construction held the bond sleeve through the 2022 "
+                 "equity drawdown.\n\n"
+                 "Close with one short paragraph naming the practical "
+                 "context: the pre/post-2022 correlation break "
+                 "(approximately {{PRE_2022_EQ_IG_CORR}} -> "
+                 "{{POST_2022_EQ_IG_CORR}}) is the environment the "
+                 "hypothesis addresses, and the analysis below is built "
+                 "on that scope. Do not introduce methodology details or "
+                 "the recommendation here -- those are Sections 2 and 5."
+                 "\n\nIMPORTANT TOKEN HYGIENE: do NOT emit lowercase "
+                 "placeholder tokens like {{play_by_play_events}} or "
+                 "{{play_by_play_add_value}}. These are NOT in the "
+                 "substitution table and will render as literal "
+                 "{{}} text in the exported brief. The context dict "
+                 "field names are NOT substitution tokens -- they're "
+                 "the source data the platform passes you. The only "
+                 "tokens you may emit are the UPPERCASE ones documented "
+                 "in the placeholder guide above (e.g. "
+                 "{{OOS_SHARPE_BLEND}}, {{REGIME_SWITCHING_MAX_DD}}). "
+                 "When you want to reference scorecard / play-by-play "
+                 "evidence, name it descriptively in prose (e.g. "
+                 "'the play-by-play scorecard') rather than emitting a "
+                 "token."
+                 + _BRIEF_TONE_RULES),
              "context": {"summary_statistics": data["summary_statistics"],
-                         "regime_conditional": data["regime_conditional"],
-                         "study_period": data["study_period"]}},
+                         "drawdown_comparison": data["drawdown_comparison"],
+                         "study_period": data["study_period"],
+                         "correlation_pre_post": {
+                             "pre_2022": data["rolling_correlation"].get(
+                                 "pre_2022"),
+                             "post_2022": data["rolling_correlation"].get(
+                                 "post_2022")}}},
             {"key": "methodology", "available": True,
              "agent_id": "brief_methodology",
+             # June 21 2026 -- bumped from the default 1500.
+             # Methodology cites four foundational papers (Hamilton
+             # 1989, Carhart 1997, Ang and Bekaert 2002, Markowitz
+             # 1952); four full APA References entries + 350 words
+             # of prose + the placeholder guide reliably push past
+             # 1500. PR #361's retry would still catch it but
+             # giving the section headroom up front avoids the
+             # retry cost.
+             "max_tokens": 2500,
              "task": (
-                 "Write the Methodology Overview — about 280 words. Cover the "
-                 "data sources and study period, the portfolio constraints "
-                 "(long-only, fully invested, no cash), the ten strategies "
-                 "(static versus dynamic), the Carhart four-factor model, the "
-                 "benchmark definition (100% S&P 500), and the key "
-                 "assumptions."),
-             "context": {"study_period": data["study_period"],
-                         "strategy_metadata": data.get("strategy_metadata"),
-                         "risk_free_rate": data["risk_free_rate"]}},
-            {"key": "finding_1", "available": avail, "pending": pending,
-             "agent_id": "brief_finding_2022",
+                 "Write Section 2: METHODOLOGY OVERVIEW. Approximately "
+                 "350 words across TWO PARAGRAPHS MAXIMUM (allowing a "
+                 "third short rebalancing-disclosure paragraph if "
+                 "needed). Brevity is the contract -- full methodology "
+                 "lives in the Analytical Appendix.\n\n"
+                 "First paragraph: name the three-asset universe "
+                 "(equities, investment-grade bonds, high-yield bonds) "
+                 "and note explicitly that this is a PROJECT SCOPE "
+                 "BOUNDARY, not an architectural limit -- the platform "
+                 "handles any return series. State the HMM regime "
+                 "detection mechanism in one sentence, citing Hamilton "
+                 "(1989) as the foundational reference for the Hidden "
+                 "Markov Model approach to financial time series. State "
+                 "the OOS window design: the test period begins AFTER "
+                 "the 2022 correlation break so the evidence reflects "
+                 "the environment the hypothesis addresses.\n\n"
+                 "Disclose the rebalancing frequency explicitly: the "
+                 "platform evaluates the HMM regime monthly and "
+                 "rebalances when any single strategy's blend weight "
+                 "crosses {{REBALANCE_THRESHOLD_PP}} percentage "
+                 "points. This deviates from a strict quarterly "
+                 "cadence; justify the deviation: monthly evaluation "
+                 "matches the cadence at which the HMM produces "
+                 "regime updates, and the "
+                 "{{REBALANCE_THRESHOLD_PP}} percentage points gate "
+                 "filters noise so the portfolio does not churn on "
+                 "marginal signal changes.\n\n"
+                 "Second paragraph: name the validation layers in one "
+                 "sentence each -- three-layer statistical audit, the "
+                 "Carhart four-factor model (Carhart, 1997), the "
+                 "Benjamini-Hochberg FDR correction at q < "
+                 "{{BH_SIGNIFICANCE_THRESHOLD}}, the "
+                 "play-by-play scorecard. Cite Ang and Bekaert (2002) "
+                 "as the direct academic precedent for regime-"
+                 "conditional asset allocation and Markowitz (1952) "
+                 "as the mean-variance basis for the static blend "
+                 "({{CLASSIC_6040_WEIGHT_EQUITY}} equity / "
+                 "{{CLASSIC_6040_WEIGHT_BOND}} bonds). "
+                 "Close by directing the reader to the Carhart factor-"
+                 "loading table (embedded below Section 2) and the "
+                 "Analytical Appendix for the per-strategy detail.\n\n"
+                 "IMPORTANT TOKEN HYGIENE: when you reference the "
+                 "Classic 60/40 static-blend weights, USE the "
+                 "canonical uppercase token names "
+                 "{{CLASSIC_6040_WEIGHT_EQUITY}} and "
+                 "{{CLASSIC_6040_WEIGHT_BOND}}. Do NOT invent "
+                 "lowercase variants like {{static_equity_weight_pct}} "
+                 "or {{static_bond_weight_pct}} -- those names are "
+                 "not in the substitution table and will render "
+                 "literally in the exported brief."
+                 + _BRIEF_TONE_RULES),
+             "context": {"study_period": data["study_period"]}},
+            {"key": "key_findings", "available": avail, "pending": pending,
+             "agent_id": "brief_key_findings",
+             # June 21 2026 -- bumped from the default 1500. Section
+             # 3 targets 550 words of dense prose with the locked
+             # academic figures + inline citations + [[VERIFY]]
+             # markers; production runs were truncating mid-sentence
+             # at 1500 tokens. 2500 gives comfortable headroom.
+             "max_tokens": 2500,
              "task": (
-                 "Write Finding 1: The 2022 Correlation Break — about 220 "
-                 "words. Interpret the pre- and post-2022 equity-bond "
-                 "correlation and the regime-conditional Sharpe ratios. "
-                 "Explain why the diversification benefit broke down and what "
-                 "it means for a static 60/40 allocation."),
-             "context": {"regime_conditional": data["regime_conditional"],
-                         "correlation_pre_post": {
-                             "pre_2022": data["rolling_correlation"].get("pre_2022"),
-                             "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            {"key": "finding_2", "available": avail, "pending": pending,
-             "agent_id": "brief_finding_static",
-             "task": (
-                 "Write Finding 2: Static Allocation Results — about 220 "
-                 "words. Using the summary statistics, identify the best "
-                 "static strategy and justify it, comparing it to the 100% "
-                 "equity benchmark."),
-             "context": {"summary_statistics": data["summary_statistics"]}},
-            {"key": "finding_3", "available": avail, "pending": pending,
-             "agent_id": "brief_finding_dynamic",
-             "task": (
-                 "Write Finding 3: Dynamic Allocation Results — about 220 "
-                 "words. Assess the dynamic strategies' performance and "
-                 "drawdown behaviour, and justify the rules-based logic."),
-             "context": {"regime_conditional": data["regime_conditional"],
+                 "Write Section 3: KEY FINDINGS AND INSIGHTS. Approximately "
+                 "550 words. Compare exactly THREE strategies: the 100% "
+                 "equity benchmark, the best static diversifier (pull the "
+                 "name from summary_statistics), and the dynamic regime-"
+                 "aware blend.\n\n"
+                 "Key figures to cite -- USE THE PLACEHOLDER TOKENS BELOW, "
+                 "not the raw numbers. The platform substitutes the locked "
+                 "academic values from the cache after generation:\n"
+                 "  - Drawdown {{BENCHMARK_MAX_DD}} (benchmark) vs "
+                 "{{REGIME_SWITCHING_MAX_DD}} (blend)\n"
+                 "  - OOS Sharpe {{OOS_SHARPE_BLEND}} (blend) vs "
+                 "{{OOS_SHARPE_BENCHMARK}} (benchmark)\n"
+                 "  - {{OOS_WINDOW_MONTHS}}-month post-2022 out-of-sample "
+                 "window\n\n"
+                 "IMPORTANT: The token {{OOS_SHARPE_IMPROVEMENT_PCT}} "
+                 "already resolves to a complete formatted string "
+                 "including the + prefix and % suffix (e.g. '+98%'). "
+                 "Do NOT append any additional % character or suffix "
+                 "after this token. Write it exactly as the token "
+                 "resolves.\n\n"
+                 "Reference the platform's cumulative return chart by "
+                 "name when you state the OOS Sharpe -- the chart is the "
+                 "visual evidence behind the headline number. Reference "
+                 "the implied asset allocation over time chart when you "
+                 "discuss how the blend held the bond sleeve through the "
+                 "2022 equity drawdown.\n\n"
+                 "CORRELATION REGIME -- when you describe the equity-IG "
+                 "correlation regime break, USE the tokens "
+                 "{{PRE_2022_EQ_IG_CORR}} (averaged pre-2022 12m rolling "
+                 "correlation) and {{POST_2022_EQ_IG_CORR}} (averaged "
+                 "post-2022) for the actual values. Do NOT write "
+                 "approximations like 'surges above +0.5' or 'crosses "
+                 "+0.5' as a visual descriptor -- those bare numerics "
+                 "are not platform-anchored constants and they trip the "
+                 "hard-lock. Example acceptable phrasing: 'the rolling "
+                 "correlation averaged {{PRE_2022_EQ_IG_CORR}} pre-2022 "
+                 "and inverted to {{POST_2022_EQ_IG_CORR}} in the "
+                 "post-2022 regime; the chart shows the structural "
+                 "break in early 2022.'\n\n"
+                 "Honest acknowledgement (one paragraph): the council "
+                 "added value in 2 of 9 named market events (the play-"
+                 "by-play scorecard). No strategy clears statistical "
+                 "significance at p < {{BH_SIGNIFICANCE_THRESHOLD}} "
+                 "under Benjamini-Hochberg FDR correction across the "
+                 "three-strategy submission set (BENCHMARK, "
+                 "CLASSIC_60_40, REGIME_SWITCHING). The multiple-"
+                 "testing penalty is materially smaller than a full "
+                 "ten-strategy survey would carry. The case rests on "
+                 "economic magnitude, NOT statistical certainty.\n\n"
+                 "The brief focuses on the three submission strategies "
+                 "(benchmark, static diversifier 60/40, dynamic blend) "
+                 "-- the appendix carries the same three-strategy "
+                 "table at higher detail. Numbers from the platform; "
+                 "conclusions "
+                 "framed as 'our analysis shows' / 'we conclude' / 'we "
+                 "interpret'."
+                 + _BRIEF_TONE_RULES),
+             "context": {"summary_statistics": data["summary_statistics"],
+                         "regime_conditional": data["regime_conditional"],
                          "drawdown_comparison": data["drawdown_comparison"]}},
-            {"key": "finding_4", "available": avail, "pending": pending,
-             "agent_id": "brief_finding_factor",
-             "task": (
-                 "Write Finding 4: Factor Analysis — about 220 words. "
-                 "Interpret the Carhart four-factor loadings: assess alpha "
-                 "generation and explain what the factor exposures reveal "
-                 "about each strategy's return drivers."),
-             "context": {"factor_loadings": data["factor_loadings"]}},
             {"key": "limitations", "available": True,
              "agent_id": "brief_limitations",
              "task": (
-                 "Write the Limitations and Risks section — about 160 words. "
-                 "Be honest, not defensive. Cover backtesting limitations, "
-                 "transaction-cost modelling, out-of-sample considerations, "
-                 "and the constraints of the data period."),
-             "context": {"study_period": data["study_period"]}},
-            {"key": "recommendations", "available": avail, "pending": pending,
-             "agent_id": "brief_recommendations",
+                 "Write Section 4: LIMITATIONS AND RISKS. Approximately "
+                 "300 words. Be honest. Four mandatory limitations, one "
+                 "short paragraph each.\n\n"
+                 "  - THREE-ASSET SCOPE: the universe is equities, IG "
+                 "bonds, HY bonds. State explicitly that this is a "
+                 "PROJECT scope boundary, not an architectural limit -- "
+                 "the platform's HMM and transition matrix work with "
+                 "any return series.\n\n"
+                 "  - SAMPLE SIZE: {{OOS_WINDOW_MONTHS}} months of "
+                 "post-2022 out-of-sample data is approximately "
+                 "{{OOS_WINDOW_PCT_OF_STUDY}}% of the full study window. "
+                 "Bootstrap confidence intervals on Sharpe ratios "
+                 "overlap substantially across the static set, which is "
+                 "WHY the regime-conditional construction is the right "
+                 "framing -- the selection mechanism comes from regime "
+                 "signals, not Sharpe rankings.\n\n"
+                 "  - TRANSACTION COSTS: the headline Sharpe figures are "
+                 "gross. The platform's Net of Switching Costs panel "
+                 "shows the blend stays above the benchmark across "
+                 "{{SENSITIVITY_COST_BPS_LOW}}/"
+                 "{{SENSITIVITY_COST_BPS_MID}}/"
+                 "{{SENSITIVITY_COST_BPS_HIGH}} bps cost assumptions; "
+                 "the post-cost margin compresses but does not invert.\n\n"
+                 "  - STATISTICAL SIGNIFICANCE: no strategy clears p < "
+                 "{{BH_SIGNIFICANCE_THRESHOLD}} under Benjamini-Hochberg "
+                 "FDR correction. The case "
+                 "is built on economic magnitude (drawdown reduction, "
+                 "Sharpe improvement) rather than statistical certainty.\n\n"
+                 "Close with a single sentence acknowledging the platform's "
+                 "audit subsystem (Performance Record + Net of Switching "
+                 "Costs + Implied Asset Allocation) as the standing "
+                 "validation surface a reader can navigate to verify any "
+                 "claim above. Do NOT add a 'next steps', 'future work', "
+                 "or 'Part II' paragraph -- the rubric explicitly excludes "
+                 "future-work content from the brief."
+                 + _BRIEF_TONE_RULES),
+             "context": {"summary_statistics": data["summary_statistics"]}},
+            {"key": "final_recommendations", "available": True,
+             "agent_id": "brief_final_recommendations",
              "task": (
-                 "Write the Final Recommendations section — about 320 words. "
-                 "Give a strategic allocation recommendation grounded in the "
-                 "results, with supporting evidence."
-                 + _BRIEF_RECOMMENDATION_STRUCTURE),
-             "context": {"regime_conditional": data["regime_conditional"],
-                         "summary_statistics": data["summary_statistics"]}},
+                 "Write Section 5: FINAL RECOMMENDATIONS. Approximately "
+                 "350 words. These are INVESTMENT CONCLUSIONS drawn from "
+                 "the analysis -- NOT next steps, NOT operational "
+                 "suggestions, NOT future research. The rubric is "
+                 "explicit on this distinction.\n\n"
+                 "Lead with the headline conclusion sentence in this "
+                 "shape -- USE THE PLACEHOLDER TOKENS, not raw numbers: "
+                 "'Given an out-of-sample Sharpe of {{OOS_SHARPE_BLEND}} "
+                 "for the regime-conditional blend versus "
+                 "{{OOS_SHARPE_BENCHMARK}} for the benchmark and a "
+                 "maximum drawdown of {{REGIME_SWITCHING_MAX_DD}} "
+                 "versus {{BENCHMARK_MAX_DD}}, we recommend that a "
+                 "regime-conditional allocation framework be "
+                 "considered as a core approach to asset allocation "
+                 "in the post-2022 environment.'\n\n"
+                 "Three supporting recommendations, each grounded in a "
+                 "specific finding from Section 3:\n"
+                 "  1. Adopt the regime-conditional construction as the "
+                 "selection mechanism for the multi-asset blend, because "
+                 "the static historical Sharpe ranking is unreliable at "
+                 "the available sample size.\n"
+                 "  2. Retain a diversifying bond sleeve through equity "
+                 "drawdowns, because the 2022 evidence shows the blend's "
+                 "capital-preservation advantage came from holding the "
+                 "bond allocation rather than from market timing.\n"
+                 "  3. Monitor the regime posterior monthly and re-balance "
+                 "on regime transitions, because the value-added events "
+                 "(2 of 9 in the play-by-play) cluster at regime flips.\n\n"
+                 "REQUIRED ELEMENT (mandatory, not advisory) -- BEFORE "
+                 "the regime reading paragraph below, you MUST include "
+                 "this exact framing sentence (verbatim is preferred; "
+                 "close equivalent is acceptable only if every key "
+                 "phrase is preserved): 'The analytical performance "
+                 "figures throughout this brief reflect the academic "
+                 "submission record (locked at the submission freeze "
+                 "hash). The regime classification and implied "
+                 "weights below are live platform readings at the "
+                 "time of generation.' This "
+                 "sentence distinguishes the locked academic record "
+                 "(the Sharpe / drawdown / OOS window figures cited "
+                 "above) from the live regime read + implied weights "
+                 "that follow -- two different states the panel needs "
+                 "to keep separate. A draft without this sentence will "
+                 "be rejected on review.\n\n"
+                 "Then reference the live recommendation surface for the "
+                 "current portfolio snapshot: 'The current regime is "
+                 "{{CURRENT_REGIME}} at {{REGIME_CONFIDENCE}} confidence; "
+                 "the implied equity allocation is "
+                 "{{CURRENT_EQUITY_PCT}}. The CIO Recommendation card "
+                 "and the Implied Asset Allocation Over Time chart "
+                 "surface these live readings. This brief is the "
+                 "analytical case; those surfaces are the live "
+                 "snapshot.'\n\n"
+                 "MANDATORY: when you cite the LIVE regime read, the "
+                 "confidence percentage, or the live equity-allocation "
+                 "weight, you MUST use the {{CURRENT_REGIME}}, "
+                 "{{REGIME_CONFIDENCE}}, and {{CURRENT_EQUITY_PCT}} "
+                 "placeholder tokens -- never write the live values as "
+                 "raw numbers (e.g. '62.7%' or '44.5%'). Raw live values "
+                 "stale instantly because the regime shifts between "
+                 "generation time and reader time; the {{TOKEN}} "
+                 "placeholders bind to the platform's current state at "
+                 "the moment the reader opens the export.\n\n"
+                 "If "
+                 "live_recommendation.is_stale is true, include this "
+                 "exact disclosure sentence: 'The live regime read at "
+                 "generation time was unavailable; the recommendation "
+                 "above references the most recent cached regime read "
+                 "(stale_as_of in context).'\n\n"
+                 "Reference the efficient frontier chart by name when "
+                 "you justify the blend over a single static strategy.\n\n"
+                 "Do NOT discuss future work, Part II, walk-forward "
+                 "backtests, or any 'next research direction' content -- "
+                 "those belong outside this section. The rubric grades "
+                 "this section on investment conclusions drawn from the "
+                 "quantitative result set above."
+                 + _BRIEF_TONE_RULES),
+             "context": {"live_recommendation": live,
+                         "summary_statistics": data["summary_statistics"],
+                         "study_period": data["study_period"]}},
+            # June 26 2026 -- Section 6 'Visuals to Demonstrate the
+            # Insights' removed. The section was a generation
+            # artifact with no submission value: it captioned chart
+            # surfaces in prose, but the brief already references
+            # the relevant charts inline from Sections 3 and 4 and
+            # the Analytical Appendix carries the per-chart data
+            # tables. Keeping it produced a redundant 250-word
+            # ending that the rubric specifically does NOT grade.
+            # Brief now ends after Section 5: Final Recommendations.
         ]
+        # PR #333 -- brief section plan injection. Mirrors the deck
+        # path: cache-aware retrieval of the Opus story plan keyed by
+        # (data_hash, 'brief'); on hit, each spec's task is prepended
+        # with a LOCKED CONTRACT block listing the section's
+        # key_message + numeric_anchors + target_length_words. The
+        # per-section Sonnet pass then writes prose around the lock.
+        # Fail-open: a missing plan or any retrieval error returns an
+        # empty section_plan dict and the specs run exactly as before.
+        section_plan = await _resolve_story_plan_brief_sections(data)
+        if section_plan:
+            specs = _inject_brief_section_plan(specs, section_plan)
+
+        # June 21 2026 -- numeric substitution architecture. Build
+        # the {token -> cache-value} substitution table once per
+        # data_hash and thread it through every per-section
+        # harness_narrative call. The Sonnet writer emits placeholders
+        # ({{OOS_SHARPE_BLEND}} etc); the platform substitutes
+        # verified cache values before the evaluator sees the prose
+        # and before the .docx assembler reads it. Fail-open: any
+        # error returns None and the per-section path runs without
+        # substitution (the existing audit checks still fire on the
+        # raw Sonnet output, so the failure mode is a degraded brief
+        # rather than a missing brief).
+        substitution_table: dict[str, str] | None = None
+        try:
+            from tools.audit_assembler import current_data_hash
+            from tools.cio_recommendation import (
+                compute_implied_asset_allocation, get_latest_recommendation,
+            )
+            from tools.numeric_substitution import get_substitution_table
+            from tools.submission_freeze import get_effective_data_hash
+            constants = (data.get("validated_constants") or {}) or {}
+            rolling = data.get("rolling_correlation") or {}
+            # Layer 4 -- the submission freeze. When active, document
+            # generation reads the strategy_results_cache at the
+            # frozen hash so exported deliverables never drift from
+            # what was submitted. Live platform reads (Investment
+            # Outlook, CIO card, daily digest, regime detector) still
+            # call current_data_hash() directly -- the freeze
+            # isolates document generation only.
+            live_hash = await current_data_hash()
+            data_hash = await get_effective_data_hash(live_hash)
+            cio_row = await get_latest_recommendation()
+            # CURRENT_*_PCT tokens need the implied asset
+            # allocation -- compute once from the CIO blend weights.
+            implied_alloc: dict | None = None
+            try:
+                if cio_row and cio_row.get("blend_weights"):
+                    implied_alloc = await compute_implied_asset_allocation(
+                        cio_row.get("blend_weights"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("brief_implied_alloc_failed", error=str(_exc))
+            # June 22 2026 (PR A) -- read regime_signals_cache for the
+            # 5 watchpoint tokens. 15-min TTL; falls back to em-dash
+            # inside build_substitution_table if cold. Same wiring
+            # as the deck callsite; brief sections 1/5/6 reference
+            # current_regime and equity weight.
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "brief_live_signals_stale",
+                        document_type="executive_brief",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("brief_live_signals_read_failed",
+                            error=str(_exc))
+            # June 22 2026 (wiring fix) -- read analytics metrics
+            # for pre/post 2022 Sharpes, factor loadings, and
+            # cost sensitivity tokens. See
+            # tools.academic_export.load_substitution_metric_sources
+            # for the source mapping.
+            from tools.academic_export import (
+                load_substitution_metric_sources,
+            )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
+            regime_conditional_rows, factor_loadings_rows, \
+                cost_sensitivity_payload, crisis_payload = (
+                    await load_substitution_metric_sources(
+                        data_hash=data_hash or None))
+            substitution_table = get_substitution_table(
+                data_hash or "",
+                data.get("strategy_results") or {},
+                cio_row,
+                oos_sharpe_blend=constants.get(
+                    "oos_sharpe_regime_conditional"),
+                oos_sharpe_benchmark=constants.get(
+                    "oos_sharpe_benchmark"),
+                pre_2022_eq_ig_correlation=(
+                    constants.get("correlation_pre_2022")
+                    or rolling.get("pre_2022")),
+                post_2022_eq_ig_correlation=(
+                    constants.get("correlation_post_2022")
+                    or rolling.get("post_2022")),
+                oos_window_pct_of_study=constants.get(
+                    "oos_window_pct_of_study"),
+                study_months=(data.get("study_period") or {}).get(
+                    "n_months"),
+                implied_allocation=implied_alloc,
+                live_signals=live_signals,
+                regime_conditional=regime_conditional_rows,
+                factor_loadings=factor_loadings_rows,
+                cost_sensitivity=cost_sensitivity_payload,
+                crisis_performance=crisis_payload,
+                hash_verified=True)
+            log.info("substitution_table_built",
+                     document_type="executive_brief",
+                     data_hash=(data_hash or "")[:8],
+                     tokens_available=len(substitution_table))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("substitution_table_build_failed",
+                        document_type="executive_brief",
+                        error=str(exc))
+
+        # June 28 2026 -- re-augment per-section anchors now
+        # that the substitution_table is built. _inject_brief_
+        # section_plan ran earlier (before the table existed)
+        # so anchors only carry story-plan entries. This pass
+        # adds the always-allowed study-metadata anchors
+        # (STUDY_MONTHS, N_STRATEGIES, OOS_WINDOW_MONTHS, etc.)
+        # so the LLM can write raw "287 months" without
+        # tripping the hard-lock as token_available.
+        if substitution_table:
+            for spec in specs:
+                if "numeric_anchors" in spec:
+                    spec["numeric_anchors"] = (
+                        _augment_anchors_with_study_metadata(
+                            spec["numeric_anchors"],
+                            substitution_table))
+
         narratives = await _generate_narratives(
-            _apply_draft_caveats(specs),
-            n_strategies=len(data.get("strategy_results") or {}))
+            _apply_draft_caveats(specs, document_type="executive_brief"),
+            n_strategies=len(data.get("strategy_results") or {}),
+            substitution_table=substitution_table,
+            # June 28 2026 -- arms the untoken-numeric hard lock
+            # inside harness_narrative. Brief is one of the two
+            # protected document types.
+            document_type="executive_brief")
+
+        # Substitution-architecture summary log. Operators read this
+        # in Render logs to confirm the determinism layer fired
+        # correctly. Zero unresolved_placeholders + zero raw_numerics
+        # is the green state.
+        if substitution_table is not None:
+            try:
+                from tools.numeric_substitution import (
+                    unresolved_placeholders,
+                )
+                joined_text = "\n".join(narratives.values())
+                unresolved = unresolved_placeholders(joined_text)
+                log.info("substitution_complete",
+                         document_type="executive_brief",
+                         tokens_available=len(substitution_table),
+                         unresolved_placeholders=unresolved,
+                         unresolved_count=len(unresolved))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("substitution_summary_failed",
+                            error=str(exc))
+        # Layer 3b (June 21 2026) -- pass the substitution_table through
+        # so Section 6 chart captions can resolve {{DATA_HASH}} /
+        # {{PRE_2022_EQ_IG_CORR}} / {{OOS_SHARPE_BLEND}} against the
+        # verified cache values. verification_result is None at
+        # generation time (the receipt page shows "Not yet verified" so
+        # the page slot is structurally stable -- export-time
+        # verification rebuilds the brief from the editor draft via
+        # _editor_export, where the verification dict IS available).
         docx_bytes = await asyncio.to_thread(
-            build_executive_brief, data, narratives)
+            build_executive_brief, data, narratives,
+            substitution_table=substitution_table,
+            verification_result=None)
 
         # Load the generated content into an editor draft so the frontend
         # can open it directly in the editor — the same pattern as the
@@ -9912,13 +18190,112 @@ async def _generate_brief_document(
         try:
             from tools.editor_content import executive_brief_to_editor
             from tools.editor_drafts import create_draft
-            content_json, content_text = executive_brief_to_editor(narratives)
+            # June 28 2026 (Phase 2) -- thread the substitution_table
+            # so that under DEFER_SUBSTITUTION_TO_EXPORT the brief's
+            # content_json preserves {{TOKEN}} placeholders + the
+            # parallel content_text shadow column carries the
+            # resolved values for full-text search + word counts.
+            content_json, content_text = executive_brief_to_editor(
+                narratives, substitution_table=substitution_table)
+
+            # ── Concern 7h: pre-submission adversarial critic ─────
+            # Inlines the critic + debate-round response into the
+            # draft so the team reviews the critique alongside the
+            # brief. Always-write to council_debates regardless of
+            # severity. Fail-open: any failure leaves content_text
+            # unchanged and the generation flow proceeds.
+            try:
+                from agents.academic_review import (
+                    run_doc_gen_debate_round,
+                )
+                content_text, _debate_id, _critic_res = (
+                    await run_doc_gen_debate_round(
+                        reviewer_email=email,
+                        document_type="executive_brief",
+                        content_text=content_text))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "doc_gen_critic_pipeline_failed",
+                    document_type="executive_brief",
+                    error=str(_exc))
+
+            # ── Post-generation audit (June 3 2026) ───────────────
+            # Four deterministic checks against content_text BEFORE
+            # the draft lands in editor_drafts. Flags travel on the
+            # draft's audit_warnings JSONB column so the frontend
+            # banner surfaces them. NEVER blocks the write — the
+            # human reviews and resolves.
+            audit_warnings = await _run_document_audit(
+                content_text, "executive_brief", email)
+
+            # Stamp the live strategy hash on the draft (migration
+            # 063) so the tile + editor chips render 'Data current'.
+            try:
+                from tools.audit_assembler import (
+                    current_data_hash as _curr_hash_brief,
+                )
+                _brief_hash = await _curr_hash_brief()
+            except Exception:  # noqa: BLE001
+                _brief_hash = None
             draft = await create_draft(
                 "executive_brief", email,
                 f"Executive Brief — {date.today().isoformat()}",
-                content_json, content_text, created_from="generated")
+                content_json, content_text,
+                created_from="generated",
+                audit_warnings=audit_warnings,
+                data_hash=_brief_hash)
             if draft is not None:
                 draft_id = draft["id"]
+            await _write_audit_metrics(
+                "executive_brief", email, draft_id, audit_warnings)
+
+            # Layer 3 (June 21 2026) -- persist the value manifest +
+            # generation data_hash on the draft so export-time
+            # verification has an authoritative reference for every
+            # numeric value the substitution table produced. Layer 3
+            # of the substitution architecture closes the loop at
+            # export time: a manual edit changing "1.24" to "1.23"
+            # is caught before the file leaves the platform.
+            if draft_id is not None and substitution_table is not None:
+                try:
+                    from tools.audit_assembler import (
+                        current_data_hash as _cur_hash,
+                    )
+                    from tools.editor_drafts import (
+                        update_value_manifest as _update_manifest,
+                    )
+                    from tools.numeric_substitution import (
+                        build_value_manifest,
+                    )
+                    from datetime import datetime as _dt
+                    from datetime import timezone as _tz
+                    _hash_for_manifest = await _cur_hash() or ""
+                    manifest = build_value_manifest(
+                        substitution_table,
+                        data_hash=_hash_for_manifest[:64],
+                        generated_at=_dt.now(_tz.utc).isoformat())
+                    await _update_manifest(
+                        draft_id, manifest,
+                        data_hash=_hash_for_manifest[:64] or None)
+                    log.info(
+                        "value_manifest_persisted",
+                        document_type="executive_brief",
+                        draft_id=draft_id,
+                        n_values=len(manifest))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "value_manifest_persist_failed",
+                        document_type="executive_brief",
+                        error=str(exc))
+
+                # June 28 2026 (Fix 8b) -- auto-upgrade to
+                # token_value nodes immediately after persist.
+                # Fail-open: any error logs + the draft is
+                # still usable (admin batch endpoint can
+                # recover).
+                if draft_id is not None:
+                    await _auto_upgrade_draft_to_token_values(
+                        draft_id, "executive_brief")
         except Exception as exc:  # noqa: BLE001
             log.warning("executive_brief_draft_create_failed", error=str(exc))
 
@@ -9926,6 +18303,719 @@ async def _generate_brief_document(
         return docx_bytes, filename, _DOCX_MEDIA, draft_id
     except Exception as exc:  # noqa: BLE001
         log.error("executive_brief_generation_error", error=str(exc))
+        raise
+
+
+@app.post("/api/v1/export/analytical-appendix")
+@limiter.limit("6/minute")
+async def export_analytical_appendix(
+    request: Request,
+    body: dict | None = None,
+    session: dict = Depends(require_permission("generate_documents")),
+):
+    """
+    Starts analytical-appendix generation.
+
+    The Analytical Appendix is the evidentiary record behind every
+    claim in the executive brief and the panel presentation — eight
+    sections (A–H) covering data and methodology, full strategy
+    performance, statistical tests, bootstrap CIs, factor loadings,
+    crisis windows, transaction-cost sensitivity, and the validation
+    audit summary. Every figure is pulled from existing caches; the
+    endpoint NEVER recomputes (so a cold deploy renders [DATA PENDING]
+    cleanly rather than blocking on a warm).
+
+    With an editor_draft_id in the body the .docx is built
+    synchronously from that draft (the in-editor Export path).
+    Otherwise generation — eight short Academic Writer paragraphs —
+    runs as a background job and the endpoint returns 202 with a
+    job_id; poll GET /api/v1/jobs/{id}.
+    """
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
+    await _require_report_ready()
+    return _start_generation_job("analytical_appendix", session, request)
+
+
+# June 29 2026 -- THREE-STRATEGY SUBMISSION SCOPE. Both the brief
+# AND the appendix now operate on the same restricted three-strategy
+# set (BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING) per the scope
+# filter at tools/academic_export.gather_analytical_appendix_data.
+# The appendix retains the higher-detail evidence base for those
+# three strategies (the per-section tables D / E / F / G carry
+# more granular metrics for each row than the brief shows), but the
+# strategy roster is identical to the brief.
+_APPENDIX_FRAMING_PRELUDE = (
+    "APPENDIX FRAMING (applies to every section):\n"
+    "  - This is the analytical evidence base supporting the "
+    "executive brief and presentation deck. The audience reads the "
+    "appendix to verify the claims made elsewhere.\n"
+    "  - The appendix operates on the SAME three-strategy "
+    "submission scope as the brief / deck / script: BENCHMARK, "
+    "CLASSIC_60_40, REGIME_SWITCHING. Higher-detail per-strategy "
+    "metrics (bootstrap CI, factor loadings, crisis windows) are "
+    "shown for those three strategies; out-of-scope strategies "
+    "(MIN_VARIANCE, RISK_PARITY, VOL_TARGETING, etc.) are NOT in "
+    "the submission record and must NOT be named in appendix "
+    "prose.\n"
+    "  - Each section's prose must include one sentence of economic "
+    "intuition explaining what the result MEANS for a reader, not "
+    "just what the table contains. Example: a section reporting a "
+    "Sharpe ratio table does not stop at 'the table reports Sharpe' "
+    "-- it adds 'the regime-conditional construction's lead widens "
+    "post-2022 because the HMM identifies structural state changes "
+    "that persist for months'.\n"
+    "  - Sensitivity analysis results must be presented with "
+    "interpretation, not just tables. Tell the reader what to take "
+    "away.\n\n"
+)
+
+
+# Appendix section narrative tasks — one Academic Writer call per
+# section, each producing ~80-150 words. Deliberately short: the
+# appendix is table-heavy, the prose is scaffolding. Each task pins
+# the section's role and provides the context the writer needs to
+# describe what the table will show. The framing prelude is
+# prepended to each task at dispatch time so a future section
+# addition automatically inherits the audience + economic-intuition
+# contract.
+# June 21 2026 -- HARD word-count cap appended to every appendix
+# section task. The brief alignment excerpt added in PR #364 was
+# driving the narrative agent to expand prose to mirror the brief
+# (~430 words/section observed in production vs. 100-130 word
+# target = 3x overshoot). The cap is appended to every task so
+# the writer sees the constraint AFTER any framing the brief
+# excerpt introduces.
+_APPENDIX_WORD_CAP_INSTRUCTION = (
+    "\n\nHARD WORD LIMIT (non-negotiable):\n"
+    "Your narrative intro for this section MUST NOT exceed 130 "
+    "words. The brief excerpt above (if any) is for ALIGNMENT "
+    "CONTEXT ONLY -- it tells you what the brief argues so your "
+    "intro can match the framing. It does NOT expand the scope of "
+    "your output. The table that follows the intro is the primary "
+    "content of this section; the intro's job is to introduce the "
+    "table in 100-130 words, period. Do NOT expand to mirror the "
+    "depth of the brief excerpt. Do NOT reproduce the brief's "
+    "argument in full. A section over 130 words will be flagged "
+    "and require regeneration.")
+
+
+# June 26 2026 -- Citation discipline for the Benjamin vs Benjamini
+# split. Two different papers, two different claims; the model has
+# previously conflated them (e.g. attributing the FDR correction to
+# Benjamin et al. 2018 or attributing the p < 0.005 threshold to
+# Benjamini & Hochberg 1995). Threaded into the appendix sections
+# that actually cite either paper (C and E) so the constraint sits
+# next to the relevant prose. Mirrors the brief-side guidance in
+# _BRIEF_TONE_RULES_BASE.
+_APPENDIX_CITATION_DISCIPLINE = (
+    "\n\nCITATION DISCIPLINE -- Benjamin vs Benjamini (non-"
+    "negotiable):\n"
+    "Two different papers, two different claims; never swap or "
+    "conflate them in-text or in the reference list.\n"
+    "  - Benjamini & Hochberg (1995) -- the FDR (false discovery "
+    "rate) CORRECTION METHODOLOGY. Cite this whenever you "
+    "reference the q-value control, the BH procedure, or the "
+    "multiple-hypothesis correction technique.\n"
+    "  - Benjamin et al. (2018) -- the p < 0.005 THRESHOLD "
+    "PROPOSAL (Redefine Statistical Significance, Nature Human "
+    "Behaviour). Cite this whenever you reference the 0.005 "
+    "cutoff itself as the bar for declaring a finding "
+    "significant.\n"
+    "  - Wrong: 'no strategy clears p < 0.005 under Benjamin et "
+    "al. (2018) FDR correction' (the FDR correction is not from "
+    "that paper).\n"
+    "  - Right: 'no strategy clears the p < 0.005 threshold "
+    "(Benjamin et al., 2018) under Benjamini-Hochberg FDR "
+    "correction (Benjamini & Hochberg, 1995)' -- each citation "
+    "next to the claim it actually supports.")
+
+
+_APPENDIX_NARRATIVE_TASKS = {
+    "appendix_a": (
+        "Write a 100-130 word introduction to Section A: Data and "
+        "Methodology, for the project's Analytical Appendix. Name the "
+        "study period (start, end, number of months) and the three "
+        "asset classes (S&P 500 total return for equity, BND for "
+        "investment-grade bonds, BAMLHYH0A0HYM2TRIV with HYG splice "
+        "for high yield, all monthly). Note the risk-free series "
+        "(DTB3, converted monthly). State that the table that follows "
+        "carries the asset-level summary statistics. Plain academic "
+        "prose. No em dashes."),
+    "appendix_b": (
+        "Write a 100-130 word introduction to Section B: Full Strategy "
+        "Performance. Note that the table that follows reports Sharpe, "
+        "CAGR, volatility, Sortino, Calmar, and max drawdown for every "
+        "strategy in the cache, sorted by Sharpe descending. Mention "
+        "that the BENCHMARK row appears alongside the active strategies "
+        "for direct comparison. Plain academic prose. No em dashes."),
+    "appendix_c": (
+        "Write a 100-130 word introduction to Section C: Statistical "
+        "Tests. Note that the table that follows reports the paired-t "
+        "p-value, the FDR-corrected p-value, the Deflated Sharpe Ratio "
+        "p-value, the Probabilistic Sharpe Ratio, and the SPA gate for "
+        "every strategy except the benchmark. State plainly that no "
+        "strategy clears the p < 0.005 threshold (Benjamin et al., "
+        "2018) under Benjamini-Hochberg FDR correction (Benjamini & "
+        "Hochberg, 1995), and that we surface this honestly rather "
+        "than report Sharpe rankings alone. Plain academic prose. "
+        "No em dashes."
+        + _APPENDIX_CITATION_DISCIPLINE),
+    "appendix_d": (
+        "Write a 100-130 word introduction to Section D: Bootstrap "
+        "Confidence Intervals. Note the methodology: block bootstrap "
+        "of length {{BOOTSTRAP_BLOCK_LENGTH}} with 10,000 resamples "
+        "and a fixed seed of {{BOOTSTRAP_SEED}}, "
+        "applied to the monthly excess-return series for every "
+        "strategy. State that the table that follows reports each "
+        "strategy's point Sharpe with its 95% CI, and whether the "
+        "interval overlaps the benchmark's Sharpe. Note that "
+        "substantial overlap is the analytical justification for "
+        "treating static-strategy rankings as inconclusive. Plain "
+        "academic prose. No em dashes.\n\n"
+        "TABLE PLACEMENT NOTE: The renderer places Table D1 "
+        "immediately after this narrative paragraph -- write the "
+        "phrasing 'the table that follows' or 'Table D1 below' "
+        "rather than 'the table at the end of this appendix' or "
+        "any phrasing that implies Table D1 lives in a separate "
+        "evidence block. Table D1 is inline with Section D's "
+        "prose."),
+    "appendix_e": (
+        "Write a 100-130 word introduction to Section E: Factor "
+        "Loadings. Note that the table that follows reports the "
+        "annualised alpha and the four Carhart factor coefficients "
+        "(MKT-RF, SMB, HML, MOM) plus R-squared for every strategy, "
+        "with a trailing asterisk on each coefficient significant at "
+        "p < 0.05. State that the table is read for each strategy's "
+        "primary return driver, not for stock-picking alpha. Plain "
+        "academic prose. No em dashes."
+        + _APPENDIX_CITATION_DISCIPLINE),
+    "appendix_f": (
+        "Write a 100-130 word introduction to Section F: Crisis Window "
+        "Performance. Note that the table that follows reports each "
+        "strategy's cumulative return through five named crisis windows "
+        "(GFC 2008-2009, EU Debt 2011, COVID Crash, COVID Recovery, "
+        "Rate Shock 2022). State explicitly that the headline figure is "
+        "the cumulative return through the window, NOT the annualised "
+        "CAGR (the F3 fix). Plain academic prose. No em dashes.\n\n"
+        "DAGGER FOOTNOTE DISCIPLINE (non-negotiable): The trailing "
+        "dagger (†) symbol on a Table F1 CELL flags a partial-"
+        "overlap window for that specific strategy -- meaning that "
+        "strategy's live history started AFTER the crisis window "
+        "began or ended BEFORE the window closed, so the cumulative "
+        "return is computed over only the overlapping subset of the "
+        "window. If a strategy's history fully covers the window, "
+        "the cell does NOT carry a dagger. If EVERY strategy in the "
+        "table fully covers EVERY crisis window (the common case "
+        "for the canonical strategies), the dagger does not appear "
+        "anywhere and you should not mention partial-overlap in the "
+        "narrative at all. NEVER describe the dagger as a uniform "
+        "marker applied to every row -- that contradicts the "
+        "footnote's definition and confuses readers. Mention the "
+        "dagger only if the rendered table actually carries it."),
+    "appendix_g": (
+        "Write a 100-130 word introduction to Section G: Transaction "
+        "Cost Sensitivity. Note that the table that follows reports "
+        "the net-of-cost Sharpe of the regime-conditional blend at "
+        "10/15/20 basis points per material rebalance over the "
+        "post-2022 OOS window, alongside the count of material "
+        "rebalances. State that the regime-conditional blend remains "
+        "above the benchmark Sharpe net of plausible transaction "
+        "costs. Plain academic prose. No em dashes.\n\n"
+        "PROHIBITED CONTENT (June 22 2026 -- production bug): "
+        "Do NOT include any placeholder note saying the table 'must "
+        "be inserted here' or 'before final submission'. Do NOT "
+        "include an open-items list, a 'five open items' block, a "
+        "'to be completed' list, or any caveat about pending work. "
+        "The transaction cost sensitivity table is generated "
+        "PROGRAMMATICALLY and is ALWAYS present in the rendered "
+        "document. Your introduction's only job is to set up the "
+        "table the reader will see immediately below it -- the "
+        "table speaks for itself."),
+    "appendix_h": (
+        "Write a 100-130 word introduction to Section H: Validation "
+        "Audit Summary. Note that the platform's analytics invariant "
+        "framework runs at the end of every warm and that the "
+        "deterministic-detection contract (no LLM in the detection "
+        "path) is documented in docs/INVARIANTS.md. State that the "
+        "table that follows reports the latest warm's verdict — "
+        "checks run, hard failures, soft warnings, and the run "
+        "timestamp. Note that the audit disclosure appendix that "
+        "follows carries the statistical audit and methodology QA "
+        "history. Plain academic prose. No em dashes."),
+}
+
+
+async def _generate_appendix_document(
+    email: str,
+) -> tuple[bytes, str, str, int | None]:
+    """
+    Generates the Analytical Appendix. Returns
+    (file_bytes, filename, media_type, editor_draft_id).
+
+    The appendix is table-heavy and rhetorically minimal: each
+    section opens with a short Academic Writer paragraph then the
+    cached data in an APA-style table. All eight cache reads happen
+    in gather_analytical_appendix_data; the eight narratives generate
+    concurrently through the harness; build_analytical_appendix
+    assembles them. No recomputation anywhere — a missing cache row
+    degrades that section to [DATA PENDING] rather than blocking.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.academic_docx import build_analytical_appendix
+    from tools.academic_export import (
+        DATA_PENDING, gather_analytical_appendix_data,
+    )
+
+    # June 21 2026 -- brief-as-anchor gate. The analytical appendix
+    # supports what the brief argues; without a brief on hand it
+    # would generate independently from raw cache and risk
+    # framing drift. 409 surfaces inline in the editor.
+    from tools.brief_grounding import get_brief_for_grounding
+    brief_grounding = await get_brief_for_grounding()
+    if brief_grounding is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Generate the executive brief before the "
+                "analytical appendix. The appendix supports the "
+                "brief's claims; all three deliverables (brief / "
+                "deck / appendix) must share a single narrative."))
+
+    try:
+        # June 27 2026 (PR 1 v3, LEAK 1 closer) -- compute the
+        # effective data_hash inline + thread it into
+        # gather_analytical_appendix_data so the inner
+        # gather_document_data call routes the strategy_results_
+        # cache read through get_strategy_cache(data_hash) instead
+        # of get_latest_strategy_cache. Under freeze, a miss
+        # raises StrategyCacheMissingForHashError (translated to a
+        # 500 by the outer except).
+        from tools.audit_assembler import (
+            current_data_hash as _appx_current_hash,
+        )
+        from tools.submission_freeze import (
+            get_effective_data_hash as _appx_eff_hash,
+        )
+        _appx_live = await _appx_current_hash()
+        _appx_data_hash = await _appx_eff_hash(_appx_live)
+        data = await gather_analytical_appendix_data(
+            data_hash=_appx_data_hash or None)
+        avail = data["available"]
+        pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
+                   "dashboard once, then regenerate this appendix.")
+
+        # June 22 2026 -- HASH-MATCHED pre-flight cache gate. The
+        # appendix's graded sections (B, C, D, E, G) depend on
+        # cache fields populated by the backtester +
+        # refresh_academic_analytics + refresh_oos_cost_sensitivity
+        # chain. PR #365's original gate accepted ANY non-empty
+        # cache row as "warm" -- including stale-hash rows from
+        # a previous data state. That let the appendix render
+        # against data the brief's narrative didn't see.
+        #
+        # The corrected gate computes the canonical CURRENT
+        # strategy hash via _compute_data_hash(n_rows, last_date,
+        # n_strategies=10) and verifies EACH source carries a row
+        # at that exact hash. A stale-hash row counts as missing.
+        # The 409 detail surfaces the actual mismatch (expected
+        # hash, what's in the cache) so the operator knows whether
+        # the chain ran or just one component.
+        missing_cache_fields: list[str] = []
+        canonical_hash = ""
+        try:
+            from tools.cache import (
+                _compute_data_hash, get_strategy_cache,
+            )
+            from tools.data_fetcher import get_full_history_async
+            from tools.precomputed_analytics import get_metric_by_hash
+            from tools.regime_meta_validation import (
+                _COST_METRIC_KIND,
+            )
+            history = await get_full_history_async()
+            monthly = history.get("equity_monthly")
+            n_rows = len(monthly) if monthly is not None else 0
+            last_date = (
+                str(monthly.index[-1].date())
+                if monthly is not None and n_rows > 0
+                else "unknown")
+            canonical_hash = _compute_data_hash(
+                n_rows, last_date, n_strategies=10)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_canonical_hash_compute_failed",
+                error=str(exc))
+
+        if canonical_hash:
+            # Section B/C source -- strategy_results_cache row at
+            # the canonical hash.
+            try:
+                sr_row = await get_strategy_cache(canonical_hash)
+            except Exception:  # noqa: BLE001
+                sr_row = None
+            if not sr_row:
+                missing_cache_fields.append(
+                    f"strategy_results_cache (no row at hash "
+                    f"{canonical_hash} -- Section B/C source)")
+
+            # Section D source -- academic_analytics metric AT
+            # the canonical hash. The metric payload also carries
+            # factor_loadings (Section E), so a single hit covers
+            # both. A row at a DIFFERENT hash counts as missing.
+            try:
+                aa = await get_metric_by_hash(
+                    "academic_analytics", canonical_hash)
+            except Exception:  # noqa: BLE001
+                aa = None
+            if not (aa or {}).get("bootstrap_ci_sharpe"):
+                missing_cache_fields.append(
+                    f"bootstrap_ci_sharpe (no academic_analytics "
+                    f"row at hash {canonical_hash} -- Section D "
+                    f"source)")
+            if not (aa or {}).get("factor_loadings"):
+                missing_cache_fields.append(
+                    f"factor_loadings (no academic_analytics row "
+                    f"at hash {canonical_hash} -- Section E "
+                    f"source)")
+
+            # Section G source -- cost_sensitivity metric at
+            # canonical hash.
+            try:
+                cs = await get_metric_by_hash(
+                    _COST_METRIC_KIND, canonical_hash)
+            except Exception:  # noqa: BLE001
+                cs = None
+            if not cs:
+                missing_cache_fields.append(
+                    f"cost_sensitivity (no oos_cost_sensitivity "
+                    f"row at hash {canonical_hash} -- Section G "
+                    f"source)")
+        else:
+            # Couldn't compute the canonical hash -- treat as a
+            # hard cold-cache state, same as the legacy gate.
+            missing_cache_fields.append(
+                "canonical hash unavailable (full data history "
+                "unreadable -- check market_data_monthly + "
+                "ff_factors_monthly)")
+
+        if missing_cache_fields:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Analytics caches are not warm at the "
+                    f"canonical current strategy hash "
+                    f"({canonical_hash or 'unavailable'}). "
+                    "Missing or stale: "
+                    + "; ".join(missing_cache_fields)
+                    + ". A stale-hash row counts as missing -- "
+                    "the appendix must render at the hash that "
+                    "matches the live market data, not a "
+                    "previous data state. Run POST /api/v1/"
+                    "admin/refresh-appendix-caches to populate "
+                    "the cache chain at the canonical hash, "
+                    "then retry."))
+
+        # Layer 2 (June 21 2026) -- build the substitution table once
+        # per appendix-generation job. Same per-data_hash cache the
+        # brief + deck use, so a metric appearing in any of the three
+        # documents is byte-identical by construction. include_per_
+        # strategy=True (the default) is critical here: the appendix
+        # is the surface that needs the dynamic {{STRATEGY_NAME_*}}
+        # tokens for all 10 strategies.
+        substitution_table: dict[str, str] | None = None
+        try:
+            from tools.audit_assembler import current_data_hash
+            from tools.cio_recommendation import (
+                compute_implied_asset_allocation, get_latest_recommendation,
+            )
+            from tools.numeric_substitution import (
+                get_substitution_table,
+            )
+            from tools.academic_deck import (
+                OOS_SHARPE_REGIME_CONDITIONAL,
+                OOS_SHARPE_BENCHMARK,
+                CORRELATION_PRE_2022, CORRELATION_POST_2022,
+                OOS_WINDOW_PCT_OF_STUDY,
+            )
+            from tools.submission_freeze import get_effective_data_hash
+            # Layer 4 -- submission freeze (see _generate_brief_document
+            # for the rationale). Live platform reads call
+            # current_data_hash() directly; document generation
+            # routes through get_effective_data_hash so the appendix
+            # locks to the frozen hash on submission day.
+            live_hash = await current_data_hash()
+            data_hash = await get_effective_data_hash(live_hash)
+            cio_row = await get_latest_recommendation()
+            implied_alloc: dict | None = None
+            try:
+                if cio_row and cio_row.get("blend_weights"):
+                    implied_alloc = await compute_implied_asset_allocation(
+                        cio_row.get("blend_weights"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("appendix_implied_alloc_failed", error=str(_exc))
+            # June 22 2026 (PR A) -- read regime_signals_cache. Same
+            # wiring as brief + deck callsites; the appendix's
+            # Section G (cost sensitivity + recommendation) cites
+            # the current regime + watchpoint posture.
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "appendix_live_signals_stale",
+                        document_type="analytical_appendix",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("appendix_live_signals_read_failed",
+                            error=str(_exc))
+            # June 22 2026 (wiring fix) -- read analytics metrics
+            # for pre/post 2022 Sharpes, factor loadings, and
+            # cost sensitivity tokens.
+            from tools.academic_export import (
+                load_substitution_metric_sources,
+            )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
+            regime_conditional_rows, factor_loadings_rows, \
+                cost_sensitivity_payload, crisis_payload = (
+                    await load_substitution_metric_sources(
+                        data_hash=data_hash or None))
+            substitution_table = get_substitution_table(
+                data_hash or "",
+                data.get("strategy_results") or {},
+                cio_row,
+                oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
+                oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
+                post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                oos_window_pct_of_study=OOS_WINDOW_PCT_OF_STUDY,
+                study_months=(data.get("study_period") or {}).get(
+                    "n_months"),
+                implied_allocation=implied_alloc,
+                live_signals=live_signals,
+                regime_conditional=regime_conditional_rows,
+                factor_loadings=factor_loadings_rows,
+                cost_sensitivity=cost_sensitivity_payload,
+                crisis_performance=crisis_payload,
+                hash_verified=True)
+            log.info("substitution_table_built",
+                     document_type="analytical_appendix",
+                     data_hash=(data_hash or "")[:8],
+                     tokens_available=len(substitution_table))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("substitution_table_build_failed",
+                        document_type="analytical_appendix",
+                        error=str(exc))
+
+        # Layer 2 -- prepend the substitution placeholder guide to
+        # each appendix section task so the Sonnet writer uses
+        # {{TOKEN}} markers instead of raw figures. The appendix-
+        # specific extension teaches the {{STRATEGY_NAME_METRIC}}
+        # convention for the 10-strategy surface.
+        appendix_guide = ""
+        if substitution_table is not None:
+            appendix_guide = (
+                _NUMERIC_PLACEHOLDER_GUIDE
+                + _APPENDIX_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION
+                + "\n")
+
+        # June 21 2026 brief-as-anchor -- precompute per-appendix-
+        # section brief excerpts. APPENDIX_TO_BRIEF_SECTION
+        # maps each appendix section_key to a brief section
+        # (or None for appendix-specific sections like
+        # portfolio_construction that have no brief counterpart).
+        # brief_section_excerpt returns "" for None / missing
+        # mappings so the resulting block is a no-op string.
+        from tools.brief_grounding import (
+            APPENDIX_TO_BRIEF_SECTION, brief_section_block,
+            brief_section_excerpt,
+        )
+        brief_text = brief_grounding["content_text"]
+        section_brief_blocks: dict[str, str] = {}
+        for key in _APPENDIX_NARRATIVE_TASKS.keys():
+            agent_id = f"appendix_{key.split('_', 1)[1]}"
+            brief_section = APPENDIX_TO_BRIEF_SECTION.get(agent_id)
+            excerpt = brief_section_excerpt(brief_text, brief_section)
+            section_brief_blocks[key] = brief_section_block(
+                excerpt, brief_section)
+
+        specs = [
+            {
+                "key": key,
+                "agent_id": f"appendix_{key.split('_', 1)[1]}",
+                # PR #334 -- prepend the framing prelude so every
+                # section task inherits the audience contract +
+                # economic-intuition guard. The three-strategy
+                # simplification does NOT apply to the appendix --
+                # full 10-strategy coverage is appropriate here --
+                # but the audience and economic-intuition layers
+                # do (see _APPENDIX_FRAMING_PRELUDE above).
+                # Layer 2 (June 21) -- the substitution placeholder
+                # guide is prepended ahead of the framing prelude.
+                # June 21 2026 brief-as-anchor -- per-section brief
+                # alignment excerpt (no-op for appendix-only
+                # sections per APPENDIX_TO_BRIEF_SECTION).
+                # Word cap appended AFTER the brief excerpt so the
+                # writer sees the constraint last (and remembers it
+                # while writing). PR #364 (brief alignment) was
+                # driving the agent to expand prose to mirror the
+                # brief; this cap is the explicit counter-instruction.
+                "task": (
+                    appendix_guide
+                    + _APPENDIX_FRAMING_PRELUDE + task
+                    + section_brief_blocks.get(key, "")
+                    + _APPENDIX_WORD_CAP_INSTRUCTION),
+                "context": {"study_period": data.get("study_period")},
+                "available": avail,
+                "pending": pending,
+            }
+            for key, task in _APPENDIX_NARRATIVE_TASKS.items()
+        ]
+        narratives = await _generate_narratives(
+            _apply_draft_caveats(
+                specs, document_type="analytical_appendix"),
+            n_strategies=len(data.get("strategy_results") or {}),
+            substitution_table=substitution_table,
+            # June 28 2026 -- arms the untoken-numeric hard lock
+            # inside harness_narrative. Appendix is the second
+            # protected document type alongside brief.
+            document_type="analytical_appendix")
+
+        # Per-document substitution-complete telemetry. Same shape the
+        # brief + deck writers emit at end of generation.
+        if substitution_table is not None:
+            try:
+                from tools.numeric_substitution import (
+                    unresolved_placeholders,
+                )
+                joined_text = "\n".join(narratives.values())
+                unresolved = unresolved_placeholders(joined_text)
+                log.info("substitution_complete",
+                         document_type="analytical_appendix",
+                         tokens_available=len(substitution_table),
+                         unresolved_placeholders=unresolved,
+                         unresolved_count=len(unresolved))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("substitution_summary_failed",
+                            document_type="analytical_appendix",
+                            error=str(exc))
+
+        # June 28 2026 -- thread substitution_table through so the
+        # builder can resolve {{TOKEN}} placeholders in narratives
+        # at export time. Required by the Phase-1 deferred-
+        # substitution pipeline; harmless under legacy generation
+        # (substitution_table=None) where narratives already carry
+        # resolved values.
+        docx_bytes = await asyncio.to_thread(
+            build_analytical_appendix, data, narratives,
+            substitution_table=substitution_table)
+
+        # Load the generated content into an editor draft so the
+        # frontend can open it directly in the editor — same pattern
+        # as the brief / midpoint / deck. The draft_id rides back in
+        # the X-Draft-Id response header. Draft-storage failure never
+        # fails the download.
+        draft_id: int | None = None
+        try:
+            from tools.editor_content import analytical_appendix_to_editor
+            from tools.editor_drafts import create_draft
+            # June 28 2026 (Phase 2) -- same substitution_table
+            # threading as the brief path. content_json keeps
+            # {{TOKEN}} placeholders intact under flag ON;
+            # content_text carries the substituted projection.
+            content_json, content_text = analytical_appendix_to_editor(
+                narratives, substitution_table=substitution_table)
+
+            # ── Concern 7h: pre-submission adversarial critic ─────
+            try:
+                from agents.academic_review import (
+                    run_doc_gen_debate_round,
+                )
+                content_text, _debate_id, _critic_res = (
+                    await run_doc_gen_debate_round(
+                        reviewer_email=email,
+                        document_type="analytical_appendix",
+                        content_text=content_text))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "doc_gen_critic_pipeline_failed",
+                    document_type="analytical_appendix",
+                    error=str(_exc))
+
+            # Stamp the live strategy hash (migration 063).
+            try:
+                from tools.audit_assembler import (
+                    current_data_hash as _curr_hash_app,
+                )
+                _app_hash = await _curr_hash_app()
+            except Exception:  # noqa: BLE001
+                _app_hash = None
+            draft = await create_draft(
+                "analytical_appendix", email,
+                f"Analytical Appendix — {date.today().isoformat()}",
+                content_json, content_text, created_from="generated",
+                data_hash=_app_hash)
+            if draft is not None:
+                draft_id = draft["id"]
+
+            # Layer 3b (June 21 2026) -- persist the value manifest +
+            # generation data_hash on the appendix draft so
+            # /api/v1/export/verify-all has an authoritative reference
+            # for every numeric value the substitution table produced.
+            # Mirrors the brief block in _generate_brief_document.
+            if draft_id is not None and substitution_table is not None:
+                try:
+                    from tools.audit_assembler import (
+                        current_data_hash as _cur_hash,
+                    )
+                    from tools.editor_drafts import (
+                        update_value_manifest as _update_manifest,
+                    )
+                    from tools.numeric_substitution import (
+                        build_value_manifest,
+                    )
+                    from datetime import datetime as _dt
+                    from datetime import timezone as _tz
+                    _hash_for_manifest = await _cur_hash() or ""
+                    manifest = build_value_manifest(
+                        substitution_table,
+                        data_hash=_hash_for_manifest[:64],
+                        generated_at=_dt.now(_tz.utc).isoformat())
+                    await _update_manifest(
+                        draft_id, manifest,
+                        data_hash=_hash_for_manifest[:64] or None)
+                    log.info(
+                        "value_manifest_persisted",
+                        document_type="analytical_appendix",
+                        draft_id=draft_id,
+                        n_values=len(manifest))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "value_manifest_persist_failed",
+                        document_type="analytical_appendix",
+                        error=str(exc))
+
+                # June 28 2026 (Fix 8b) -- auto-upgrade hook.
+                if draft_id is not None:
+                    await _auto_upgrade_draft_to_token_values(
+                        draft_id, "analytical_appendix")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("analytical_appendix_draft_create_failed",
+                        error=str(exc))
+
+        filename = (f"forest-capital-analytical-appendix-"
+                    f"{date.today().isoformat()}.docx")
+        return docx_bytes, filename, _DOCX_MEDIA, draft_id
+    except Exception as exc:  # noqa: BLE001
+        log.error("analytical_appendix_generation_error", error=str(exc))
         raise
 
 
@@ -9950,6 +19040,212 @@ async def export_presentation_deck(
         return await _editor_export(int(editor_draft_id))
     await _require_report_ready()
     return _start_generation_job("presentation_deck", session, request)
+
+
+@app.post("/api/v1/export/presentation-script")
+@limiter.limit("12/minute")
+async def export_presentation_script(
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
+):
+    """Renders the cached deck story plan's Pass 2 full_script + Pass
+    3 anticipated_questions into a Presentation Script .docx workbook.
+
+    Pure cache read + format: NO LLM call, NO database write. The
+    rate limit is set higher than the generation endpoints (12/min
+    vs 4-6/min) because the wall-clock cost is bounded by docx
+    assembly (~200ms), not multi-pass LLM generation.
+
+    Returns 404 with a clear message when the deck story plan has
+    not yet been cached (or is a deterministic_fallback) so the
+    operator knows to generate the Presentation Deck first.
+
+    The Reports page's Presentation Script card hits this endpoint
+    from a button labelled "Download Script" -- it stays disabled
+    until /api/v1/report/readiness reports
+    deck_story_plan_available=true.
+    """
+    from fastapi.responses import Response as FastAPIResponse
+    from tools.academic_docx import build_presentation_script
+    from tools.story_plan import get_latest_story_plan
+
+    # June 25 2026 -- replaced the bare-hash get_cached_story_plan
+    # lookup. refresh_story_plan persists the deck row under a
+    # composite hash via cache_key_with_brief_and_appendix
+    # ('<data_hash>|<brief_hash>|<appendix_hash>'); the bare
+    # current_data_hash() never matched and this endpoint 404'd
+    # even when the readiness gate (which uses get_latest_story_plan
+    # post-fix at main.py:9048-9050) reported the script as
+    # available. Switching to the same hash-agnostic, fallback-
+    # excluding query the gate uses makes the gate + the export
+    # finally agree on whether the script can be downloaded.
+    # Hash-drift staleness remains handled at export time by
+    # verify_export_against_cache (called downstream).
+    plan = await get_latest_story_plan(
+        "deck", exclude_fallback=True)
+    if not plan or plan.get("_model") == "deterministic_fallback":
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Presentation script not yet generated. Generate "
+                "the Presentation Deck first to produce the script."))
+
+    try:
+        docx_bytes = await asyncio.to_thread(
+            build_presentation_script,
+            full_script=plan.get("full_script"),
+            anticipated_questions=plan.get("anticipated_questions"),
+            computed_at=plan.get("computed_at"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("presentation_script_render_failed",
+                  ref=ref, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Script rendering failed (ref: {ref})")
+
+    from datetime import date
+    filename = (
+        f"forest-capital-presentation-script-"
+        f"{date.today().isoformat()}.docx")
+    return FastAPIResponse(
+        content=docx_bytes,
+        media_type=_DOCX_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/v1/export/presentation-deck/stream")
+@limiter.limit("4/minute")
+async def export_presentation_deck_stream(
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
+):
+    """Bridge #95 -- streams deck generation via Server-Sent Events.
+
+    The endpoint returns text/event-stream immediately and emits
+    progress events as each slide's content lands:
+
+      data: {"type": "started", "job_id": "...", "total_slides": 6}
+      data: {"type": "slide_complete", "slide_number": 1, "title": "..."}
+      data: {"type": "slide_error", "slide_number": N, "error": "..."}
+      data: {"type": "rendering"}                # charts + pptx assembly
+      data: {"type": "complete", "job_id": "...", "draft_id": N,
+              "download_url": "/api/v1/jobs/.../download"}
+      data: [DONE]
+
+    A fatal error before any slide-complete event emits:
+      data: {"type": "error", "message": "..."}
+
+    Keeps Cloudflare's gateway connection alive by emitting a frame
+    every few seconds (one per slide on the happy path). The pptx
+    bytes are stored in the standard generation_jobs slot so the
+    existing /api/v1/jobs/{id}/download endpoint serves them with
+    no special handling.
+
+    The async-job endpoint above (POST /api/v1/export/presentation-deck)
+    remains the back-compat surface for frontends that haven't
+    migrated to the stream consumer."""
+    if ENVIRONMENT == "test":
+        return JSONResponse(
+            content={"sse_stub": True, "note": "test env"},
+            media_type="application/json")
+
+    await _require_report_ready()
+
+    email = session["email"]
+    from tools.generation_jobs import create_job, update_job
+    from agents.usage import start_usage_capture
+    start_usage_capture()
+    job = create_job("presentation_deck", email)
+    job_id = job["job_id"]
+
+    async def event_stream():
+        import asyncio
+        import traceback
+        from datetime import datetime, timezone
+
+        from tools.academic_deck import DECK_SLIDE_COUNT, SLIDE_TITLES
+
+        update_job(job_id, status="running")
+        yield _sse("started", job_id=job_id, total_slides=DECK_SLIDE_COUNT)
+
+        try:
+            data, blend_weights, blend_series, n_strategies = \
+                await _build_deck_context(email)
+            per_slide_ctx = _deck_per_slide_context(data)
+
+            slides: list[dict] = []
+            for n in range(1, DECK_SLIDE_COUNT + 1):
+                slide = await asyncio.to_thread(
+                    _generate_one_deck_slide, n, per_slide_ctx, n_strategies)
+                if slide is None:
+                    yield _sse(
+                        "slide_error",
+                        slide_number=n,
+                        title=SLIDE_TITLES[n - 1],
+                        error=(
+                            "Per-slide generation failed; the slide "
+                            "renders with a [DATA PENDING] placeholder."))
+                    continue
+                slides.append(slide)
+                yield _sse(
+                    "slide_complete",
+                    slide_number=n,
+                    title=str(slide.get("title")
+                              or SLIDE_TITLES[n - 1]))
+
+            yield _sse("rendering")
+
+            file_bytes, filename, media, draft_id = await _finalize_deck(
+                slides, data, blend_weights, blend_series, email)
+
+            update_job(
+                job_id, status="complete", draft_id=draft_id,
+                download_url=f"/api/v1/jobs/{job_id}/download",
+                completed_at=datetime.now(timezone.utc),
+                _file_bytes=file_bytes, _filename=filename,
+                _media_type=media)
+            _log_interaction_bg(
+                request, session, "export",
+                agents_involved=["academic_writer"],
+                response_summary="presentation_deck generated (sse)",
+                metadata={"deliverable": "presentation_deck",
+                          "draft_id": draft_id})
+            _schedule_auto_academic_review(
+                draft_id, "presentation_deck", email)
+
+            yield _sse(
+                "complete",
+                job_id=job_id,
+                draft_id=draft_id,
+                download_url=f"/api/v1/jobs/{job_id}/download")
+        except Exception as exc:  # noqa: BLE001
+            ref = uuid.uuid4().hex[:8]
+            log.error(
+                "deck_stream_failed",
+                job_id=job_id, ref=ref,
+                exc_type=type(exc).__name__,
+                exc_module=type(exc).__module__,
+                error=str(exc),
+                traceback_excerpt="".join(
+                    traceback.format_exception_only(
+                        type(exc), exc)).strip()[:300])
+            update_job(
+                job_id, status="failed",
+                error=f"Deck stream failed (ref: {ref})",
+                completed_at=datetime.now(timezone.utc))
+            yield _sse(
+                "error",
+                job_id=job_id,
+                message=f"Deck generation failed (ref: {ref}).")
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(),
+                             media_type="text/event-stream")
 
 
 def _parse_deck_slides(raw: str) -> list:
@@ -9982,12 +19278,38 @@ def _render_deck_slide_charts(
 ) -> dict:
     """Render the per-slide deck charts (sync; called in a thread). Returns
     {slide_number: png|None}. Every renderer is fail-open and individually
-    guarded — a None becomes a [DATA PENDING] note in the deck, never a
-    failure. Charts on slides 2, 3, 4, 6, 8 per academic_deck.SLIDE_CHARTS."""
-    from tools.academic_deck import _STATIC_STRATEGIES
+    guarded -- a None becomes a [DATA PENDING] note in the deck, never a
+    failure.
+
+    Slot mapping is DERIVED from academic_deck.SLIDE_CHARTS so the
+    renderer dict and the slot dict can never drift. The 11-slide rebuild
+    (June 7 2026) moved the chart slots to {4, 5, 11} but the renderer
+    mapping was left at the older 6-slide positions {2, 3, 6} -- every
+    deck generation since then fired three deck_chart_slot_unavailable
+    warnings because the builder asked for charts on slides 4/5/11 and
+    the returned dict carried 2/3/6. Reconciled by indexing through
+    SLIDE_CHARTS and dispatching by role string. Adding a new chart role
+    (or moving an existing chart to a different slide) now requires only
+    a SLIDE_CHARTS edit + a CHART_ROLE_RENDERERS entry; the slot keys
+    propagate automatically.
+
+    Roles not covered by CHART_ROLE_RENDERERS are silently dropped so a
+    future SLIDE_CHARTS entry for a chart that hasn't been wired yet
+    doesn't blow up the deck -- the slide still renders without a chart
+    and the operator sees the slot-unavailable WARNING via _image().
+    """
+    from tools.academic_deck import SLIDE_CHARTS
+    # June 27 2026 -- additional renderers for the reconciled
+    # SLIDE_CHARTS (slides 4 / 6 / 7 / 8 / 12 gained chart roles
+    # when the generation map was brought into alignment with the
+    # editor canvas).
+    from tools.chart_render import render_cumulative_returns
+    from tools.chart_renderers import (
+        render_extended_charts as _render_extended_charts,
+    )
     from tools.chart_render import (
-        render_cumulative_returns, render_efficient_frontier,
-        render_rolling_correlation, render_strategy_comparison,
+        render_efficient_frontier, render_rolling_correlation,
+        render_strategy_comparison,
     )
 
     def _safe(fn):
@@ -9997,159 +19319,1439 @@ def _render_deck_slide_charts(
             log.warning("deck_chart_render_failed", error=str(exc))
             return None
 
-    return {
-        2: _safe(lambda: render_rolling_correlation(data)),
-        3: _safe(lambda: render_cumulative_returns(
-            data, only=_STATIC_STRATEGIES,
-            title="Static Strategies - Growth of $1")),
-        4: _safe(lambda: render_strategy_comparison(
-            data, strategy_type="dynamic")),
-        6: _safe(lambda: render_efficient_frontier(
-            data, blend_weights=blend_weights)),
-        # Slide 8 — post-2022, three series: the regime-conditional blend
-        # (injected from the cached performance chart), benchmark, equal weight.
-        8: _safe(lambda: render_cumulative_returns(
-            data, only={"BENCHMARK", "EQUAL_WEIGHT"}, period="post2022",
-            extra_series=({"Regime-Conditional Blend": blend_series}
-                          if blend_series else None),
-            title="Out-of-Sample Cumulative Return (post-2022)")),
+    # Role string -> renderer callable. The blend_weights closure is
+    # captured once here so the lambdas only need the data dict at call
+    # time. blend_series is reserved for future role additions (e.g. an
+    # explicit cumulative-return overlay slot); kept on the signature
+    # so the existing call sites do not have to change.
+    # Extended-renderer helper: a single dispatch through
+    # render_extended_charts so a chart_renderers.py role plugs in
+    # with a one-line entry instead of needing its own import.
+    # Returns PNG bytes or None on failure (matches the contract
+    # of the chart_render.render_* helpers).
+    def _extended(key: str) -> bytes | None:
+        try:
+            return _render_extended_charts(key, data).get(key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "deck_chart_extended_render_failed",
+                key=key, error=str(exc))
+            return None
+
+    chart_role_renderers = {
+        # slide 4 -- rolling-Sharpe comparison (extended renderer)
+        "rolling_sharpe":
+            lambda d: _extended("rolling_sharpe"),
+        # slide 5
+        "rolling_correlation":
+            lambda d: render_rolling_correlation(d),
+        # slide 6 -- post-reconciliation: cumulative_returns
+        # (previously strategy_comparison_oos_sharpe). Matches
+        # what the editor canvas shows on slide 6.
+        "cumulative_returns":
+            lambda d: render_cumulative_returns(d),
+        # slide 7 -- OOS performance (extended renderer)
+        "oos_performance":
+            lambda d: _extended("oos_performance"),
+        # slide 8 -- live regime signals (extended renderer)
+        "regime_signals":
+            lambda d: _extended("regime_signals"),
+        # slide 12 -- canonical key 'risk_return' from
+        # chart_render._DECK_KEYS (formerly 'efficient_frontier'
+        # in this dispatch). render_efficient_frontier is still
+        # the underlying matplotlib function; only the dispatch
+        # key changed to match the renderer registry.
+        # blend_weights drives the live marker on the frontier;
+        # the rest of the sweep comes from analytics_metrics_cache.
+        "risk_return":
+            lambda d: render_efficient_frontier(
+                d, blend_weights=blend_weights),
+        # Legacy keys retained as aliases so any pre-reconciliation
+        # caller that still requests the old roles continues to
+        # work (e.g. a story plan from a draft generated before
+        # the reconciliation). Defensive only -- SLIDE_CHARTS no
+        # longer uses these roles.
+        "strategy_comparison_oos_sharpe":
+            lambda d: render_strategy_comparison(d),
+        "efficient_frontier":
+            lambda d: render_efficient_frontier(
+                d, blend_weights=blend_weights),
     }
+
+    out: dict = {}
+    for slide_number, role in SLIDE_CHARTS.items():
+        renderer = chart_role_renderers.get(role)
+        if renderer is None:
+            log.warning(
+                "deck_chart_role_unwired",
+                slide_number=slide_number, role=role)
+            continue
+        out[slide_number] = _safe(lambda r=renderer: r(data))
+    return out
+
+
+async def _build_deck_context(
+    email: str,
+) -> tuple[dict, dict, list, int]:
+    """Bridge #95 — extracted helper so both the async-job and SSE
+    streaming endpoints can build the deck-generation context block
+    from a single source. Returns (data, blend_weights, blend_series,
+    n_strategies). All four fail-open: a cold cache produces an empty
+    bundle rather than raising.
+
+    June 27 2026 (PR 1 v3, LEAK 1 closer) -- computes the effective
+    data_hash inline and threads it into gather_document_data so the
+    strategy_results_cache read is hash-aware. Under freeze, a miss
+    on the freeze hash raises StrategyCacheMissingForHashError (the
+    deck generator wrapper catches + translates to HTTPException
+    500 with the spec 'Run light refresh and try again' message).
+    Without this, the deck's headline strategy tokens (Sharpe /
+    max_drawdown / recovery / blend weights -- ~20 tokens total)
+    silently leaked LIVE strategy results into the freeze-locked
+    deliverable."""
+    from tools.academic_export import gather_document_data
+    from tools.audit_assembler import current_data_hash
+    from tools.submission_freeze import get_effective_data_hash
+
+    live_hash = await current_data_hash()
+    deck_data_hash = await get_effective_data_hash(live_hash)
+    data = await gather_document_data(
+        data_hash=deck_data_hash or None)
+
+    # ── Live regime context (Slide 6) — current_regime / regime_confidence
+    #    / blend_weights from detect_current_regime() + the regime blend,
+    #    the SAME source the Forward Projection tile and CIO card use, so
+    #    the slide never carries a stale constant. Fail-open to None. ─────
+    blend_weights: dict = {}
+    try:
+        from tools.cio_recommendation import _build_live_context
+        built = await _build_live_context()
+        if not built.get("error"):
+            ctx = built["context"]
+            data["current_regime"] = ctx.get("regime")
+            data["regime_confidence"] = ctx.get("probability")
+            blend_weights = ctx.get("blend_weights") or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_regime_context_unavailable", error=str(exc))
+
+    # ── Play-by-play frozen events (Slide 4) + the post-2022 blend series.
+    play_by_play_events: list = []
+    blend_series: list = []
+    try:
+        from tools.play_by_play import (
+            get_cached_performance_chart, load_stored_events,
+        )
+        play_by_play_events = await load_stored_events()
+        pc = await get_cached_performance_chart()
+        if pc and pc.get("series"):
+            blend_series = [
+                (p.get("date"), p.get("regime_conditional"))
+                for p in pc["series"]
+                if p.get("regime_conditional") is not None]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_play_by_play_unavailable", error=str(exc))
+    data["play_by_play_events"] = play_by_play_events
+    data["blend_weights"] = blend_weights
+    n_strategies = len(data.get("strategy_results") or {})
+    return data, blend_weights, blend_series, n_strategies
+
+
+def _deck_per_slide_context(data: dict) -> dict:
+    """Bridge #95 — the context block handed to the per-slide LLM call.
+    Same shape as the all-six-at-once prompt's context so existing
+    SLIDE_SPECIFICATIONS references resolve. Per-slide prompts ask the
+    model to draw from THIS block; the slice helper inside the prompt
+    isolates which slide's spec to emit."""
+    from tools.academic_deck import (
+        CORRELATION_POST_2022, CORRELATION_PRE_2022,
+        OOS_SHARPE_BENCHMARK, OOS_SHARPE_EQUAL_WEIGHT,
+        OOS_SHARPE_REGIME_CONDITIONAL, PLAY_BY_PLAY_EVENTS,
+    )
+    rc = data.get("rolling_correlation") or {}
+    return {
+        "study_period": data.get("study_period"),
+        "summary_statistics": data.get("summary_statistics"),
+        "strategy_performance": data.get("regime_conditional"),
+        "drawdown_comparison": data.get("drawdown_comparison"),
+        "factor_loadings": data.get("factor_loadings"),
+        "rolling_correlation": {"pre_2022": rc.get("pre_2022"),
+                                "post_2022": rc.get("post_2022")},
+        "current_regime": data.get("current_regime"),
+        "regime_confidence": data.get("regime_confidence"),
+        "blend_weights": data.get("blend_weights") or {},
+        "play_by_play_events": [
+            {"event_id": e.get("event_id"),
+             "event_date": e.get("event_date"),
+             "trigger": e.get("trigger"), "regime": e.get("regime"),
+             "verdict": e.get("verdict"),
+             "value_added_sharpe": e.get("value_added_sharpe")}
+            for e in (data.get("play_by_play_events") or [])],
+        "validated_constants": {
+            "oos_sharpe_regime_conditional": OOS_SHARPE_REGIME_CONDITIONAL,
+            "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
+            "oos_sharpe_equal_weight": OOS_SHARPE_EQUAL_WEIGHT,
+            "correlation_pre_2022": CORRELATION_PRE_2022,
+            "correlation_post_2022": CORRELATION_POST_2022,
+            "play_by_play_events": PLAY_BY_PLAY_EVENTS,
+        },
+    }
+
+
+_DECK_SLIDE_SYSTEM_PROMPT = (
+    "You write JSON for slides in an investment-research presentation. "
+    "Your output is parsed by code -- emit ONLY a single JSON object, "
+    "no markdown fences, no preamble, no commentary. Do NOT review or "
+    "evaluate slides; do NOT produce 'Peer Discussant Review' headers "
+    "or any rubric-scored format. The downstream pipeline parses your "
+    "JSON directly into a .pptx slide."
+)
+
+
+def _substitute_slide_content(
+    parsed: dict, substitution_table: dict[str, str] | None,
+    *, slide_number: int,
+) -> dict:
+    """Apply the substitution table to every {{TOKEN}}-bearing field
+    in a parsed deck slide dict. Operates on string fields (title,
+    headline, speaker_notes) and on list-of-string fields (bullets).
+    Mutates and returns the dict.
+
+    No-op when substitution_table is None -- preserves the pre-Layer-2
+    behaviour for any caller that hasn't been wired through yet.
+
+    The substitution log captures the per-slide tokens replaced so
+    Render logs show 'numeric_substitution_applied
+    document_type=deck slide_number=3 tokens_replaced=[...]' per
+    slide -- the same telemetry shape harness_narrative emits for
+    the brief section writer."""
+    if substitution_table is None:
+        return parsed
+    from tools.numeric_substitution import apply_substitutions
+
+    # June 28 2026 -- soft-fail wrap runs BEFORE substitution.
+    # If we scanned AFTER substitution, the scanner would see
+    # the just-resolved values (e.g. "0.54" from
+    # {{BENCHMARK_SHARPE}}) + flag them as token_available +
+    # wrap them -- defeating substitution. Scanning RAW
+    # (pre-substitution) text:
+    #   - bare numerics emitted by the LLM without a token
+    #     wrapper -> flagged + wrapped here
+    #   - {{TOKEN}} placeholders -> protected (numerics
+    #     inside tokens skip the scanner via _is_inside_token)
+    # The wrapped form ("the Sharpe is <unverified>0.43
+    # </unverified>") flows through apply_substitutions
+    # unchanged (no {{TOKEN}} to substitute).
+    try:
+        from tools.untoken_numeric_check import (
+            find_untoken_backed_numerics,
+            wrap_unverified,
+        )
+        _slide_offenders: list[str] = []
+        for _key in ("title", "headline", "speaker_notes"):
+            if isinstance(parsed.get(_key), str):
+                _viols = find_untoken_backed_numerics(
+                    parsed[_key], substitution_table)
+                if _viols:
+                    parsed[_key] = wrap_unverified(
+                        parsed[_key], _viols)
+                    _slide_offenders.extend(
+                        v.raw_value for v in _viols)
+        if isinstance(parsed.get("bullets"), list):
+            wrapped_bullets: list[str] = []
+            for _bullet in parsed["bullets"]:
+                if isinstance(_bullet, str):
+                    _viols = find_untoken_backed_numerics(
+                        _bullet, substitution_table)
+                    if _viols:
+                        wrapped_bullets.append(wrap_unverified(
+                            _bullet, _viols))
+                        _slide_offenders.extend(
+                            v.raw_value for v in _viols)
+                    else:
+                        wrapped_bullets.append(_bullet)
+                else:
+                    wrapped_bullets.append(_bullet)
+            parsed["bullets"] = wrapped_bullets
+        if _slide_offenders:
+            log.warning(
+                "deck_untoken_lock_soft_fail",
+                document_type="presentation_deck",
+                slide_number=slide_number,
+                remaining_violations=len(_slide_offenders),
+                sample_offenders=_slide_offenders[:10],
+                note=(
+                    "hard-lock detected raw numerics in "
+                    "slide content; wrapping with "
+                    "<unverified> tags for human review."))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deck_untoken_lock_check_failed",
+            slide_number=slide_number,
+            error=str(exc))
+
+    replaced_all: set[str] = set()
+    for key in ("title", "headline", "speaker_notes"):
+        if isinstance(parsed.get(key), str):
+            new_value, replaced = apply_substitutions(
+                parsed[key], substitution_table)
+            parsed[key] = new_value
+            replaced_all.update(replaced)
+    if isinstance(parsed.get("bullets"), list):
+        new_bullets: list[str] = []
+        for bullet in parsed["bullets"]:
+            if isinstance(bullet, str):
+                new_bullet, replaced = apply_substitutions(
+                    bullet, substitution_table)
+                new_bullets.append(new_bullet)
+                replaced_all.update(replaced)
+            else:
+                new_bullets.append(bullet)
+        parsed["bullets"] = new_bullets
+
+    # June 22 2026 (PR A scope) -- walk table_data cells. The Sonnet
+    # writer puts most numeric tokens in slide table COLUMNS (the
+    # comparison table on slide 2, the IS/OOS Sharpe table on
+    # slide 6, the macro watchpoint table on slide 7, etc).
+    # Without this walk every {{TOKEN}} embedded in a header
+    # string or a row cell survives unsubstituted into the final
+    # deck content -- the root cause of the 23 unresolved
+    # placeholders reported in production.
+    #
+    # Contract: walk every string in `headers` (a list of strings)
+    # and every string cell in every row of `rows` (a list of
+    # lists). Non-string cells (None, numbers, nested dicts)
+    # pass through untouched.
+    td = parsed.get("table_data")
+    if isinstance(td, dict):
+        if isinstance(td.get("headers"), list):
+            new_headers: list = []
+            for h in td["headers"]:
+                if isinstance(h, str):
+                    new_h, replaced = apply_substitutions(
+                        h, substitution_table)
+                    new_headers.append(new_h)
+                    replaced_all.update(replaced)
+                else:
+                    new_headers.append(h)
+            td["headers"] = new_headers
+        if isinstance(td.get("rows"), list):
+            new_rows: list = []
+            for row in td["rows"]:
+                if isinstance(row, list):
+                    new_row: list = []
+                    for cell in row:
+                        if isinstance(cell, str):
+                            new_cell, replaced = apply_substitutions(
+                                cell, substitution_table)
+                            new_row.append(new_cell)
+                            replaced_all.update(replaced)
+                        else:
+                            new_row.append(cell)
+                    new_rows.append(new_row)
+                else:
+                    new_rows.append(row)
+            td["rows"] = new_rows
+
+    if replaced_all:
+        log.info("numeric_substitution_applied",
+                 document_type="presentation_deck",
+                 slide_number=slide_number,
+                 tokens_replaced=sorted(replaced_all),
+                 count=len(replaced_all))
+
+    return parsed
+
+
+def _generate_one_deck_slide(
+    slide_number: int, context: dict, n_strategies: int,
+    *, slide_plan_entry: dict | None = None,
+    substitution_table: dict[str, str] | None = None,
+    brief_excerpt: str = "",
+) -> dict | None:
+    """Bridge #98 / #100 -- generate ONE deck slide via a DIRECT Sonnet
+    call (no harness, no evaluator, no Gemini, no Opus arbiter). Sync;
+    callers wrap in asyncio.to_thread. Returns the parsed slide dict
+    or None on any failure; the caller writes the [DATA PENDING]
+    placeholder for that slide via _normalize_slides.
+
+    slide_plan_entry (PR #333) -- when supplied, the entry from the
+    Opus story plan for THIS slide is injected ahead of the existing
+    spec block. The headline, numeric_anchors, bullets, and key visual
+    are LOCKED -- the per-slide Sonnet call's job becomes prose layout,
+    not deciding what the numbers are. Speaker notes from the plan are
+    also overwritten onto the parsed slide dict after the call returns
+    (the plan is the source of truth; the LLM never gets to "improve"
+    them). When the plan is None the call behaves exactly as before --
+    the fail-open contract is: a missing or fallback plan never blocks
+    slide generation.
+
+    Why direct call_claude instead of harness_narrative:
+      The harness uses the academic_review_peer_evaluator rubric, which
+      expects "### N. Rated Section / **Rating:**" blocks. Slide JSON
+      scored low, retries prepended the evaluator's "Peer Discussant
+      Review" feedback to the generator prompt, and Sonnet complied on
+      retry attempts -- emitting peer-review text instead of slide JSON.
+      The user reported the symptom for slide 2 (bridge #97). Bridge
+      #100's no-harness architecture is the fix.
+
+    Failure handling:
+      - JSON parse fails the first attempt -> retry ONCE with an added
+        instruction reminding the model to output ONLY JSON.
+      - If the second attempt also fails to parse -> return None and
+        the caller writes a [DATA PENDING] placeholder for THAT slide.
+      - A single slide's failure no longer downs the entire deck.
+    """
+    import json as _json
+
+    from agents.base import SONNET_MODEL, call_claude
+    from tools.academic_deck import (
+        slide_generation_prompt, parse_single_slide_json,
+    )
+
+    prompt = slide_generation_prompt(slide_number)
+    ctx_str = (
+        context if isinstance(context, str)
+        else _json.dumps(context, indent=2, default=str)
+    )
+    # PR #333 -- when a story plan entry exists for this slide, inject
+    # the LOCKED contract above the spec block. The slide LLM is told
+    # explicitly that its job is layout + prose only; the numbers, the
+    # headline, and the bullet content are NOT to be regenerated.
+    plan_block = ""
+    if slide_plan_entry and isinstance(slide_plan_entry, dict):
+        anchors = slide_plan_entry.get("numeric_anchors") or {}
+        bullets = slide_plan_entry.get("slide_bullets") or []
+        # June 22 2026 -- read max_bullets from the locked plan
+        # entry. CEILING, not target -- "no more than N", never
+        # "write exactly N". Default 3 for slides without an
+        # explicit cap (the spec block's BULLET DISCIPLINE
+        # constraint covers the rest). The locked plan is the
+        # source of truth; without this wire-through the
+        # max_bullets schema field is decorative and the per-
+        # slide writer ignores the slide-specific cap.
+        try:
+            max_bullets = int(
+                slide_plan_entry.get("max_bullets") or 3)
+        except (TypeError, ValueError):
+            max_bullets = 3
+        max_bullets = max(0, min(max_bullets, 3))
+        bullets_block = (
+            "\n".join(f"  - {b}" for b in bullets)
+            if bullets else "  (no bullets -- the headline is the slide)")
+        plan_block = (
+            "\n\nSTORY PLAN FOR THIS SLIDE (do not deviate):\n"
+            f"  Headline: {slide_plan_entry.get('headline', '')}\n"
+            f"  Key visual: {slide_plan_entry.get('key_visual', '')}\n"
+            "  Numeric anchors (use ONLY these values):\n"
+            f"{_json.dumps(anchors, indent=4, default=str)}\n"
+            f"  Bullets (ceiling {max_bullets}, "
+            "not target -- fewer is better when bullets do not "
+            "add meaning beyond the title and table):\n"
+            f"{bullets_block}\n\n"
+            "  Your job is layout and prose formatting only. Do not "
+            "invent numbers. Do not change the headline. Do not add "
+            f"bullets beyond the {max_bullets} ceiling. Write "
+            "[DATA PENDING] for any value not in numeric_anchors.")
+        # June 22 2026 -- user-uploaded slide guidance override.
+        # When merge_guidance_into_slide_plan_entry seeded a
+        # _user_guidance sub-dict on the plan entry, surface those
+        # directives as an additional spec block the LLM reads.
+        # Non-overridable fields (numeric_anchors,
+        # chart_references, substitution_tokens) are NOT touched
+        # by guidance and continue to bind verbatim.
+        ug = slide_plan_entry.get("_user_guidance")
+        if isinstance(ug, dict) and ug:
+            ug_lines = ["", "USER GUIDANCE FOR THIS SLIDE "
+                            "(uploaded via the platform; treat "
+                            "as supplemental directive on top of "
+                            "the spec above):"]
+            if ug.get("so_what"):
+                ug_lines.append(
+                    f"  So-what framing: {ug['so_what']}")
+            if ug.get("bullet_guidance"):
+                ug_lines.append(
+                    f"  Bullet guidance: {ug['bullet_guidance']}")
+            if ug.get("speaker_note_directive"):
+                ug_lines.append(
+                    "  Speaker-note tone / cue: "
+                    f"{ug['speaker_note_directive']}")
+            plan_block = plan_block + "\n" + "\n".join(ug_lines)
+    # Layer 2 (June 21 2026) -- prepend the substitution placeholder
+    # guide so the per-slide Sonnet writer uses {{TOKEN}} markers
+    # instead of raw figures. The platform substitutes verified
+    # cache values on the parsed slide dict after the call returns
+    # (_substitute_slide_content). No-op when no substitution_table
+    # is supplied (caller hasn't been wired through yet).
+    placeholder_guide = ""
+    if substitution_table is not None:
+        placeholder_guide = (
+            _NUMERIC_PLACEHOLDER_GUIDE
+            + _DECK_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION
+            + "\n")
+    # June 21 2026 brief-as-anchor -- per-slide brief excerpt
+    # threading. Slides 9 (live demo) and 10 (AI methodology) are
+    # explicitly excluded by brief_section_for_slide; the caller
+    # passes brief_excerpt="" for those slides. brief_section_block
+    # is a no-op string when brief_excerpt is empty so this
+    # composes cleanly without conditional branches here.
+    from tools.brief_grounding import (
+        SLIDE_TO_BRIEF_SECTION, brief_section_block,
+    )
+    brief_alignment_block = brief_section_block(
+        brief_excerpt,
+        SLIDE_TO_BRIEF_SECTION.get(slide_number))
+    user_message = (
+        f"{placeholder_guide}{prompt}{plan_block}"
+        f"{brief_alignment_block}\n\nCONTEXT "
+        f"(numbers to cite, do not invent):\n{ctx_str}")
+
+    for attempt in (1, 2):
+        try:
+            raw = call_claude(
+                SONNET_MODEL, _DECK_SLIDE_SYSTEM_PROMPT, user_message,
+                max_tokens=2000,
+                trigger=f"deck_slide_{slide_number}_attempt_{attempt}")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deck_slide_call_failed",
+                        slide_number=slide_number,
+                        attempt=attempt, error=str(exc))
+            return None
+
+        parsed = parse_single_slide_json(raw)
+        if parsed is not None:
+            parsed["slide_number"] = slide_number
+            # PR #333 -- the story plan is the source of truth for
+            # speaker notes. The Opus arbiter wrote them once with the
+            # rubric-evaluated quality bar; we never let the per-slide
+            # Sonnet pass "improve" them. Inject verbatim onto the
+            # parsed dict so build_presentation_deck reads them.
+            if slide_plan_entry and isinstance(
+                    slide_plan_entry.get("speaker_notes"), str
+            ) and slide_plan_entry["speaker_notes"].strip():
+                parsed["speaker_notes"] = (
+                    slide_plan_entry["speaker_notes"])
+            # Layer 2 (June 21 2026) -- run the substitution table
+            # across every {{TOKEN}}-bearing field on the parsed
+            # slide (title, headline, speaker_notes, bullets). The
+            # locked plan's speaker_notes may also carry placeholders
+            # (the Pass-1 arbiter could emit a token in the notes); a
+            # second pass post-override resolves any that landed via
+            # that path. No-op when substitution_table is None.
+            parsed = _substitute_slide_content(
+                parsed, substitution_table, slide_number=slide_number)
+            return parsed
+
+        log.warning("deck_slide_parse_failed",
+                    slide_number=slide_number,
+                    attempt=attempt,
+                    response_chars=len(raw or ""),
+                    response_prefix=(raw or "")[:200])
+
+        if attempt == 1:
+            user_message = (
+                f"{prompt}\n\nCONTEXT (numbers to cite, do not invent):\n{ctx_str}\n\n"
+                "Your previous response was not valid JSON. Output ONLY "
+                "the JSON object for this slide, nothing else. No preamble, "
+                "no markdown fences, no peer-review formatting -- just the "
+                "single JSON object matching the contract above.")
+    return None
+
+
+async def _finalize_deck(
+    slides: list[dict],
+    data: dict,
+    blend_weights: dict,
+    blend_series: list,
+    email: str,
+    substitution_table: dict[str, str] | None = None,
+) -> tuple[bytes, str, str, int | None]:
+    """Bridge #95 — shared between the async-job and SSE paths. Given
+    the assembled per-slide dicts, renders charts + builds pptx +
+    creates the editor draft + writes audit metrics. Returns
+    (file bytes, filename, media type, editor draft id). Every
+    degradation (cold chart, draft-create failure) is non-fatal.
+
+    Layer 3b (June 21 2026) -- when substitution_table is supplied,
+    persists the value manifest + generation data_hash on the deck
+    draft so /api/v1/export/verify-all has an authoritative reference
+    for every numeric value the substitution table produced. Mirrors
+    the brief block in _generate_brief_document. Fail-open: a manifest
+    write failure logs and is non-fatal."""
+    import asyncio
+    from datetime import date
+
+    from tools.academic_deck import build_presentation_deck
+
+    charts = await asyncio.to_thread(
+        _render_deck_slide_charts, data, blend_weights, blend_series)
+    # June 27 2026 -- thread substitution_table into the post-build
+    # pass so any un-substituted {{...}} placeholder that leaked
+    # through (e.g. via a SLIDE_TITLES[idx-1] fallback when a
+    # specialized renderer had no slide.title) gets caught + replaced
+    # before the PPTX bytes ship.
+    pptx_bytes = await asyncio.to_thread(
+        build_presentation_deck, slides, charts,
+        substitution_table)
+
+    draft_id: int | None = None
+    try:
+        from tools.editor_content import deck_slides_to_editor
+        from tools.editor_drafts import create_draft
+        from tools.chart_config_defaults import (
+            default_strategy_names_from_cache,
+        )
+
+        # June 26 2026 -- strategy_names sourced from the live
+        # strategy_results cache so each chart_config's series
+        # list (and each table_config's rows list) gets
+        # prepopulated with every strategy in cache order, all
+        # visible by default. The editor's Configure panel can
+        # then toggle individual series off. Falls back to [] when
+        # the cache is empty (cold env / pre-warm); the renderer's
+        # fallback path handles the absent-series case unchanged.
+        strategy_names = default_strategy_names_from_cache(
+            data.get("strategy_results"))
+        # June 28 2026 (Phase 2 substitution-deferral audit) --
+        # always substitute at this boundary regardless of the
+        # DEFER_SUBSTITUTION_TO_EXPORT flag. Deck content_json
+        # is canvas-element schema (Konva) and structurally
+        # incompatible with the dual-mode token_value
+        # architecture; surfacing raw {{TOKEN}} in the canvas
+        # editor would be bad UX with no upside.
+        content_json, content_text = deck_slides_to_editor(
+            slides, strategy_names=strategy_names,
+            substitution_table=substitution_table)
+
+        # ── Concern 7h: pre-submission adversarial critic ─────
+        try:
+            from agents.academic_review import (
+                run_doc_gen_debate_round,
+            )
+            content_text, _debate_id, _critic_res = (
+                await run_doc_gen_debate_round(
+                    reviewer_email=email,
+                    document_type="presentation_deck",
+                    content_text=content_text))
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(
+                "doc_gen_critic_pipeline_failed",
+                document_type="presentation_deck",
+                error=str(_exc))
+
+        audit_warnings = await _run_document_audit(
+            content_text, "presentation_deck", email)
+        # Stamp the live strategy hash (migration 063).
+        try:
+            from tools.audit_assembler import (
+                current_data_hash as _curr_hash_deck,
+            )
+            _deck_hash = await _curr_hash_deck()
+        except Exception:  # noqa: BLE001
+            _deck_hash = None
+        draft = await create_draft(
+            "presentation_deck", email,
+            f"Presentation Deck — {date.today().isoformat()}",
+            content_json, content_text,
+            created_from="generated",
+            audit_warnings=audit_warnings,
+            data_hash=_deck_hash)
+        if draft is not None:
+            draft_id = draft["id"]
+        await _write_audit_metrics(
+            "presentation_deck", email, draft_id, audit_warnings)
+
+        # Layer 3b -- persist value manifest for deck drafts.
+        if draft_id is not None and substitution_table is not None:
+            try:
+                from tools.audit_assembler import (
+                    current_data_hash as _cur_hash,
+                )
+                from tools.editor_drafts import (
+                    update_value_manifest as _update_manifest,
+                )
+                from tools.numeric_substitution import (
+                    build_value_manifest,
+                )
+                from datetime import datetime as _dt
+                from datetime import timezone as _tz
+                _hash_for_manifest = await _cur_hash() or ""
+                manifest = build_value_manifest(
+                    substitution_table,
+                    data_hash=_hash_for_manifest[:64],
+                    generated_at=_dt.now(_tz.utc).isoformat())
+                await _update_manifest(
+                    draft_id, manifest,
+                    data_hash=_hash_for_manifest[:64] or None)
+                log.info(
+                    "value_manifest_persisted",
+                    document_type="presentation_deck",
+                    draft_id=draft_id,
+                    n_values=len(manifest))
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "value_manifest_persist_failed",
+                    document_type="presentation_deck",
+                    error=str(exc))
+
+            # June 28 2026 (PR #479) -- auto-upgrade hook for
+            # deck. Walks canvas slide content_json + flags
+            # any element containing <unverified> tag
+            # substrings. Document-type-agnostic per operator
+            # directive.
+            if draft_id is not None:
+                await _auto_upgrade_draft_to_token_values(
+                    draft_id, "presentation_deck")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_draft_create_failed", error=str(exc))
+
+    filename = f"forest-capital-presentation-deck-{date.today().isoformat()}.pptx"
+    return pptx_bytes, filename, _PPTX_MEDIA, draft_id
 
 
 async def _generate_deck_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
     """
-    Generates the 10-slide final presentation deck. Returns (file bytes,
-    filename, media type, editor draft id). Raises on failure — the job
-    wrapper records it.
+    Generates the 6-slide final presentation deck (June 6 2026 rewrite;
+    previously 10 slides — see academic_deck.SLIDE_TITLES for the new
+    narrative arc). Returns (file bytes, filename, media type, editor
+    draft id). Raises on failure — the job wrapper records it.
 
-    JSON-driven (May 28 2026 rebuild): a single Academic Writer call
-    (academic_deck.deck_generation_prompt() through the harness) returns
-    content for all ten slides; build_presentation_deck lays them out in a
-    professional navy/white theme with per-slide charts rendered server-side
-    as light-mode PNGs. Regime state on Slide 6 is LIVE-SOURCED from
-    detect_current_regime() (via the CIO live context), never a constant, so
-    the slide reflects the current HMM posterior. Every degradation — a cold
-    cache, an unparseable JSON, a missing chart — falls back to a
-    [DATA PENDING] note rather than failing the deck.
+    Bridge #95 (June 7 2026) -- rewritten to call harness_narrative ONCE
+    PER SLIDE instead of once for all six slides combined. The old
+    all-six call at max_tokens=4000 was truncating the JSON mid-slide-6
+    (estimated 2300-3900 token output), producing an unparseable
+    response and the canonical six-slides-all-[DATA PENDING] symptom.
+    Per-slide calls cap each slide at max_tokens=1500 with comfortable
+    headroom -- no more truncation, and a single slide's failure no
+    longer downs the entire deck.
+
+    Bridge #82 (May 26 2026) -- regime state on Slide 6 is LIVE-SOURCED
+    from detect_current_regime() (via the CIO live context). Every
+    degradation -- a cold cache, an unparseable JSON, a missing chart
+    -- falls back to a [DATA PENDING] note rather than failing.
+
+    June 27 2026 -- regime_signals freshness HARD GATE. The deck
+    surfaces a live CIO recommendation on slides 7 + 11 that
+    references {{VIX_CURRENT}}, {{YIELD_CURVE_CURRENT}},
+    {{CREDIT_SPREAD_CURRENT}}, {{EQUITY_TREND_CURRENT}},
+    {{ESS_CURRENT}}, {{CURRENT_REGIME}}, {{REGIME_CONFIDENCE}}.
+    Stale signals at generation time would produce a deck that
+    misleads the live panel. Unlike the brief / appendix (which
+    keep the em-dash fallback), the deck blocks: we attempt an
+    automatic refresh with a 10s hard timeout and 503 if the
+    refresh can't complete.
     """
     import asyncio
-    from datetime import date
 
-    from tools.academic_deck import (
-        CORRELATION_POST_2022, CORRELATION_PRE_2022,
-        OOS_SHARPE_BENCHMARK, OOS_SHARPE_EQUAL_WEIGHT,
-        OOS_SHARPE_REGIME_CONDITIONAL, PLAY_BY_PLAY_EVENTS,
-        build_presentation_deck, deck_generation_prompt,
+    # ── June 27 2026: regime_signals pre-flight gate (deck only) ──
+    ok, _signals = await _regime_signals_fresh_or_refresh()
+    if not ok:
+        log.warning(
+            "deck_generation_blocked_on_regime_signals",
+            note=("regime_signals_cache miss + refresh "
+                  "failed/timed out within 10s -- blocking deck "
+                  "generation to avoid stale live recommendation"))
+        raise HTTPException(
+            status_code=503,
+            detail=_REGIME_BLOCKING_ERROR_DETAIL)
+
+    # June 21 2026 -- brief-as-anchor gate. The presentation deck
+    # is the THIRD document generated, after the executive brief
+    # (narrative anchor) and the analytical appendix (technical
+    # detail layer). Both must exist before the deck runs so its
+    # Pass-1 Opus arbiter has full visibility into the narrative
+    # the deck must argue AND the per-strategy detail it can cite
+    # for supporting evidence.
+    #
+    # Generation order: brief -> appendix -> deck.
+    #
+    # 409 responses surface inline in the editor (the frontend's
+    # DocumentGenerationPanel renders detail in the per-card error
+    # slot already; see PR #364 frontend audit).
+    from tools.brief_grounding import (
+        get_appendix_for_grounding, get_brief_for_grounding,
     )
-    from tools.academic_export import gather_document_data, harness_narrative
+    brief_grounding = await get_brief_for_grounding()
+    if brief_grounding is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Generate the executive brief before the "
+                "presentation deck. The deck is the third "
+                "document in the generation order "
+                "(brief -> appendix -> deck) and grounds itself "
+                "in both upstream documents."))
+    appendix_grounding = await get_appendix_for_grounding()
+    if appendix_grounding is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Generate the analytical appendix before the "
+                "presentation deck. The deck cites supporting "
+                "technical detail from the appendix; the "
+                "generation order is brief -> appendix -> deck."))
 
     try:
-        data = await gather_document_data()
+        data, blend_weights, blend_series, n_strategies = \
+            await _build_deck_context(email)
+        per_slide_ctx = _deck_per_slide_context(data)
 
-        # ── Live regime context (Slide 6) — current_regime / regime_confidence
-        #    / blend_weights from detect_current_regime() + the regime blend,
-        #    the SAME source the Forward Projection tile and CIO card use, so
-        #    the slide never carries a stale constant. Fail-open to None. ─────
-        current_regime = None
-        regime_confidence = None
-        blend_weights: dict = {}
-        try:
-            from tools.cio_recommendation import _build_live_context
-            built = await _build_live_context()
-            if not built.get("error"):
-                ctx = built["context"]
-                current_regime = ctx.get("regime")
-                regime_confidence = ctx.get("probability")
-                blend_weights = ctx.get("blend_weights") or {}
-        except Exception as exc:  # noqa: BLE001
-            log.warning("deck_regime_context_unavailable", error=str(exc))
+        from tools.academic_deck import DECK_SLIDE_COUNT, SLIDE_TITLES
+        # PR #333 -- the story plan is the LOCKED structural layer
+        # above the per-slide LLM passes. Each slide's headline,
+        # numeric anchors, bullets, and speaker notes come from the
+        # plan; the per-slide Sonnet call writes prose around them.
+        # Fail-open contract: a missing plan (transient Opus failure,
+        # cold cache, or document_type mismatch) leaves slide_plan as
+        # an empty list and slide generation proceeds exactly as
+        # before -- the existing fallback already produces a complete
+        # deck without the locked structural layer.
+        #
+        # June 21 2026 brief-as-anchor + appendix-as-evidence --
+        # both upstream documents thread through to the Pass-1
+        # Opus arbiter. The cache key includes both content
+        # hashes so a regen of either upstream document
+        # auto-invalidates the cached deck plan.
+        slide_plan = await _resolve_story_plan_slide_entries(
+            data, n_strategies, list(SLIDE_TITLES),
+            brief_text=brief_grounding["content_text"],
+            brief_hash=brief_grounding["content_hash"],
+            appendix_text=appendix_grounding["content_text"],
+            appendix_hash=appendix_grounding["content_hash"])
 
-        # ── Play-by-play frozen events (Slide 7) + the post-2022 blend series
-        #    for the Slide 8 chart, both from the play_by_play layer. ─────────
-        play_by_play_events: list = []
-        blend_series: list = []
+        # Layer 2 (June 21 2026) -- build the substitution table once
+        # per generation job and thread it through every per-slide
+        # call. Same table the brief uses (same data_hash) so a value
+        # appearing in both the brief and the deck is byte-identical
+        # by construction. Fail-open: any error returns None and the
+        # per-slide path runs without substitution (the slide writer
+        # then emits raw figures, which the post-gen audit's
+        # check_unresolved_placeholders + check_numeric_consistency
+        # flag as it would today).
+        substitution_table: dict[str, str] | None = None
         try:
-            from tools.play_by_play import (
-                get_cached_performance_chart, load_stored_events,
+            from tools.audit_assembler import current_data_hash
+            from tools.cio_recommendation import (
+                compute_implied_asset_allocation, get_latest_recommendation,
             )
-            play_by_play_events = await load_stored_events()
-            pc = await get_cached_performance_chart()
-            if pc and pc.get("series"):
-                blend_series = [
-                    (p.get("date"), p.get("regime_conditional"))
-                    for p in pc["series"]
-                    if p.get("regime_conditional") is not None]
+            from tools.numeric_substitution import (
+                get_substitution_table,
+            )
+            from tools.academic_deck import (
+                OOS_SHARPE_REGIME_CONDITIONAL,
+                OOS_SHARPE_BENCHMARK,
+                CORRELATION_PRE_2022, CORRELATION_POST_2022,
+            )
+            from tools.submission_freeze import get_effective_data_hash
+            # Layer 4 -- submission freeze (see _generate_brief_document
+            # for the rationale). Live platform reads call
+            # current_data_hash() directly; deck generation routes
+            # through get_effective_data_hash so the slides lock to
+            # the frozen hash on submission day.
+            live_hash = await current_data_hash()
+            data_hash = await get_effective_data_hash(live_hash)
+            cio_row = await get_latest_recommendation()
+            implied_alloc: dict | None = None
+            try:
+                if cio_row and cio_row.get("blend_weights"):
+                    implied_alloc = await compute_implied_asset_allocation(
+                        cio_row.get("blend_weights"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("deck_implied_alloc_failed", error=str(_exc))
+            # June 22 2026 (PR A) -- read regime_signals_cache for the
+            # 5 watchpoint tokens on slide 7 (VIX / yield curve /
+            # credit spread / equity trend). 15-min TTL; falls back
+            # to em-dash inside build_substitution_table if cold.
+            # Staleness check: get_regime_cache returns None when
+            # the cached row is past its expires_at; we log so the
+            # operator can spot a stale render. We do NOT block on
+            # a fresh detect call (would add 30-60s to deck gen).
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "deck_live_signals_stale",
+                        document_type="presentation_deck",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("deck_live_signals_read_failed",
+                            error=str(_exc))
+            from tools.academic_deck import OOS_WINDOW_PCT_OF_STUDY
+            # June 22 2026 (wiring fix) -- read analytics metrics
+            # for pre/post 2022 Sharpes, factor loadings, and cost
+            # sensitivity tokens (slides 6, 8). Single helper call
+            # covers all three reads -- see
+            # tools.academic_export.load_substitution_metric_sources.
+            from tools.academic_export import (
+                load_substitution_metric_sources,
+            )
+            # June 27 2026 -- thread data_hash so historical-analytics
+            # metric reads (regime_conditional / factor_loadings /
+            # cost_sensitivity / crisis_performance) respect the
+            # submission freeze when active. Live CIO + regime signals
+            # remain LIVE by design (the platform feature, not frozen).
+            regime_conditional_rows, factor_loadings_rows, \
+                cost_sensitivity_payload, crisis_payload = (
+                    await load_substitution_metric_sources(
+                        data_hash=data_hash or None))
+            substitution_table = get_substitution_table(
+                data_hash or "",
+                data.get("strategy_results") or {},
+                cio_row,
+                oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
+                oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
+                post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                oos_window_pct_of_study=OOS_WINDOW_PCT_OF_STUDY,
+                study_months=(data.get("study_period") or {}).get(
+                    "n_months"),
+                implied_allocation=implied_alloc,
+                live_signals=live_signals,
+                regime_conditional=regime_conditional_rows,
+                factor_loadings=factor_loadings_rows,
+                cost_sensitivity=cost_sensitivity_payload,
+                crisis_performance=crisis_payload,
+                hash_verified=True)
+            log.info("substitution_table_built",
+                     document_type="presentation_deck",
+                     data_hash=(data_hash or "")[:8],
+                     tokens_available=len(substitution_table))
         except Exception as exc:  # noqa: BLE001
-            log.warning("deck_play_by_play_unavailable", error=str(exc))
+            log.warning("substitution_table_build_failed",
+                        document_type="presentation_deck",
+                        error=str(exc))
 
-        # ── Generation context block. The slide specs instruct the model to
-        #    read these; the validated constants are injected so it never
-        #    invents them, and the live regime values come from above. ────────
-        rc = data.get("rolling_correlation") or {}
-        context = {
-            "study_period": data.get("study_period"),
-            "summary_statistics": data.get("summary_statistics"),
-            "strategy_performance": data.get("regime_conditional"),
-            "drawdown_comparison": data.get("drawdown_comparison"),
-            "factor_loadings": data.get("factor_loadings"),
-            "rolling_correlation": {"pre_2022": rc.get("pre_2022"),
-                                    "post_2022": rc.get("post_2022")},
-            "current_regime": current_regime,
-            "regime_confidence": regime_confidence,
-            "blend_weights": blend_weights,
-            "play_by_play_events": [
-                {"event_id": e.get("event_id"),
-                 "event_date": e.get("event_date"),
-                 "trigger": e.get("trigger"), "regime": e.get("regime"),
-                 "verdict": e.get("verdict"),
-                 "value_added_sharpe": e.get("value_added_sharpe")}
-                for e in play_by_play_events],
-            "validated_constants": {
-                "oos_sharpe_regime_conditional": OOS_SHARPE_REGIME_CONDITIONAL,
-                "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
-                "oos_sharpe_equal_weight": OOS_SHARPE_EQUAL_WEIGHT,
-                "correlation_pre_2022": CORRELATION_PRE_2022,
-                "correlation_post_2022": CORRELATION_POST_2022,
-                "play_by_play_events": PLAY_BY_PLAY_EVENTS,
-            },
-        }
+        # June 21 2026 brief grounding -- precompute the per-slide
+        # brief excerpt map ONCE so the inner loop just looks up
+        # by slide_number. brief_section_for_slide is the single
+        # dispatch point that honours SLIDES_EXCLUDED_FROM_BRIEF_
+        # GROUNDING (slide 9 + slide 10); calling it here ensures
+        # the exclusion can't be accidentally bypassed by the
+        # inner loop's logic.
+        from tools.brief_grounding import (
+            brief_section_excerpt, brief_section_for_slide,
+        )
+        slide_brief_excerpts: dict[int, str] = {}
+        for n in range(1, DECK_SLIDE_COUNT + 1):
+            section_name = brief_section_for_slide(n)
+            slide_brief_excerpts[n] = brief_section_excerpt(
+                brief_grounding["content_text"], section_name)
 
-        # Single Academic Writer generation through the harness → slide JSON.
-        raw = await asyncio.to_thread(
-            harness_narrative, "presentation_deck", deck_generation_prompt(),
-            context, max_tokens=4000,
-            n_strategies=len(data.get("strategy_results") or {}))
-        slides = _parse_deck_slides(raw)
-
-        charts = await asyncio.to_thread(
-            _render_deck_slide_charts, data, blend_weights, blend_series)
-        pptx_bytes = await asyncio.to_thread(
-            build_presentation_deck, slides, charts)
-
-        # Load the generated deck into a presentation_deck editor draft so
-        # Molly can open it in the canvas editor; draft_id rides back in the
-        # X-Draft-Id header. Never fails the download.
-        draft_id: int | None = None
+        # June 22 2026 -- slide guidance overlay. The active guidance
+        # row for the generating user (if any) overrides per-slide
+        # title / so_what / max_bullets / bullet_guidance /
+        # speaker_note_directive on top of the SLIDE_SPECIFICATIONS
+        # defaults. Non-overridable fields (numeric_anchors,
+        # chart_references, substitution_tokens) are preserved
+        # verbatim. Fail-open: no guidance row -> deck generates
+        # against the hardcoded defaults exactly as before.
+        active_guidance_payload: dict | None = None
         try:
-            from tools.editor_content import deck_slides_to_editor
-            from tools.editor_drafts import create_draft
-            content_json, content_text = deck_slides_to_editor(slides)
-            draft = await create_draft(
-                "presentation_deck", email,
-                f"Presentation Deck — {date.today().isoformat()}",
-                content_json, content_text, created_from="generated")
-            if draft is not None:
-                draft_id = draft["id"]
+            from tools.deck_slide_guidance import (
+                count_overridden_slides, get_active_guidance,
+                merge_guidance_into_slide_plan_entry,
+            )
+            row = await get_active_guidance(email)
+            if row:
+                active_guidance_payload = (
+                    row.get("guidance") or {})
+                log.info(
+                    "deck_slide_guidance_applied",
+                    owner_email=email,
+                    n_slides_overridden=count_overridden_slides(
+                        active_guidance_payload),
+                    uploaded_at=row.get("uploaded_at"),
+                    version=active_guidance_payload.get("version"))
         except Exception as exc:  # noqa: BLE001
-            log.warning("deck_draft_create_failed", error=str(exc))
+            log.warning(
+                "deck_slide_guidance_load_failed",
+                error=str(exc))
 
-        filename = f"forest-capital-presentation-deck-{date.today().isoformat()}.pptx"
-        return pptx_bytes, filename, _PPTX_MEDIA, draft_id
+        slides: list[dict] = []
+        for n in range(1, DECK_SLIDE_COUNT + 1):
+            # Index by slide_number explicitly so a partial plan (e.g.
+            # the Opus pass returned 9 slide entries when the deck has
+            # 11 slots) does not shift downstream slides.
+            entry = next(
+                (e for e in slide_plan
+                 if isinstance(e, dict)
+                 and e.get("slide_number") == n),
+                None)
+            # Overlay the active guidance on top of the plan entry
+            # before the per-slide writer reads it. merge_guidance
+            # returns the input unchanged when no guidance is
+            # active.
+            if active_guidance_payload is not None:
+                from tools.deck_slide_guidance import (
+                    merge_guidance_into_slide_plan_entry,
+                )
+                entry = merge_guidance_into_slide_plan_entry(
+                    entry, n, active_guidance_payload)
+            slide = await asyncio.to_thread(
+                _generate_one_deck_slide,
+                n, per_slide_ctx, n_strategies,
+                slide_plan_entry=entry,
+                substitution_table=substitution_table,
+                brief_excerpt=slide_brief_excerpts.get(n, ""))
+            # PR 3 (June 27 2026) -- single-retry on empty bullets
+            # for slides that REQUIRE non-empty bullets per
+            # SLIDE_SPECIFICATIONS (slides 1, 3, 5, 6, 8, 10, 11).
+            # Slides 4, 7, 9, 12 are table-heavy proof slides where
+            # empty bullets is acceptable. If the retry also comes
+            # back empty, log a structured warning + accept the
+            # slide as-is -- the renderer log+skips the bullet
+            # block. [DATA PENDING] is NEVER emitted.
+            from tools.academic_deck import SLIDES_REQUIRING_BULLETS
+            if (slide is not None
+                    and n in SLIDES_REQUIRING_BULLETS
+                    and not (slide.get("bullets") or [])):
+                log.warning(
+                    "deck_slide_bullets_empty_retrying",
+                    slide_number=n)
+                slide_retry = await asyncio.to_thread(
+                    _generate_one_deck_slide,
+                    n, per_slide_ctx, n_strategies,
+                    slide_plan_entry=entry,
+                    substitution_table=substitution_table,
+                    brief_excerpt=slide_brief_excerpts.get(n, ""))
+                if (slide_retry is not None
+                        and (slide_retry.get("bullets") or [])):
+                    slide = slide_retry
+                else:
+                    log.warning(
+                        "deck_slide_bullets_empty_after_retry",
+                        slide_number=n,
+                        retry_returned_none=(slide_retry is None))
+            if slide is not None:
+                slides.append(slide)
+            # A None slide is left out -- _normalize_slides inside
+            # build_presentation_deck (called by _finalize_deck) fills
+            # the missing slot with the canonical title + [DATA PENDING]
+            # bullet. A SINGLE slide failure no longer downs the deck.
+
+        # Per-deck substitution-complete telemetry. Same shape the brief
+        # writer emits at end of section generation -- operators read
+        # both lines in Render logs to confirm the determinism layer
+        # fired across the document.
+        if substitution_table is not None:
+            try:
+                from tools.numeric_substitution import (
+                    unresolved_placeholders,
+                )
+                # Stitch every slide's text fields into one blob for
+                # the audit summary -- the dispatcher will do its own
+                # finer-grained scan on the rendered editor draft.
+                blob_parts: list[str] = []
+                for sl in slides:
+                    for k in ("title", "headline", "speaker_notes"):
+                        if isinstance(sl.get(k), str):
+                            blob_parts.append(sl[k])
+                    if isinstance(sl.get("bullets"), list):
+                        blob_parts.extend(
+                            b for b in sl["bullets"]
+                            if isinstance(b, str))
+                unresolved = unresolved_placeholders(
+                    "\n".join(blob_parts))
+                log.info("substitution_complete",
+                         document_type="presentation_deck",
+                         tokens_available=len(substitution_table),
+                         unresolved_placeholders=unresolved,
+                         unresolved_count=len(unresolved))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("substitution_summary_failed",
+                            document_type="presentation_deck",
+                            error=str(exc))
+
+        return await _finalize_deck(
+            slides, data, blend_weights, blend_series, email,
+            substitution_table=substitution_table)
     except Exception as exc:  # noqa: BLE001
         log.error("presentation_deck_generation_error", error=str(exc))
         raise
+
+
+async def _resolve_story_plan_slide_entries(
+    data: dict, n_strategies: int, slide_titles: list[str],
+    *,
+    brief_text: str | None = None,
+    brief_hash: str | None = None,
+    appendix_text: str | None = None,
+    appendix_hash: str | None = None,
+) -> list[dict]:
+    """Cache-aware story plan retrieval for deck generation.
+
+    Reads story_plans for
+    (current_data_hash[|brief_hash][|appendix_hash], 'deck').
+    On a non-fallback cache hit returns the slide_plan list
+    verbatim. On a cache miss fires generate_deck_story_plan() and
+    persists. Fail-open at every layer.
+
+    June 21 2026 brief-as-anchor + appendix-as-evidence -- both
+    upstream documents flow into the Pass-1 Opus arbiter (the
+    narrative anchor + the evidentiary backing) and both hashes
+    extend the cache key so a regen of either upstream document
+    auto-invalidates the cached deck plan.
+    """
+    try:
+        from tools.cache import get_latest_strategy_hash
+        data_hash = await get_latest_strategy_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_story_plan_hash_unavailable", error=str(exc))
+        return []
+    if not data_hash:
+        return []
+    try:
+        from tools import story_plan as sp
+        # June 22 2026 -- force=True so every deck generation runs
+        # Pass 1 fresh. Previously the cache returned a stored plan
+        # for the current (data_hash | brief_hash | appendix_hash)
+        # composite key, which meant Regenerate on the deck reused
+        # the same plan and Molly could not iterate on slide
+        # guidance / locked-title edits without an upstream hash
+        # change. The cache WRITE still happens after generation,
+        # so non-forced callers (warm pipeline, brief/appendix
+        # cross-refs) still see the fresh row.
+        plan = await sp.refresh_story_plan(
+            data_hash, "deck",
+            deck_context=_deck_per_slide_context(data),
+            slide_titles=slide_titles,
+            brief_text=brief_text,
+            brief_hash=brief_hash,
+            appendix_text=appendix_text,
+            appendix_hash=appendix_hash,
+            force=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_story_plan_refresh_failed", error=str(exc))
+        return []
+    if not plan or plan.get("error"):
+        log.warning("deck_story_plan_unavailable",
+                    error=(plan or {}).get("error"))
+        return []
+    log.info("deck_story_plan_resolved",
+             cache=plan.get("cache"),
+             model=plan.get("_model"))
+    entries = plan.get("slide_plan") or []
+    return entries if isinstance(entries, list) else []
+
+
+async def _resolve_story_plan_brief_sections(
+    data: dict,
+) -> dict:
+    """Cache-aware brief section plan retrieval. Mirrors the deck
+    helper above: reads story_plans for (current_data_hash, 'brief')
+    + fires generate_brief_section_plan on miss. Fail-open at every
+    layer -- a missing plan returns an empty dict and the brief
+    section specs run exactly as before the injection layer landed."""
+    try:
+        from tools.cache import get_latest_strategy_hash
+        data_hash = await get_latest_strategy_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("brief_story_plan_hash_unavailable", error=str(exc))
+        return {}
+    if not data_hash:
+        return {}
+    try:
+        from tools import story_plan as sp
+        from tools.editor_content import _EXEC_BRIEF_SECTIONS
+        rubric_sections = [k for _h, k, _c in _EXEC_BRIEF_SECTIONS]
+        plan = await sp.refresh_story_plan(
+            data_hash, "brief",
+            brief_context={
+                "validated_constants": data.get(
+                    "validated_constants") or {},
+                "summary_statistics": data.get("summary_statistics"),
+                "drawdown_comparison": data.get("drawdown_comparison"),
+                "regime_conditional": data.get("regime_conditional"),
+                "study_period": data.get("study_period"),
+            },
+            rubric_sections=rubric_sections)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("brief_story_plan_refresh_failed", error=str(exc))
+        return {}
+    if not plan or plan.get("error"):
+        log.warning("brief_story_plan_unavailable",
+                    error=(plan or {}).get("error"))
+        return {}
+    log.info("brief_story_plan_resolved",
+             cache=plan.get("cache"),
+             model=plan.get("_model"))
+    section_plan = plan.get("section_plan") or {}
+    return section_plan if isinstance(section_plan, dict) else {}
+
+
+# June 21 2026 -- numeric substitution placeholder guide. Prepended
+# to every per-section task by _inject_brief_section_plan so the
+# Sonnet writer uses {{TOKEN}} placeholders instead of raw figures.
+# The platform substitutes verified cache values after generation
+# (see tools/numeric_substitution.py + the substitution wrapper in
+# tools/academic_export.harness_narrative). Tokens listed here are
+# the BRIEF-side subset of the table; deck + appendix variants ship
+# in the Layer-2 PR alongside their substitution call-sites.
+_NUMERIC_PLACEHOLDER_GUIDE = (
+    "DETERMINISTIC FIGURES REQUIREMENT:\n"
+    "Never write raw numbers for performance metrics, correlations, "
+    "or Sharpe ratios. Use these exact placeholder tokens -- the "
+    "platform substitutes verified cache values after generation.\n\n"
+    "Available placeholders (brief subset):\n"
+    "  {{OOS_SHARPE_BLEND}} -- blend out-of-sample Sharpe\n"
+    "  {{OOS_SHARPE_BENCHMARK}} -- benchmark OOS Sharpe (same window)\n"
+    "  {{OOS_SHARPE_IMPROVEMENT_PCT}} -- % improvement over "
+    "benchmark. Token already includes + prefix and % suffix "
+    "(resolves to e.g. '+98%'); do NOT add surrounding + or % "
+    "characters around it.\n"
+    "  {{OOS_WINDOW}} -- the OOS window date range\n"
+    "  {{OOS_WINDOW_MONTHS}} -- months in OOS window\n"
+    "  {{REGIME_SWITCHING_SHARPE}} -- full-period Sharpe\n"
+    "  {{BENCHMARK_SHARPE}} -- benchmark full-period Sharpe\n"
+    "  {{CLASSIC_6040_SHARPE}} -- 60/40 full-period Sharpe\n"
+    "  {{REGIME_SWITCHING_MAX_DD}} -- peak drawdown\n"
+    "  {{BENCHMARK_MAX_DD}} -- benchmark peak drawdown\n"
+    "  {{CLASSIC_6040_MAX_DD}} -- 60/40 peak drawdown\n"
+    "  {{DD_REDUCTION_REGIME_SWITCHING}} -- drawdown reduction (pp)\n"
+    "  {{REGIME_SWITCHING_RECOVERY}} -- recovery in months (number "
+    "only, e.g. 32). Write 'months' after in your prose.\n"
+    "  {{REGIME_SWITCHING_RECOVERY_MONTHS}} -- recovery with units "
+    "(e.g. '32 months'). Use when you want the unit included.\n"
+    "  {{BENCHMARK_RECOVERY}} -- benchmark recovery in months "
+    "(number only, e.g. 71). Write 'months' after in your prose.\n"
+    "  {{BENCHMARK_RECOVERY_MONTHS}} -- benchmark recovery with units "
+    "(e.g. '71 months').\n"
+    "  {{CLASSIC_6040_RECOVERY}} -- 60/40 recovery in months (number "
+    "only). Write 'months' after in your prose.\n"
+    "  {{CLASSIC_6040_RECOVERY_MONTHS}} -- 60/40 recovery with units.\n"
+    "  {{PRE_2022_EQ_IG_CORR}} -- pre-2022 equity-IG correlation\n"
+    "  {{POST_2022_EQ_IG_CORR}} -- post-2022 equity-IG correlation\n"
+    "  {{REGIME_SWITCHING_POST2022_SHARPE}} -- post-2022 sub-period\n"
+    "  {{BENCHMARK_POST2022_SHARPE}} -- benchmark post-2022\n"
+    "  {{CURRENT_REGIME}} -- live HMM regime classification\n"
+    "  {{REGIME_CONFIDENCE}} -- posterior confidence\n"
+    "  {{CURRENT_EQUITY_PCT}} -- current implied equity weight\n"
+    "  {{STUDY_MONTHS}} -- total study period months\n"
+    "  {{STUDY_START}} / {{STUDY_END}} -- period dates\n\n"
+    "CORRECT: \"The blend achieved {{OOS_SHARPE_BLEND}} versus "
+    "{{OOS_SHARPE_BENCHMARK}} for the benchmark.\"\n"
+    "WRONG: \"The blend achieved 1.24 versus 0.73.\"\n"
+    "WRONG: \"The blend achieved approximately 1.2.\"\n"
+    "WRONG: \"[[VERIFY: confirm the OOS Sharpe figure]]\"\n\n"
+    "If you need a figure not in this list, write around it "
+    "qualitatively rather than inventing or flagging it. The "
+    "post-generation audit flags any surviving {{TOKEN}} as an "
+    "unresolved_placeholder; if your token name isn't in the table "
+    "above, it will surface as an audit failure.\n\n"
+)
+
+
+# June 21 2026 -- Layer 2 deck extension. Appended to
+# _NUMERIC_PLACEHOLDER_GUIDE for deck slide prompts so the per-slide
+# Sonnet writer sees the deck-specific token vocabulary alongside the
+# shared brief tokens. The deck-only tokens cover slide content the
+# brief never needs (play-by-play scorecard, live macro watch points,
+# net-of-cost Sharpe sensitivity, live blend composition by name).
+_DECK_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
+    "\nDECK-SPECIFIC PLACEHOLDERS:\n"
+    "  {{PLAY_BY_PLAY_VALUE_ADD}} -- events where signal added value "
+    "(integer)\n"
+    "  {{PLAY_BY_PLAY_TOTAL}} -- total tracked events\n"
+    "  {{REGIME_SWITCHING_TURNOVER}} -- annualized turnover %\n"
+    "  {{NET_SHARPE_10BP}} / {{NET_SHARPE_15BP}} / {{NET_SHARPE_20BP}}"
+    " -- net Sharpe after transaction costs at 10/15/20 bps\n"
+    # June 22 2026 -- {{CVAR_99_BENCHMARK}} removed from the
+    # placeholder vocabulary. It was advertised here but cited
+    # by zero slide specs; the substitution resolver pointed at
+    # a field the strategy cache never carries, so any organic
+    # LLM use would have resolved to em-dash and tripped the
+    # unresolved-placeholder audit. If a future slide spec
+    # genuinely needs CVaR, wire up the tail_risk metric source
+    # threading + restore the line here.
+    "  {{VIX_CURRENT}} -- current VIX level\n"
+    "  {{CREDIT_SPREAD_CURRENT}} -- current HY OAS\n"
+    "  {{YIELD_CURVE_CURRENT}} -- 10Y-2Y spread\n"
+    "  {{EQUITY_TREND_CURRENT}} -- 3-month equity trend\n"
+    "  {{ESS_CURRENT}} -- Kish ESS (regime-detection reliability)\n"
+    "  {{BLEND_REGIME_SWITCHING_WT}} -- live blend weight for the "
+    "regime-switching strategy\n"
+    "  {{BLEND_BENCHMARK_WT}} -- live blend weight for the benchmark\n"
+    "  {{BLEND_CLASSIC_6040_WT}} -- live blend weight for 60/40\n"
+    "  {{N_STRATEGIES}} -- total strategies in submission scope (3)\n"
+    "\n"
+)
+
+
+# June 29 2026 -- THREE-STRATEGY SUBMISSION SCOPE. Both the
+# brief AND the appendix now operate on the same restricted
+# three-strategy set (BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING)
+# per the academic-record scope filter applied at
+# tools/academic_export.gather_document_data /
+# gather_analytical_appendix_data. The appendix retains
+# higher-detail per-strategy tokens for those three strategies
+# only; the guide enumerates the supported (strategy, metric)
+# tokens explicitly.
+_APPENDIX_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
+    "\nAPPENDIX-SPECIFIC PLACEHOLDERS:\n"
+    "The appendix carries the SAME three-strategy scope as the "
+    "brief: BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING. Use "
+    "strategy-specific tokens for every performance figure:\n"
+    "\n"
+    "  {{STRATEGY_NAME_SHARPE}} -- full-period Sharpe ratio\n"
+    "  {{STRATEGY_NAME_MAX_DD}} -- maximum drawdown (negative %)\n"
+    "  {{STRATEGY_NAME_CAGR}} -- annualised return (%)\n"
+    "  {{STRATEGY_NAME_VOLATILITY}} -- annualised volatility (%)\n"
+    "  {{STRATEGY_NAME_RECOVERY}} -- drawdown recovery (months)\n"
+    "\n"
+    "STRATEGY_NAME must be one of:\n"
+    "  BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING\n"
+    "(any other strategy reference -- MIN_VARIANCE, RISK_PARITY, "
+    "VOL_TARGETING, etc. -- is out of submission scope and the "
+    "token will not resolve.)\n"
+    "\n"
+    "Examples: {{REGIME_SWITCHING_SHARPE}}, {{CLASSIC_6040_MAX_DD}}, "
+    "{{BENCHMARK_CAGR}}.\n"
+    "\n"
+    "Never write a raw performance figure for any strategy. The "
+    "platform substitutes verified cache values after generation, "
+    "and a {{STRATEGY_NAME_METRIC}} that doesn't match an actual "
+    "strategy in the cache will surface as an unresolved_placeholder "
+    "audit flag.\n"
+    "\n"
+)
+
+
+# June 28 2026 -- always-allowed study metadata tokens. Any
+# section's numeric_anchors get augmented with the resolved
+# values from these tokens (read from substitution_table at
+# inject time). Reason: the LLM repeatedly emits e.g. "287"
+# as the study-period length without wrapping in
+# {{STUDY_MONTHS}}; STUDY_MONTHS is in the substitution table
+# but not in every section's per-section anchors, so the
+# hard-lock flags it as a token_available violation + the
+# correction-pass loop fails when the LLM stubbornly refuses
+# to swap. Treating study metadata as implicit anchors at the
+# injection layer means a raw "287" is allowed without a token
+# wrapper (since STUDY_MONTHS IS authoritatively 287 -- the
+# value is correct, only the prose form differs).
+_STUDY_METADATA_TOKENS: tuple[str, ...] = (
+    "{{STUDY_MONTHS}}",
+    "{{N_STRATEGIES}}",
+    "{{PRE_2022_MONTHS}}",
+    "{{POST_2022_MONTHS}}",
+    "{{OOS_WINDOW_MONTHS}}",
+    "{{OOS_WINDOW_PCT_OF_STUDY}}",
+)
+
+
+def _augment_anchors_with_study_metadata(
+    anchors: dict, substitution_table: dict | None,
+) -> dict:
+    """Return a copy of anchors augmented with every resolved
+    value from _STUDY_METADATA_TOKENS that has a non-em-dash
+    value in the substitution table. Keys are the token names
+    (with {{}} stripped) so they don't clash with story-plan
+    anchor keys. Values are floats when possible (the anchor-
+    normalising logic in find_untoken_backed_numerics expects
+    float-castable values for the multi-format equivalence
+    check), otherwise the string.
+
+    Fail-open: if substitution_table is None or empty, anchors
+    is returned unchanged."""
+    if not substitution_table:
+        return dict(anchors)
+    out = dict(anchors)
+    for token in _STUDY_METADATA_TOKENS:
+        if token not in substitution_table:
+            continue
+        val = substitution_table[token]
+        if not val or val == "—":
+            continue
+        key = token.strip("{}").lower()
+        if key in out:
+            continue
+        try:
+            out[key] = float(val.rstrip("%"))
+        except (TypeError, ValueError):
+            out[key] = val
+    return out
+
+
+def _inject_brief_section_plan(
+    specs: list[dict], section_plan: dict,
+    substitution_table: dict | None = None,
+) -> list[dict]:
+    """Prepend each spec's task with the locked section plan entry
+    for that spec's key plus the executive-voice + anti-AI writing
+    rules (EXECUTIVE_VOICE_REQUIREMENT, threaded in June 21 2026)
+    plus the numeric-substitution placeholder guide (Layer-1
+    substitution PR, also June 21 2026). The injection is a no-op
+    for any spec whose key has no entry in the plan (defensive
+    against a partial plan).
+
+    June 28 2026 -- substitution_table param added so the
+    per-section numeric_anchors get augmented with study
+    metadata values (STUDY_MONTHS, N_STRATEGIES, etc.) before
+    the spec ships to harness_narrative. See
+    _augment_anchors_with_study_metadata. Fail-open: a missing
+    table leaves anchors unchanged.
+
+    Why thread EXECUTIVE_VOICE_REQUIREMENT + _NUMERIC_PLACEHOLDER_GUIDE
+    here too instead of only in the Pass-1 system prompt: each per-
+    section Sonnet call is its own conversation -- the system prompt
+    + the spec.task. The Pass-1 arbiter writes the locked plan, but
+    the per-section writer does not see Pass 1's system prompt.
+    Without the rules in spec.task, Sonnet drifts back to its
+    measured academic default + ignores the placeholder contract.
+    """
+    import json as _json
+    from tools.story_plan import EXECUTIVE_VOICE_REQUIREMENT
+
+    out: list[dict] = []
+    for spec in specs:
+        key = spec.get("key")
+        entry = section_plan.get(key) if isinstance(
+            section_plan, dict) else None
+        if not isinstance(entry, dict):
+            out.append(spec)
+            continue
+        anchors = entry.get("numeric_anchors") or {}
+        block = (
+            _NUMERIC_PLACEHOLDER_GUIDE
+            + "SECTION PLAN (do not deviate):\n"
+            f"  Key message: {entry.get('key_message', '')}\n"
+            "  Numeric anchors (use ONLY these values; values may be "
+            "{{TOKEN}} placeholders that the platform substitutes):\n"
+            f"{_json.dumps(anchors, indent=4, default=str)}\n"
+            f"  Target length: {entry.get('target_length_words', '')}"
+            " words\n\n"
+            + EXECUTIVE_VOICE_REQUIREMENT + "\n\n"
+            "  Ground every claim in the numeric anchors. Do not add "
+            "sections not in the rubric. Do not frame recommendations "
+            "as next steps -- frame them as investment conclusions.\n\n")
+        new_spec = dict(spec)
+        new_spec["task"] = block + str(spec.get("task", ""))
+        # June 21 2026 -- thread the section's anchor allow-list
+        # onto the spec so harness_narrative's post-pass
+        # story-plan-violation check can read it and retry the
+        # writer ONCE with explicit feedback when unauthorized
+        # numbers leak in. See Issue 2 (post-regen audit, Option
+        # 2 -- harness retry on flag count).
+        #
+        # June 28 2026 -- augment with study-metadata anchors
+        # so STUDY_MONTHS / N_STRATEGIES / OOS_WINDOW_MONTHS
+        # are implicit anchors for EVERY section. The LLM
+        # repeatedly emits these as raw numbers (e.g. "287
+        # months" instead of "{{STUDY_MONTHS}} months") and the
+        # hard-lock correction loop fails when Sonnet stubbornly
+        # refuses to swap. Treating the values as implicit
+        # anchors is correct because the value IS authoritative
+        # (it came from the substitution table) -- only the
+        # token-wrapping pattern differs.
+        new_spec["numeric_anchors"] = (
+            _augment_anchors_with_study_metadata(
+                anchors, substitution_table))
+        out.append(new_spec)
+    return out
 
 
 # ── Async document generation — job status / download / cancel ────────────────
@@ -10243,159 +20845,33 @@ async def cancel_generation_job(
 # Academic Writer composes the prose; tools/docx_generator assembles the
 # .docx around it. Every page carries the AI DRAFT banner so Bob can never
 # accidentally submit a template-generated draft verbatim.
+#
+# PR-B (June 21 2026) -- the midpoint pipeline has been retired. The
+# original handler is replaced with the 410 Gone stub below.
+
 
 @app.post("/api/reports/midpoint-template")
 @limiter.limit("10/minute")
-async def midpoint_template(request: Request, session: dict = Depends(require_auth)):
+async def midpoint_template(
+    request: Request, session: dict = Depends(require_auth),
+):
+    """RETIRED (PR-B, June 2026).
+
+    The legacy 11-step Report Writer midpoint pipeline was retired in
+    PR #338 (frontend) and PR-B (this PR, backend). Returns 410 Gone
+    so existing clients receive a clear "this existed and is now gone"
+    signal rather than a 404 connection error.
     """
-    Generates the 3-page midpoint paper draft as a .docx download.
-
-    Four sections per the FNA 670 brief:
-      1. Data & Methodology   (Academic Writer → write_methodology)
-      2. Preliminary Results  (Academic Writer → write_results)
-      3. Roles & Division     (deterministic team-roles section)
-      4. Next Steps           (deterministic remaining-sprints section)
-
-    The Academic Writer Agent runs on Sonnet and can take 10-30 seconds.
-    Returned as application/vnd.openxmlformats-officedocument.wordprocessingml.document
-    with a filename header so the browser triggers a download instead
-    of rendering the bytes inline.
-    """
-    from fastapi.responses import Response as FastAPIResponse
-
-    try:
-        from agents.academic_writer import AcademicWriter
-        from tools.data_fetcher import get_full_history_async
-        from tools.backtester import run_all_strategies
-        from tools.docx_generator import build_docx
-        from tools.cache import get_strategy_cache, _compute_data_hash
-
-        # In test env we skip the pipeline entirely so the smoke test runs
-        # in milliseconds. The structured fallback in build_docx still
-        # produces a valid .docx Bob could open and edit.
-        if ENVIRONMENT == "test":
-            results_dict: dict = {}
-            data_range = {"start": "—", "end": "—", "n_months": 0}
-        else:
-            from tools.data_fetcher import get_full_history_async  # noqa: F401
-            history = await get_full_history_async()
-            monthly = history.get("equity_monthly")
-            n_rows = len(monthly) if monthly is not None else 0
-            last_date = (
-                str(monthly.index[-1].date())
-                if monthly is not None and len(monthly) > 0 else "unknown"
-            )
-            strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
-            cached = await get_strategy_cache(strategy_hash)
-            if cached:
-                results_dict = cached
-            else:
-                results_dict = await asyncio.to_thread(run_all_strategies, history)
-            first_date = (
-                str(monthly.index[0].date())
-                if monthly is not None and len(monthly) > 0 else "unknown"
-            )
-            data_range = {"start": first_date, "end": last_date, "n_months": n_rows}
-
-        significance_flags = {
-            name: bool(r.get("is_significant"))
-            for name, r in results_dict.items()
-        }
-        n_significant = sum(1 for v in significance_flags.values() if v)
-
-        # Build the four sections. Academic Writer methods already prepend
-        # an AI DRAFT banner to each section; the docx builder also adds
-        # one to the document header. The banner is intentionally redundant
-        # so a partial-page PDF export still carries the warning.
-        writer = AcademicWriter()
-        methodology = writer.write_methodology(
-            data_sources={"data_range": data_range, "n_months": data_range["n_months"]},
-            strategies=list(results_dict.keys()),
-            statistical_tests=[
-                "Paired t-test (full period)",
-                "Benjamini-Hochberg FDR correction",
-                "Deflated Sharpe Ratio",
-                "Walk-forward out-of-sample",
-                "CV Stability Score",
-            ],
-        )
-        results = writer.write_results(
-            strategy_results=results_dict,
-            significance_flags=significance_flags,
-            stress_tests={},
-        )
-
-        roles_body = (
-            "Michael Ruurds — Lead Engineer. Responsible for the full backend "
-            "implementation, data pipeline, AI council architecture, statistical "
-            "test suite, and the React frontend that surfaces all analytical results. "
-            "Hours: ~20 per week.\n\n"
-            "Bob Thao — Lead Analyst. Responsible for the academic interpretation "
-            "of all results, methodological justification, and the written report "
-            "in APA format. Edits this AI draft into the final submission.\n\n"
-            "Molly Murdock — Lead Presenter. Responsible for the Forest Capital "
-            "presentation slide deck, executive brief, and the July 1 demo.\n\n"
-            "Dr. Panttser — Faculty supervisor and reviewer."
-        )
-        next_steps_body = (
-            f"As of the midpoint, {n_significant} of 10 strategies pass all five "
-            f"Tier 1 statistical gates at p < 0.005 with Benjamini-Hochberg FDR "
-            f"correction. Remaining work for the final presentation:\n\n"
-            "• Sprint 6: Academic Writer Agent endpoints (analytical appendix, "
-            "executive brief), Storyboard Editor, Presentation Script Writer, "
-            "Gemini assistant for inline editing, full regression suite, "
-            "accessibility audit, presentation-ready demo.\n\n"
-            "• Final tag v1.0.0-presentation targeted for July 1."
-        )
-
-        sections = [
-            {"heading": "1. Data & Methodology", "body": methodology},
-            {"heading": "2. Preliminary Results", "body": results},
-            {"heading": "3. Roles & Division of Labor", "body": roles_body},
-            {"heading": "4. Next Steps & Open Questions", "body": next_steps_body},
-        ]
-
-        docx_bytes = build_docx(
-            title="Forest Capital Portfolio Intelligence System",
-            subtitle=(
-                "Midpoint Checkpoint — FNA 670 Practicum · "
-                f"Data range: {data_range['start']} – {data_range['end']} · "
-                f"{n_significant}/10 strategies pass all Tier 1 gates"
-            ),
-            sections=sections,
-            strategy_results=results_dict,
-            references=None,
-        )
-
-        # Tag the filename with the date so iterative drafts don't overwrite
-        # each other in Bob's downloads folder.
-        from datetime import date
-        filename = f"forest-capital-midpoint-{date.today().isoformat()}.docx"
-        return FastAPIResponse(
-            content=docx_bytes,
-            media_type=(
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-
-    except Exception as exc:
-        ref = uuid.uuid4().hex[:8]
-        log.error("midpoint_template_error", ref=ref, error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Midpoint generation failed (ref: {ref})")
-
-
-# ── Bob's remaining report generators ─────────────────────────────────────────
-#
-# Two endpoints round out Bob's deliverables alongside midpoint-template:
-#   POST /api/reports/analytical-appendix    HTML  (35% of grade)
-#   POST /api/reports/executive-brief-template  .docx 5-page  (20% of grade)
-#
-# Both follow the midpoint pattern: Academic Writer composes prose, helper
-# module assembles the file, AI DRAFT banner mandatory on every page. The
-# test-env fast path skips the pipeline so the smoke tests run in
-# milliseconds against deterministic mock data.
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "gone",
+            "message": (
+                "The Report Writer midpoint pipeline has been retired. "
+                "The midpoint submission shipped May 27 and the final "
+                "submission deadline is July 1."),
+            "canonical_path": "/api/v1/export/executive-brief",
+        })
 
 
 def _build_results_dict_and_range() -> tuple[dict, dict]:
@@ -10664,233 +21140,30 @@ async def analytical_appendix(request: Request, session: dict = Depends(require_
 
 @app.post("/api/reports/executive-brief-template")
 @limiter.limit("10/minute")
-async def executive_brief_template(request: Request, session: dict = Depends(require_auth)):
+async def executive_brief_template(
+    request: Request, session: dict = Depends(require_auth),
+):
+    """RETIRED (PR-B, June 2026).
+
+    The legacy Report Writer executive-brief pipeline was retired in
+    PR #338 (frontend) and PR-B (this PR, backend). The canonical
+    brief generation path is now POST /api/v1/export/executive-brief,
+    which runs the two-pass story plan architecture (PR #333 + #336)
+    with locked numeric anchors and the post-generation audit.
+    Returns 410 Gone so existing clients receive a clear "this
+    existed and is now gone" signal rather than a 404 connection
+    error.
     """
-    Generates the 5-page executive brief — 20% of the grade.
-
-    Six pre-populated sections per CLAUDE.md Section 14:
-      1. Executive Summary  (drawn from CIO synthesis if available, else
-                             from a deterministic top-strategies summary)
-      2. Methodology        (Academic Writer → write_methodology)
-      3. Key Findings       (top 3 strategies with APA stat reporting)
-      4. Limitations        (QA Agent + Risk Manager output where available)
-      5. Recommendations    (Academic Writer produces the full section
-                             interpretation directly; the team edits for
-                             voice in-editor)
-      6. Appendix Charts    (5 chart placeholders + caption — the .pptx
-                             pipeline embeds the actual images; here we
-                             insert captioned placeholders the team
-                             populates by dropping screenshots into Word)
-    """
-    from fastapi.responses import Response as FastAPIResponse
-
-    try:
-        from agents.academic_writer import AcademicWriter
-        from tools.docx_generator import build_docx
-
-        results_dict, data_range = await _load_results_async()
-        significance_flags = {
-            name: bool(r.get("is_significant"))
-            for name, r in results_dict.items()
-        }
-        sig_names = [k for k, v in significance_flags.items() if v]
-        n_significant = len(sig_names)
-
-        # Top 3 by Sharpe — used in Executive Summary and Key Findings.
-        top_three = sorted(
-            results_dict.items(),
-            key=lambda kv: float(kv[1].get("sharpe_ratio", 0.0) or 0.0),
-            reverse=True,
-        )[:3]
-
-        writer = AcademicWriter()
-        methodology = writer.write_methodology(
-            data_sources={"data_range": data_range, "n_months": data_range["n_months"]},
-            strategies=list(results_dict.keys()),
-            statistical_tests=[
-                "Paired t-test (full period)",
-                "Benjamini-Hochberg FDR correction",
-                "Deflated Sharpe Ratio",
-                "Walk-forward out-of-sample",
-                "CV Stability Score",
-            ],
-        )
-
-        # Executive summary — deterministic prose anchored to actual results.
-        # We do not call the CIO agent inline (it's expensive and the council
-        # may have run hours ago); instead we synthesise a brief summary from
-        # the same significance flags the council uses.
-        exec_summary_lines = [
-            (
-                "This brief presents the central findings of an empirical "
-                "evaluation of equity-fixed-income diversification strategies "
-                f"over the period {data_range['start']} to {data_range['end']}, "
-                f"comprising {data_range['n_months']} monthly observations."
-            ),
-            (
-                f"Of ten portfolio strategies tested, {n_significant} passed "
-                "all five Tier 1 statistical gates at the redefined "
-                "significance threshold of p < 0.005 (Benjamini et al., 2018), "
-                "with Benjamini-Hochberg correction applied across the full "
-                "strategy universe."
-            ),
-        ]
-        from tools.academic_export import format_metric
-        if top_three:
-            best_name, best_r = top_three[0]
-            exec_summary_lines.append(
-                f"The highest-performing strategy was {best_name.replace('_', ' ')}, "
-                f"with a Sharpe ratio of "
-                f"{format_metric(best_r.get('sharpe_ratio'), 'sharpe_ratio')} "
-                f"versus the benchmark's "
-                f"{format_metric(results_dict.get('BENCHMARK', {}).get('sharpe_ratio'), 'sharpe_ratio')} — "
-                "a result the team interprets in the body of this brief as "
-                "evidence that dynamic regime-aware allocation outperforms "
-                "static rebalancing under the conditions observed."
-            )
-        executive_summary = "\n\n".join(exec_summary_lines)
-
-        # Key Findings — top 3 strategies in APA reporting style. The
-        # agent never receives a raw float — every metric is formatted
-        # by format_metric so the precision is identical to what every
-        # other generator embeds.
-        findings_lines = []
-        for name, r in top_three:
-            findings_lines.append(
-                f"{name.replace('_', ' ')}: "
-                f"Sharpe = {format_metric(r.get('sharpe_ratio'), 'sharpe_ratio')}, "
-                f"CAGR = {format_metric(r.get('cagr'), 'cagr')}, "
-                f"max drawdown = {format_metric(r.get('max_drawdown'), 'max_drawdown')}, "
-                f"p (FDR) = {format_metric(r.get('p_value_corrected'), 'p_value')}, "
-                f"Tier 1 gates = {r.get('tier1_gates_passed', 0)}/5."
-            )
-        findings_lines.append(
-            "The 2022 equity-bond correlation breakdown — a shift from a "
-            "long-run average near -0.31 to a peak of approximately +0.48 "
-            "during the Federal Reserve's rate-hiking cycle — is the "
-            "central empirical finding of this study and the principal "
-            "reason static 60/40 allocation underperforms dynamic strategies "
-            "across the test window."
-        )
-        key_findings = "\n\n".join(findings_lines)
-
-        limitations_body = (
-            "Sample size and statistical power. The aligned dataset comprises "
-            f"{data_range['n_months']} monthly observations, which provides "
-            "adequate power for the full-period Tier 1 tests but is borderline "
-            "for regime-conditional sub-period tests. Sub-period results are "
-            "therefore reported as narrative evidence rather than as hard "
-            "significance gates."
-            "\n\n"
-            "Regime classification uncertainty. The Hidden Markov Model and "
-            "threshold-based regime classifiers disagree in approximately "
-            "15-20% of transition periods. In those periods, Regime "
-            "Switching strategy performance may be more volatile than the "
-            "full-sample backtest suggests."
-            "\n\n"
-            "Survivorship and look-ahead. The asset universe is fixed by the "
-            "FNA 670 brief (S&P 500, IG bonds, HY bonds), so survivorship "
-            "bias does not apply to the universe itself. The backtester "
-            "enforces strict t-1 signal lag with assertion-level checks."
-        )
-
-        recommendations_body = (
-            "On the basis of the evidence presented, the team recommends "
-            "that Forest Capital weigh the following considerations when "
-            "evaluating diversification across equities and fixed income."
-            "\n\n"
-            "First, static 60/40 allocation does not survive the Tier 1 "
-            "significance threshold once Benjamini-Hochberg FDR correction "
-            "is applied — its diversification benefit is real on average "
-            "but disappears during the conditions investors most need it "
-            "(2022 hiking cycle, GFC liquidity events). The team recommends "
-            "framing 60/40 as a baseline rather than a defensible policy."
-            "\n\n"
-            "Second, dynamic strategies that detect and respond to regime "
-            "shifts — particularly Regime Switching, Volatility Targeting, "
-            "and Black-Litterman with rebalancing — pass all five Tier 1 "
-            "gates and exhibit Cross-Validation Stability above the 0.60 "
-            "threshold. These should be candidates for further analysis "
-            "under Forest Capital's specific mandate constraints."
-            "\n\n"
-            "Third, the 2022 correlation breakdown deserves disclosure in "
-            "any client-facing communication that discusses fixed income "
-            "as a diversifier. The team is happy to discuss specific "
-            "framings during the July 1 presentation."
-        )
-
-        appendix_charts_body = (
-            "Five charts from the analysis platform are referenced in this "
-            "brief. Bob may insert the actual screenshots when finalising "
-            "the document; placeholders below describe each chart's "
-            "purpose."
-            "\n\n"
-            "[Figure 1] Cumulative returns 2002-2024 — growth of $1 in each "
-            "strategy versus the benchmark, log scale. The principal visual "
-            "evidence for divergence between dynamic and static approaches."
-            "\n\n"
-            "[Figure 2] Significance Journey Matrix — 10 strategies × 5 "
-            "Tier 1 gates, colour-coded pass/fail. Shows which strategies "
-            "survive each statistical hurdle."
-            "\n\n"
-            "[Figure 3] Rolling 252-day equity-bond correlation 2002-2024 — "
-            "the central project finding, with the 2022 breakdown highlighted "
-            "in amber."
-            "\n\n"
-            "[Figure 4] Stress-test comparison — 2008 GFC, 2020 COVID, 2022 "
-            "rate hikes, 2000 dot-com, 2013 taper. Strategy returns and max "
-            "drawdowns in each window."
-            "\n\n"
-            "[Figure 5] CPCV Sharpe distribution — for each significant "
-            "strategy, the distribution of out-of-sample Sharpe ratios "
-            "across the 15 CPCV paths. Median, IQR, and 95% CI."
-        )
-
-        sections = [
-            {"heading": "1. Executive Summary", "body": executive_summary},
-            {"heading": "2. Methodology", "body": methodology},
-            {"heading": "3. Key Findings", "body": key_findings},
-            {"heading": "4. Limitations", "body": limitations_body},
-            {"heading": "5. Recommendations", "body": recommendations_body},
-            {"heading": "6. Appendix — Charts Referenced", "body": appendix_charts_body},
-        ]
-
-        try:
-            references_db = AcademicWriter.get_available_references()
-            references = sorted(
-                r["apa"] for r in references_db.values() if r.get("apa")
-            )
-        except Exception as exc:
-            log.warning("references_load_failed", error=str(exc))
-            references = None
-
-        docx_bytes = build_docx(
-            title="Forest Capital Portfolio Intelligence System",
-            subtitle=(
-                "Executive Brief — FNA 670 Practicum · "
-                f"Data range: {data_range['start']} – {data_range['end']} · "
-                f"{n_significant}/10 strategies pass all Tier 1 gates"
-            ),
-            sections=sections,
-            strategy_results=results_dict,
-            references=references,
-        )
-
-        from datetime import date
-        filename = f"forest-capital-executive-brief-{date.today().isoformat()}.docx"
-        return FastAPIResponse(
-            content=docx_bytes,
-            media_type=(
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-
-    except Exception as exc:
-        ref = uuid.uuid4().hex[:8]
-        log.error("executive_brief_error", ref=ref, error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Brief generation failed (ref: {ref})")
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "gone",
+            "message": (
+                "The Report Writer pipeline has been retired. Use "
+                "POST /api/v1/export/executive-brief for the two-"
+                "pass story plan architecture."),
+            "canonical_path": "/api/v1/export/executive-brief",
+        })
 
 
 # ── Agent personas (Council View → "View system prompt") ──────────────────────
@@ -10973,45 +21246,26 @@ async def reports_manifest(request: Request, session: dict = Depends(require_aut
     endpoint URLs in three places — change a card label here, the frontend
     updates on next mount.
     """
+    # The Reports page no longer renders a card grid against this
+    # manifest (the "Bob's / Molly's Deliverables" panel was removed
+    # because each card pointed at a legacy non-story-plan endpoint
+    # that bypassed the canonical two-pass pipeline). The remaining
+    # entries are kept for any programmatic caller that wants to
+    # enumerate the deliverables surface -- the analytical-appendix
+    # endpoint is the only one that does not have a v1/export
+    # equivalent on the canonical path. The storyboard editor surface
+    # at /reports/storyboard is documented here so a caller can find
+    # the entry point.
     return {
         "owner_bob": [
-            {
-                "id": "midpoint_template",
-                "title": "Midpoint Paper Template",
-                "description": (
-                    "3-page APA draft with Data & Methodology, Preliminary "
-                    "Results, Roles, and Next Steps. Generated by Academic Writer."
-                ),
-                "endpoint": "/api/reports/midpoint-template",
-                "method": "POST",
-                "format": "docx",
-                "status": "available",
-                # The MIDPOINT PAPER is due May 27. The June 3 cohort
-                # peer-review meetup is a presentation event, not a
-                # submission deadline.
-                "deadline": "May 27, 2026",
-            },
-            {
-                "id": "executive_brief",
-                "title": "Executive Brief Template",
-                "description": (
-                    "5-page brief for Forest Capital. Pre-populated with "
-                    "Executive Summary, Methodology, Key Findings, "
-                    "Limitations, Recommendations, and 5 chart references."
-                ),
-                "endpoint": "/api/reports/executive-brief-template",
-                "method": "POST",
-                "format": "docx",
-                "status": "available",
-                "deadline": "July 1, 2026",
-            },
             {
                 "id": "analytical_appendix",
                 "title": "Analytical Appendix",
                 "description": (
                     "Comprehensive HTML with Abstract, Data Sources & "
-                    "Provenance, Methodology, Statistical Results (Table 1), "
-                    "Sensitivity Analysis, Reproducibility Notes, References."
+                    "Provenance, Methodology, Statistical Results "
+                    "(Table 1), Sensitivity Analysis, Reproducibility "
+                    "Notes, References."
                 ),
                 "endpoint": "/api/reports/analytical-appendix",
                 "method": "POST",
@@ -11025,38 +21279,13 @@ async def reports_manifest(request: Request, session: dict = Depends(require_aut
                 "id": "storyboard_draft",
                 "title": "Presentation Storyboard",
                 "description": (
-                    "AI-drafted 15-slide structure. Edit in the Storyboard "
-                    "Editor — drag to reorder, swap charts, refine speaker notes."
+                    "AI-drafted 15-slide structure. Edit in the "
+                    "Storyboard Editor at /reports/storyboard -- drag "
+                    "to reorder, swap charts, refine speaker notes."
                 ),
                 "endpoint": "/api/documents/storyboard/draft",
                 "method": "POST",
                 "format": "json",
-                "status": "available",
-                "deadline": "July 1, 2026",
-            },
-            {
-                "id": "presentation_deck",
-                "title": "Presentation Deck",
-                "description": (
-                    "PowerPoint deck generated from the edited storyboard. "
-                    "Embedded charts, speaker notes, presenter ownership tags."
-                ),
-                "endpoint": "/api/reports/generate-from-storyboard",
-                "method": "POST",
-                "format": "pptx",
-                "status": "available",
-                "deadline": "July 1, 2026",
-            },
-            {
-                "id": "qa_preparation",
-                "title": "Q&A Preparation Doc",
-                "description": (
-                    "Council-anticipated questions split by audience "
-                    "(Forest Capital / MSFA Board / AI usage)."
-                ),
-                "endpoint": "/api/reports/generate-from-storyboard",
-                "method": "POST",
-                "format": "docx",
                 "status": "available",
                 "deadline": "July 1, 2026",
             },
@@ -12024,8 +22253,27 @@ async def ws_council(websocket: WebSocket):
                         })
 
                     # Gemini challenge + CIO synthesis — sent as final frame
+                    # June 5 2026 — prior_recommendation fetch parallels
+                    # the SSE path's logic so this legacy WebSocket route
+                    # also writes Section C of the transparency structure
+                    # when a prior CIO output exists.
+                    prior_recommendation_ws = None
+                    try:
+                        from tools.cio_recommendation import (
+                            _current_data_hash, get_prior_recommendation,
+                        )
+                        ws_current_hash = await _current_data_hash()
+                        if ws_current_hash:
+                            prior_recommendation_ws = await (
+                                get_prior_recommendation(ws_current_hash))
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "council_ws_prior_recommendation_fetch_error",
+                            error=str(exc))
                     cio = CIO()
-                    final = cio.deliberate(query, strategy_results, history)
+                    final = cio.deliberate(
+                        query, strategy_results, history,
+                        prior_recommendation=prior_recommendation_ws)
                     await websocket.send_json({
                         "type": "agent_result",
                         "agent": "cio",

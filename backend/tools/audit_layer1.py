@@ -36,7 +36,7 @@ _RETURN_SERIES_NOTE = (
     "MOMENTUM_ROTATION 12 months (start ~2003-07), and REGIME_SWITCHING "
     "3 months (start ~2002-10). This is correct by construction. "
     "Comparative metrics for these strategies cover their actual start "
-    "date to 2025-12-31, not the full 2002-07-31 study period."
+    "date to 2026-05-31, not the full 2002-07-31 study period."
 )
 
 # Per-strategy expected lookback window in months. Sourced from the

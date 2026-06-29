@@ -20,6 +20,7 @@ from typing import Any
 import structlog
 
 from agents.base import GEMINI_MODEL, call_gemini
+from tools.agent_context_block import format_live_context_block as _format_live_context_block
 
 log = structlog.get_logger(__name__)
 
@@ -51,6 +52,7 @@ class IndependentAnalyst:
         self,
         council_summary: str,
         strategy_results: dict[str, Any],
+        live_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Challenges the council's draft consensus with specific objections.
@@ -58,6 +60,14 @@ class IndependentAnalyst:
         Args:
             council_summary:  The CIO's draft recommendation before finalisation.
             strategy_results: The full backtester results for data reference.
+            live_context:     Optional regime + blend + posterior snapshot
+                              from compute_context(). Threaded through by
+                              the CIO so the dissenter's objections ground
+                              in the live signal state -- regime label,
+                              ESS, posterior probabilities, top blend
+                              weights -- rather than reverse-engineering
+                              from the council's prose. Absent in mocks
+                              and any fail-open path.
 
         Returns a structured critique with specific objections, alternative
         views, and what would have to be true for the consensus to be wrong.
@@ -93,7 +103,8 @@ class IndependentAnalyst:
             except Exception as exc:  # noqa: BLE001
                 log.warning("macro_context_inject_failed", error=str(exc))
 
-            evidence = self._build_evidence(council_summary, strategy_results)
+            evidence = self._build_evidence(
+                council_summary, strategy_results, live_context)
             prompt = (
                 "Challenge this consensus. Be specific. Cite data from the evidence below. "
                 "Identify at least two concrete risks or alternative interpretations "
@@ -117,12 +128,19 @@ class IndependentAnalyst:
         self,
         council_summary: str,
         strategy_results: dict[str, Any],
+        live_context: dict[str, Any] | None = None,
     ) -> str:
         """
         Builds a compact evidence summary for Gemini.
 
         Only passes metrics, not the full results dict — keeps the prompt
         under the context budget and focuses Gemini on the key numbers.
+
+        When live_context is provided, prepends a REGIME + BLEND block so
+        the dissenter sees the same input state the CIO sees — daily +
+        monthly HMM labels, posterior, ESS, top blend weights — and can
+        ground objections in the signal rather than reverse-engineering
+        from prose.
         """
         metrics = {
             name: {
@@ -135,7 +153,11 @@ class IndependentAnalyst:
             }
             for name, r in strategy_results.items()
         }
-        return json.dumps(metrics, indent=2, default=str)
+        evidence_json = json.dumps(metrics, indent=2, default=str)
+        regime_block = _format_live_context_block(live_context)
+        if regime_block:
+            return f"{regime_block}\n\nMETRICS:\n{evidence_json}"
+        return evidence_json
 
     def _parse_challenge(
         self,

@@ -762,13 +762,60 @@ browser with the window resized below 1024 px wide.*
 
 **Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
+### 4.16 Rebalancing History (Council Performance Record)
+
+Navigate to the **Council Performance Record** page and scroll to the two
+rebalancing tables (below "Net of Switching Costs").
+
+**Section 1 — Implied Asset Allocation**
+
+- Verify the **Implied Asset Allocation** table renders directly below the
+  Net of Switching Costs table.
+- Verify the three asset columns are present: **Equity**, **IG Bonds**,
+  **HY Bonds** (alongside Date, Regime, Largest Change).
+- Spot-check at least **three rows**: Equity % + IG Bonds % + HY Bonds %
+  sums to **100%** (±0.1% rounding).
+- Verify **no row** shows 0% across all three asset columns.
+- Compare a **BULL** row against a **BEAR** row — the allocations differ
+  materially (BULL more equity-tilted).
+- Verify the **Largest Change** column is present and non-zero on
+  rebalancing rows (names an asset class + a percentage-point move).
+- Verify dates display in **MM/DD/YYYY**.
+- Verify rows are sorted **newest first**.
+
+**Section 2 — Strategy Blend Weights**
+
+- Scroll the **Strategy Blend Weights** table horizontally and verify **all
+  ten strategies** appear as columns.
+- Spot-check at least **three rows**: the strategy weights sum to **100%**
+  (±1% whole-number rounding across ten columns).
+- On a **BULL** row, verify Min Variance and Risk Parity show **near-zero**
+  weights.
+- On a **BEAR/TRANSITION** row, verify Min Variance and Risk Parity show
+  **elevated** weights vs BULL.
+- Verify **no strategy cell is blank** on any row (a 0% weight reads "0%").
+- Verify the **Total Shift** column shows a reasonable value (~1%–100%) —
+  flag any row at 0% or above 100%.
+
+**Both sections**
+
+- Verify the **row count matches** between the two tables (same rebalancing
+  events).
+- Verify the **dates match exactly** between the two sections.
+- Verify **no layout break** on desktop or mobile (tables scroll
+  horizontally without overflowing the page).
+- Verify the **ⓘ info-icon tooltip** is present and readable on both
+  section headings.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
 ---
 
 ## Test Sign-Off
 
 At the end of your section, record the summary below. Sections 1-3 are
 recorded as `- [ ]` checklist items; Section 4 (Molly) is recorded as
-seventeen numbered items (4.1–4.15 plus the two May-19 additions
+eighteen numbered items (4.1–4.16 plus the two May-19 additions
 4.10b "Mobile editor experience" and 4.13b "Academic Review from the
 script editor"), each carrying an inline ✅ Pass / ❌ Fail / ⏭ Skip
 result — note the result and any failure detail against each.
@@ -778,7 +825,7 @@ result — note the result and any failure detail against each.
 | Tester | |
 | Date | |
 | Section completed | |
-| Section 4 items 4.1–4.15 + 4.10b + 4.13b (Molly only) | _e.g. 17/17 pass_ |
+| Section 4 items 4.1–4.16 + 4.10b + 4.13b (Molly only) | _e.g. 18/18 pass_ |
 | Failures found | |
 | Notes | |
 

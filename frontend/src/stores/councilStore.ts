@@ -57,7 +57,10 @@ interface CouncilState {
   councilUsage: { used: number; limit: number } | null
 
   setQuery: (q: string) => void
-  runQuery: (q: string) => Promise<void>
+  // contextScope (optional) — when the question was asked from a
+  // council-facing landing tile, it is forwarded to the backend as
+  // context_scope so the council injects that page's live cached data.
+  runQuery: (q: string, contextScope?: string) => Promise<void>
   abort: () => void
   clear: () => void
 }
@@ -179,7 +182,7 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
 
   setQuery: (q) => set({ query: q }),
 
-  runQuery: async (q) => {
+  runQuery: async (q, contextScope) => {
     const trimmed = q.trim()
     if (!trimmed || get().loading) return
     _controller = new AbortController()
@@ -214,7 +217,10 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
           'X-API-Key': token,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ query: trimmed }),
+        body: JSON.stringify(
+          contextScope
+            ? { query: trimmed, context_scope: contextScope }
+            : { query: trimmed }),
         signal: _controller.signal,
       })
 

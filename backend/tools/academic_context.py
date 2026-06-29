@@ -62,6 +62,29 @@ except Exception:  # pragma: no cover
 _CONTEXT_CACHE: dict[str, str] = {"text": ""}
 
 
+# Document types that must NEVER be injected into agent system prompts.
+# Rows of these types stay in the database for audit history but the
+# context-cache rebuild filters them out so they cannot leak into the
+# brief / deck / council generation surfaces.
+#
+# Context: June 21 2026 -- the executive brief generation produced a
+# "PEER REVIEWER MEMO" as Section 1 because the brief Sonnet section
+# writer received the full text of every academic_documents row in
+# its system prompt (academic_context.inject_academic_context() has
+# no filter). One of those rows was the FNA 670 midpoint peer-review
+# submission template; Sonnet pattern-matched its format into the
+# section output. The midpoint deliverable shipped May 27 so the
+# template is historical, not active rubric -- excluding it from
+# injection eliminates the contamination vector for every downstream
+# generation surface. Rows of these types remain in the
+# academic_documents table so a future audit can prove what was
+# uploaded and when; they just no longer feed the agents.
+_INJECTION_EXCLUDED_TYPES: frozenset[str] = frozenset({
+    "midpoint_requirements",
+    "midpoint_draft",
+})
+
+
 # ── Text extraction ───────────────────────────────────────────────────────────
 
 def extract_document_text(filename: str, raw: bytes) -> str:
@@ -93,6 +116,40 @@ def extract_document_text(filename: str, raw: bytes) -> str:
     return text
 
 
+def extract_docx_text(raw: bytes) -> str:
+    """Extract plain text from a .docx file via python-docx — joins every
+    paragraph with a blank line in between, preserving paragraph breaks but
+    stripping Word-specific formatting. Used by the Thesis Defense Prep
+    upload flow alongside extract_document_text (PDF). Raises ValueError
+    when the docx yields no extractable text."""
+    try:
+        from docx import Document
+    except ImportError as exc:  # pragma: no cover
+        raise ValueError(
+            "DOCX support unavailable — python-docx not installed") from exc
+    doc = Document(io.BytesIO(raw))
+    text = "\n\n".join(p.text for p in doc.paragraphs if p.text).strip()
+    if not text:
+        raise ValueError(
+            "No text could be extracted from the .docx — the document "
+            "appears empty.")
+    return text
+
+
+def extract_uploaded_text(filename: str, raw: bytes) -> str:
+    """Extract text from an uploaded document by extension (PDF or docx).
+    Extension-based by design (browser MIME types are inconsistent for
+    Word documents). Raises ValueError for any other extension so the
+    caller can return a clear 415/422."""
+    name = (filename or "").lower()
+    if name.endswith(".pdf"):
+        return extract_document_text(filename, raw)
+    if name.endswith(".docx"):
+        return extract_docx_text(raw)
+    raise ValueError(
+        f"Unsupported file type for {filename!r}. Upload a .pdf or .docx.")
+
+
 # ── Formatting ────────────────────────────────────────────────────────────────
 
 def format_academic_context(docs: list[dict]) -> str:
@@ -109,9 +166,10 @@ def format_academic_context(docs: list[dict]) -> str:
         blocks.append(f"--- {label}: {d.get('name', 'document')} ---\n{d.get('content_text', '')}")
     return (
         "\n\n=== ACADEMIC CONTEXT ===\n"
-        "The following documents define the academic evaluation criteria "
-        "for this project. Keep them in view when producing any analysis, "
-        "feedback, or recommendation.\n\n"
+        "The following documents are reference material for the project "
+        "grading rubric. Cite them when relevant to the task. Do not "
+        "adopt their formatting, structure, or templates in your output "
+        "unless explicitly instructed to do so.\n\n"
         + "\n\n".join(blocks)
     )
 
@@ -161,22 +219,61 @@ async def list_academic_documents() -> list[dict]:
 
 
 async def _read_all_with_content() -> list[dict]:
-    """Full rows including content_text — used to rebuild the context cache."""
+    """Full rows including content_text -- used to rebuild the context
+    cache. Rows whose document_type is in _INJECTION_EXCLUDED_TYPES
+    (e.g. midpoint_requirements, midpoint_draft) are filtered at the
+    SELECT so they never reach the cache and therefore never reach
+    any agent system prompt. The rows stay in the database for audit
+    history; only injection is suppressed.
+
+    Logs how many rows were excluded on each refresh so an operator
+    can confirm via Render logs that the filter is active and seeing
+    rows it should be filtering."""
     if not _DB_AVAILABLE:
         return []
     try:
-        from sqlalchemy import text
+        from sqlalchemy import bindparam, text
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            # expanding=True turns :excluded into a parameterised IN
+            # clause that asyncpg renders as ($1, $2, ...) -- the
+            # excluded list can grow without sql injection risk.
+            stmt = text(
+                "SELECT name, document_type, content_text "
+                "FROM academic_documents "
+                "WHERE document_type NOT IN :excluded "
+                "ORDER BY uploaded_at"
+            ).bindparams(bindparam("excluded", expanding=True))
             rows = await session.execute(
-                text(
-                    "SELECT name, document_type, content_text "
-                    "FROM academic_documents ORDER BY uploaded_at"
-                )
+                stmt,
+                {"excluded": list(_INJECTION_EXCLUDED_TYPES)},
             )
-            return [
+            kept = [
                 {"name": r[0], "document_type": r[1], "content_text": r[2]}
                 for r in rows.fetchall()
             ]
+            # Separate cheap COUNT for the exclusion telemetry --
+            # avoids streaming the content_text for rows we're about
+            # to drop. Fail-open: if the count query errors the
+            # debug line just reports 0.
+            try:
+                cnt_stmt = text(
+                    "SELECT COUNT(*) FROM academic_documents "
+                    "WHERE document_type IN :excluded"
+                ).bindparams(bindparam("excluded", expanding=True))
+                cnt_row = await session.execute(
+                    cnt_stmt,
+                    {"excluded": list(_INJECTION_EXCLUDED_TYPES)},
+                )
+                n_excluded = int(cnt_row.scalar() or 0)
+            except Exception:  # noqa: BLE001
+                n_excluded = 0
+            if n_excluded:
+                log.debug(
+                    "academic_context_rows_excluded",
+                    excluded_types=sorted(_INJECTION_EXCLUDED_TYPES),
+                    n_excluded=n_excluded,
+                )
+            return kept
     except Exception as exc:
         log.warning("academic_documents_read_error", error=str(exc))
         return []

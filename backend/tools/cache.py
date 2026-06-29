@@ -153,6 +153,19 @@ async def get_monthly_returns() -> dict[str, list[Any]] | None:
 
     Shape: {"dates": [...], "equity": [...], "ig": [...], "hy": [...],
             "rf": [...]}. Returns None if the table is unavailable or empty.
+
+    SOFT LEAK 2 (post-submission backlog -- June 27 2026):
+    this read is not hash-aware. Under freeze, market_data_monthly
+    extends to May 2026 so STUDY_MONTHS=287 and rolling correlation
+    tokens reflect live data rather than the freeze date. Values
+    are academically correct (the study genuinely uses 287 months)
+    but the freeze boundary is not structurally enforced here.
+    Fix: make get_monthly_returns accept a data_hash arg and
+    filter rows by the hash's max_date from the market data
+    fingerprint. Tracked in audit findings dated 2026-06-27,
+    superseding the June 27 SOFT LEAK 2 docstring in
+    tools/academic_export.gather_document_data which made the
+    same observation.
     """
     if not _DB_AVAILABLE:
         return None
@@ -365,6 +378,8 @@ async def set_strategy_cache(
     strategy_hash: str,
     results: dict[str, Any],
     n_observations: int | None = None,
+    *,
+    risk_free_monthly: Any = None,
 ) -> None:
     """
     Upserts strategy results into the cache.  Called after recomputation
@@ -401,6 +416,58 @@ async def set_strategy_cache(
                        "preserving the prior known-good cache row",
             )
             return
+    # ── Invariant pre-write gate (May 30 2026) ───────────────────────
+    # The data-level half of the framework (Cat 1, Cat 5) runs against
+    # the in-memory results BEFORE the row is committed. A hard
+    # failure aborts the write, preserves the previous cache row, and
+    # logs `invariant_hard_failure` per assertion. Catches the F3 class
+    # of bug at write time rather than at display time.
+    #
+    # Wrapped in try/except so a framework defect itself can never
+    # take the warm offline — a runner exception is logged and the
+    # write proceeds (the framework is a safety net, not the
+    # primary correctness layer).
+    try:
+        from tools.invariant_checks import run_all_invariants
+        invariant_result = run_all_invariants(
+            results, risk_free_rate=risk_free_monthly)
+        # Persist the summary so a separate process (the daily digest
+        # cron) can read the verdict — module-level `_latest_result`
+        # is in-memory only and gets wiped on every Render redeploy.
+        # Fail-open: a write failure logs and never blocks the cache
+        # path. June 2 2026 digest fix.
+        try:
+            from tools.precomputed_analytics import set_metric
+            payload = invariant_result.to_dict()
+            from datetime import datetime, timezone as _tz
+            payload["ran_at"] = datetime.now(_tz.utc).isoformat()
+            await set_metric(
+                strategy_hash or "BOOT-WARM",
+                "invariant_summary",
+                payload,
+                source="set_strategy_cache_invariant_persist")
+        except Exception as persist_exc:  # noqa: BLE001
+            log.warning("invariant_summary_persist_failed",
+                        error=str(persist_exc))
+        if not invariant_result.passed:
+            log.warning(
+                "strategy_cache_write_refused_invariants",
+                strategy_hash=strategy_hash,
+                hard_failures=len(invariant_result.hard_failures),
+                soft_warnings=len(invariant_result.soft_warnings),
+                first_failure=(
+                    invariant_result.hard_failures[0].to_dict()
+                    if invariant_result.hard_failures else None),
+                reason="invariant hard-failure(s); preserving the "
+                       "prior cache row and aborting the write",
+            )
+            return
+    except Exception as inv_exc:  # noqa: BLE001
+        log.warning("invariant_runner_failed",
+                    error=str(inv_exc),
+                    note=("Invariant framework raised; proceeding "
+                          "with cache write to avoid taking the warm "
+                          "offline. Fix the runner."))
     try:
         from sqlalchemy import text
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]

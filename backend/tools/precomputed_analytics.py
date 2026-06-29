@@ -139,6 +139,48 @@ async def set_metric(
                     metric_kind=metric_kind, error=str(exc))
 
 
+async def get_metric_by_hash(
+    metric_kind: str, data_hash: str,
+) -> dict[str, Any] | None:
+    """Returns the analytics_metrics_cache payload for a SPECIFIC
+    (metric_kind, data_hash) pair, or None when no row matches.
+
+    Used by the appendix pre-flight cache gate (June 22 2026) to
+    verify that bootstrap_ci_sharpe / factor_loadings /
+    cost_sensitivity have been refreshed at the canonical current
+    strategy hash. The previous gate used get_latest_metric which
+    returns the most recent row regardless of hash -- it accepted
+    a stale-hash row as "warm cache" and let the appendix render
+    against data the brief's narrative didn't see. This hash-
+    matched helper closes that gap.
+
+    Returns the payload dict on hit, None on miss or DB unavailable.
+    Fail-open at the read level."""
+    if not data_hash:
+        return None
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "SELECT payload FROM analytics_metrics_cache "
+                "WHERE metric_kind = :k AND data_hash = :h "
+                "ORDER BY computed_at DESC LIMIT 1"
+            ), {"k": metric_kind, "h": data_hash})
+            found = row.fetchone()
+            if not found:
+                return None
+            return dict(found[0]) if found[0] else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "get_metric_by_hash_failed",
+            metric_kind=metric_kind, data_hash=data_hash[:8],
+            error=str(exc))
+        return None
+
+
 async def get_latest_metric(metric_kind: str) -> dict[str, Any] | None:
     """Returns the most-recently-written row for a metric_kind,
     regardless of data_hash. Used by the cold-deploy fallback when
@@ -514,6 +556,36 @@ async def refresh_academic_analytics(data_hash: str) -> None:
         if not bench_series.empty:
             asset_series["BENCHMARK"] = bench_series
 
+        # June 22 2026 -- diagnostic logging to trace empty-payload
+        # bug. Bracket the analytics calls with full input + output
+        # shape so a Render log scan answers "what did the refresh
+        # receive, what did the analytics return" without inspecting
+        # any cache row.
+        sample_strategy_name = next(iter(strategies)) if strategies else None
+        sample_entry = (
+            strategies.get(sample_strategy_name)
+            if sample_strategy_name else None)
+        sample_mr = (
+            sample_entry.get("monthly_returns")
+            if isinstance(sample_entry, dict) else None)
+        log.info(
+            "precomputed_refresh_analytics_pre_call_diag",
+            data_hash=short_hash,
+            strategies_type=type(strategies).__name__,
+            strategies_keys=list(strategies)[:10]
+                if isinstance(strategies, dict) else [],
+            sample_strategy=sample_strategy_name,
+            sample_has_monthly_returns=(
+                isinstance(sample_mr, list)),
+            sample_monthly_returns_len=(
+                len(sample_mr) if isinstance(sample_mr, list) else None),
+            sample_first_mr_pair=(
+                sample_mr[0] if (isinstance(sample_mr, list) and sample_mr)
+                else None),
+            rf_type=type(rf).__name__, rf_len=len(rf),
+            ff_type=type(ff).__name__, ff_len=len(ff or []),
+        )
+
         # Compute each AN01/AN04 reduction in its own try/except so a
         # downstream failure (regression solver, regime split) is
         # caught with explicit context rather than swallowed by the
@@ -528,6 +600,14 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                 data_hash=short_hash, exc_type=type(exc).__name__,
                 error=str(exc),
             )
+        log.info(
+            "precomputed_refresh_factor_loadings_returned",
+            data_hash=short_hash,
+            n_rows=len(factor_loadings_rows),
+            first_keys=(
+                sorted(factor_loadings_rows[0])[:8]
+                if factor_loadings_rows else []),
+        )
         regime_conditional_rows: list[dict] = []
         try:
             regime_conditional_rows = an.regime_conditional_performance(
@@ -538,6 +618,13 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                 data_hash=short_hash, exc_type=type(exc).__name__,
                 error=str(exc),
             )
+        log.info(
+            "precomputed_refresh_regime_conditional_returned",
+            data_hash=short_hash,
+            n_rows=len(regime_conditional_rows),
+            first_strategies=[
+                r.get("strategy") for r in regime_conditional_rows[:5]],
+        )
 
         # Per-row diagnostics for the two AN01/AN04 tables — explicit
         # field-by-field visibility so a Render log scan can answer
@@ -551,6 +638,29 @@ async def refresh_academic_analytics(data_hash: str) -> None:
             _REGIME_CONDITIONAL_REQUIRED_FIELDS, data_hash,
         )
 
+        # Bootstrap Sharpe CIs — block bootstrap (length 12, 10k
+        # resamples, seed=42) over the same monthly returns the
+        # summary table is built from. Stored as two rows: the
+        # `bootstrap_ci_sharpe` table (point + CI per strategy, no
+        # samples — light payload for the table column) and
+        # `bootstrap_ci_samples` (down-sampled distribution per
+        # strategy for the density-overlap visualisation). Both
+        # carry the same point + CI values so a chart reading from
+        # either reconstructs the same headline figure.
+        bootstrap_table: list[dict] = []
+        bootstrap_samples: list[dict] = []
+        try:
+            bootstrap_table = an.bootstrap_ci_table(
+                strategies, rf=rf, include_samples=False)
+            bootstrap_samples = an.bootstrap_ci_table(
+                strategies, rf=rf, include_samples=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "precomputed_bootstrap_ci_compute_failed",
+                data_hash=short_hash, exc_type=type(exc).__name__,
+                error=str(exc),
+            )
+
         payload = {
             "available": True,
             "study_period": {
@@ -559,6 +669,8 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                 "n_months": len(idx),
             },
             "summary_statistics": an.summary_statistics(asset_series, rf),
+            "bootstrap_ci_sharpe":   bootstrap_table,
+            "bootstrap_ci_samples":  bootstrap_samples,
             "cumulative_returns": an.cumulative_returns(strategies),
             "rolling_correlation": an.rolling_correlation(
                 equity, ig, hy, window=12),
@@ -915,6 +1027,67 @@ async def refresh_risk_free_rate_config(data_hash: str) -> None:
                     error=str(exc))
 
 
+async def refresh_regime_blends(data_hash: str) -> None:
+    """The regime-conditional blend weights — the per-regime BULL / BEAR /
+    TRANSITION target allocations that the live `forward_projection` then
+    probability-weights into a current blend.
+
+    `compute_regime_blends()` (tools/regime_meta_optimizer.py:320) takes a
+    strategy_results cache row + an HMM historical fit and returns the
+    three per-regime weight maps. Today the function is called inline on
+    every CIO recommendation read (cio_recommendation.py:64) and on every
+    sensitivity sweep (regime_meta_forward.py:226) — never cached. The
+    daily digest's "what would trigger a rebalance" section needs to read
+    the per-regime targets to state "BEAR regime: blend would shift to
+    {...}" without paying the live-compute cost, so this refresh persists
+    the result to analytics_metrics_cache under metric_kind='regime_blends'.
+
+    Fail-open per the existing pattern: empty strategy cache returns
+    early, an HMM fit failure logs and returns, a compute_regime_blends
+    error logs and returns. No partial rows. Same shape as
+    refresh_diversification_metrics. June 5 2026."""
+    try:
+        import pandas as pd
+        from tools.cache import get_latest_strategy_cache, get_monthly_returns
+        from tools.regime_detector import fit_hmm_historical
+        from tools.regime_meta_optimizer import compute_regime_blends
+    except Exception as exc:  # noqa: BLE001
+        log.warning("regime_blends_refresh_imports_failed", error=str(exc))
+        return
+
+    try:
+        strategies = await get_latest_strategy_cache()
+        if not strategies:
+            log.info("regime_blends_refresh_skipped",
+                     reason="strategy_cache_empty")
+            return
+        monthly = await get_monthly_returns()
+        if (not monthly or not monthly.get("equity")
+                or not monthly.get("dates")):
+            log.info("regime_blends_refresh_skipped",
+                     reason="monthly_equity_unavailable")
+            return
+        idx = pd.to_datetime(monthly["dates"])
+        equity = pd.Series(monthly["equity"], index=idx).sort_index()
+        hmm_result = fit_hmm_historical(equity)
+        if not hmm_result or hmm_result.get("error"):
+            log.warning("regime_blends_hmm_fit_failed",
+                        error=(hmm_result or {}).get("error"))
+            return
+        payload = compute_regime_blends(strategies, hmm_result)
+        if payload.get("error"):
+            log.warning("regime_blends_compute_failed",
+                        error=payload["error"])
+            return
+        await set_metric(
+            data_hash, "regime_blends", payload,
+            source="refresh_regime_blends")
+        log.info("precomputed_regime_blends_complete",
+                 n_regimes=len(payload.get("blends") or {}))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("regime_blends_refresh_failed", error=str(exc))
+
+
 async def refresh_all_analytics(data_hash: str) -> None:
     """Top-level dispatch — calls every refresh function. Fires from
     tools/cache.set_strategy_cache after a successful strategy write.
@@ -952,6 +1125,12 @@ async def refresh_all_analytics(data_hash: str) -> None:
     # serve from analytics_metrics_cache on the hot path.
     await refresh_sensitivity(data_hash)
     await refresh_risk_free_rate_config(data_hash)
+    # June 5 2026 — per-regime blend targets are needed by the daily
+    # digest's "what would trigger a rebalance" section so it can state
+    # the target shift on a regime flip without inlining the full
+    # compute_regime_blends + HMM fit on a single email render. Stored
+    # as metric_kind='regime_blends'; reader is get_latest_metric.
+    await refresh_regime_blends(data_hash)
     # Item 9 (May 22 2026) — strategy_characterisations is its own
     # table (one row per strategy) rather than another row in
     # analytics_metrics_cache, but it refreshes on the same data-

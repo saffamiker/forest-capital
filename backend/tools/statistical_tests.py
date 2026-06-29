@@ -310,8 +310,12 @@ def block_bootstrap_sharpe(
     p-values; 21 is the compromise between capturing momentum (~21 days) and
     preserving enough block independence for the distribution to converge.
     seed=RANDOM_SEED=42 is fixed for reproducibility — required by QA checklist.
+
+    Determinism: uses np.random.default_rng(seed) so the bootstrap is
+    isolated from the GLOBAL np.random state -- same rationale as
+    spa_test below.
     """
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
 
     clean = strategy_returns.dropna()
     n = len(clean)
@@ -336,7 +340,7 @@ def block_bootstrap_sharpe(
 
     bootstrap_sharpes = []
     for _ in range(n_samples):
-        starts = np.random.randint(0, max(n - block_size + 1, 1), size=n_blocks)
+        starts = rng.integers(0, max(n - block_size + 1, 1), size=n_blocks)
         boot = np.concatenate([demean_excess[s: s + block_size] for s in starts])[:n]
         s = float(np.mean(boot) / np.std(boot) * np.sqrt(ANNUALIZATION_FACTOR)) if np.std(boot) > 0 else 0.0
         bootstrap_sharpes.append(s)
@@ -606,8 +610,18 @@ def spa_test(
     null distribution of the maximum), then compare the observed maximum against it.
     p_spa < 0.005 (Tier 1) means the best strategy survives data-snooping correction.
     block bootstrap preserves autocorrelation structure in active returns.
+
+    Determinism: uses np.random.default_rng(seed) so the bootstrap is
+    isolated from the GLOBAL np.random state. Two invocations of
+    spa_test() with the same seed in the same process produce bitwise-
+    identical p_spa, regardless of what other code (other tests, other
+    services) has called np.random in between. The pre-existing code
+    used np.random.seed() + np.random.randint(), which IS supposed to
+    be deterministic but is sensitive to numpy version and to whatever
+    global RNG state the surrounding suite has accumulated -- this was
+    the cause of CI flake repro'd at assert 0.16 == 0.155.
     """
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
 
     # Align all strategies to benchmark
     aligned = {}
@@ -649,7 +663,7 @@ def spa_test(
     null_maxima = []
     for _ in range(n_boot):
         n_blocks = int(np.ceil(n / block_size))
-        starts = np.random.randint(0, max(n - block_size + 1, 1), size=n_blocks)
+        starts = rng.integers(0, max(n - block_size + 1, 1), size=n_blocks)
         boot_idx = np.concatenate([np.arange(s, min(s + block_size, n)) for s in starts])[:n]
 
         # Compute Sharpe for each strategy on this bootstrap sample (demeaned — H0)

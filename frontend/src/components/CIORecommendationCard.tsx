@@ -10,15 +10,38 @@
  * server-provided; a graceful empty state shows before the first warm.
  */
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { ChevronDown, ChevronRight, Loader2, AlertTriangle } from 'lucide-react'
+import { ChevronDown, ChevronRight, Loader2, AlertTriangle, MessageSquare } from 'lucide-react'
 import InfoIcon from './InfoIcon'
+import { RegimeFreshnessBadge } from './RegimeFreshnessBadge'
 
 interface Confidence {
   regime?: string | null
   probability?: number | null
   ess?: number | null
   ess_warning?: boolean | null
+}
+// June 8 2026 -- per-regime blend shift entry. weights mirrors the
+// regime_blends cache (strategy name -> fractional weight); equity_pct
+// / bond_pct / cash_pct are the asset-class split derived from the
+// strategy cache; equity_delta_pp / bond_delta_pp are the delta vs
+// the live portfolio in PERCENTAGE POINTS (not fractions) so the UI
+// renders "+35.6pp" without re-multiplying.
+interface RegimeBlendImplied {
+  weights: Record<string, number>
+  equity_pct: number
+  bond_pct: number
+  cash_pct: number
+  equity_delta_pp?: number
+  bond_delta_pp?: number
+  // IG/HY split (June 2026). Same back-compat rule as
+  // implied_asset_allocation -- absent when no contributing strategy
+  // in the regime blend carries the new fields.
+  ig_bond_pct?: number
+  hy_bond_pct?: number
+  ig_bond_delta_pp?: number
+  hy_bond_delta_pp?: number
 }
 interface Recommendation {
   signal?: string | null
@@ -27,13 +50,81 @@ interface Recommendation {
   dissenting_view?: string | null
   key_risk?: string | null
   limitations?: string[] | null
+  // Live overlay from /api/v1/recommendation: present only when the
+  // daily HMM (live label) and monthly HMM (blend weights) disagree.
+  // Reflects the moment of the read, not the moment the prose was
+  // written — never baked into the cached recommendation.
+  divergence_disclosure?: string | null
+  // Live regime-conditional blend weights, overlaid from the cached
+  // forward projection so the tile can show the blend + flag a binding
+  // concentration constraint. Absent before the first warm.
+  blend_weights?: Record<string, number> | null
+  // Bridge #81 -- portfolio-level equity / bond / cash split derived
+  // from blend_weights x per-strategy asset weights. Absent when the
+  // strategy cache is cold or the blend is missing -- the card omits
+  // the line entirely in that case.
+  implied_asset_allocation?: {
+    equity_pct: number
+    bond_pct: number
+    cash_pct: number
+    // IG/HY split (June 2026). Surfaced only when the strategy cache
+    // rows carry the per-strategy avg_ig_weight / avg_hy_weight; until
+    // the backfill script lands, this is absent and the card renders
+    // the combined-bonds row alone.
+    ig_bond_pct?: number
+    hy_bond_pct?: number
+  } | null
+  // Bridge #81 -- one-sentence guidance on what would shift the
+  // blend (HMM regime flip + threshold watch points). Always present
+  // on a successful read; a generic sentence backs the case where
+  // the regime is unknown.
+  blend_change_trigger?: string | null
+  // June 8 2026 -- per-regime blend-shift implied splits + deltas
+  // from the live portfolio. The /api/v1/recommendation endpoint
+  // overlays this from the cached regime_blends metric crossed with
+  // the same per-strategy avg_equity_weight / avg_bond_weight that
+  // drive implied_asset_allocation. Absent when the regime_blends
+  // row is cold or the live current implied is unavailable -- the
+  // card omits the regime-shift section in that case.
+  regime_blends_implied?: Record<string, RegimeBlendImplied> | null
+  // June 15 2026 -- OOS validation overlay. Pulled from the cached
+  // oos_summary metric (academic submission freeze record). null
+  // when the cache is cold or the read failed; the card omits the
+  // row.
+  oos_sharpe?: {
+    blend: number | null
+    benchmark: number | null
+    value_add_events: number | null
+    total_events: number | null
+  } | null
   computed_at?: string | null
   model?: string | null
+  // The Python pipeline emits `_model` (underscore prefix) carrying
+  // either the LLM model id (e.g. claude-sonnet-4-6) or the literal
+  // "deterministic_fallback" sentinel when the LLM call failed and the
+  // user is seeing the structured fail-open recommendation. The card
+  // surfaces an inline notice when the sentinel is present so the
+  // user can never mistake the fallback for a live LLM run.
+  _model?: string | null
 }
 interface Payload {
   available: boolean
   recommendation: Recommendation | null
 }
+
+// Box constraints the meta-portfolio optimizer operates under. Static
+// disclosure — these are config invariants, not live values.
+const PORTFOLIO_CONSTRAINTS: { label: string; value: string }[] = [
+  { label: 'Strategy ceiling', value: '40% max per strategy' },
+  { label: 'Strategy floor', value: '5% min per strategy' },
+  { label: 'Asset ceiling', value: '50% max per asset class' },
+  { label: 'Asset floor', value: '5% min per asset class' },
+  { label: 'Rebalance trigger', value: 'Regime posterior shift' },
+]
+
+// The blend is at/near the 40% concentration ceiling when any single
+// strategy weight reaches 38%.
+const NEAR_CEILING = 0.38
 
 const REGIME_TONE: Record<string, string> = {
   BULL: 'text-positive',
@@ -48,14 +139,34 @@ const CFA_DISCLOSURE =
 
 function asOf(ts?: string | null): string {
   if (!ts) return 'unknown'
-  const d = new Date(ts)
-  return isNaN(d.getTime()) ? ts : d.toLocaleString()
+  // Backend timestamps are UTC. Normalise to ISO and, when the string
+  // carries no timezone marker, treat it as UTC ('Z') so the browser
+  // converts to the user's local zone instead of misreading the UTC clock
+  // as local. Render with the timezone abbreviation so it is unambiguous.
+  let s = String(ts).trim().replace(' ', 'T')
+  if (!/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) s += 'Z'
+  const d = new Date(s)
+  return isNaN(d.getTime())
+    ? String(ts)
+    : d.toLocaleString(undefined, { timeZoneName: 'short' })
 }
 
 export default function CIORecommendationCard() {
+  const navigate = useNavigate()
   const [data, setData] = useState<Payload | null>(null)
   const [loading, setLoading] = useState(true)
   const [showLimitations, setShowLimitations] = useState(false)
+
+  // Hand off to the council with the "recommendation" scope so the
+  // deliberation injects this tile's live cached data (regime, blend,
+  // dissent). The question is pre-filled and editable, never auto-sent.
+  const askCouncil = () =>
+    navigate('/council', {
+      state: {
+        prefillQuestion: 'Why is the blend positioned defensively right now?',
+        contextScope: 'recommendation',
+      },
+    })
 
   useEffect(() => {
     let alive = true
@@ -96,6 +207,13 @@ export default function CIORecommendationCard() {
   const probPct = typeof conf.probability === 'number'
     ? `${(conf.probability * 100).toFixed(0)}%` : '—'
   const limitations = rec.limitations || []
+  const blendTop = rec.blend_weights
+    ? Object.entries(rec.blend_weights)
+        .filter(([, v]) => v > 0.01)
+        .sort((a, b) => b[1] - a[1])
+    : []
+  // The strategy at/near the 40% concentration ceiling (>=38%), if any.
+  const nearCeiling = blendTop.find(([, v]) => v >= NEAR_CEILING)
 
   return (
     <div className="card p-5 m-4 md:m-6 border-l-2 border-electric">
@@ -123,11 +241,46 @@ export default function CIORecommendationCard() {
               ) : null}
             </span>
           </div>
+          {/* June 28 2026 -- live freshness indicator. Renders
+              below the regime+confidence line, color-coded by
+              age (green <5m / amber <15m / red >=15m). Hover
+              shows absolute UTC. Updates every 15s via
+              internal setInterval -- no parent re-fetch
+              required. */}
+          <RegimeFreshnessBadge
+            computed_at={rec.computed_at ?? null} />
         </div>
         <div className="text-2xs text-muted font-mono text-right">
           As of {asOf(rec.computed_at)}
         </div>
       </div>
+
+      {/* Bridge #81 -- divergence disclosure + deterministic-fallback
+          notice surface ABOVE the prose stack so they sit between the
+          confidence line at the top of the card and the allocation
+          block below. Pre-fix these rendered at the BOTTOM of the
+          prose stack (right above Blend), so the user often missed the
+          regime-divergence flag entirely. */}
+      {rec.divergence_disclosure && (
+        <p
+          className="mt-3 flex gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
+          data-testid="cio-divergence-disclosure"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+          <span className="text-warning">{rec.divergence_disclosure}</span>
+        </p>
+      )}
+      {rec._model === 'deterministic_fallback' && (
+        <p
+          className="mt-3 flex gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
+          data-testid="cio-deterministic-fallback-notice"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+          <span className="text-warning">
+            Live regime unavailable — showing last deterministic recommendation.
+          </span>
+        </p>
+      )}
 
       <div className="mt-4 space-y-2 text-sm">
         {rec.signal && (
@@ -152,6 +305,213 @@ export default function CIORecommendationCard() {
           </p>
         )}
       </div>
+
+      {/* Bridge #81 -- allocation block.
+          Line 1: Current Strategy Blend (renamed from "Blend") with the
+                  top-4 strategy weights, unchanged in content.
+          Line 2: Implied Asset Allocation, the equity / IG-HY-bonds /
+                  cash split derived from the live blend. Omitted when
+                  the backend overlay was absent (cold strategy cache).
+          Line 3: Blend Change Trigger, one readable sentence describing
+                  what would shift the blend. Always rendered when
+                  blend_change_trigger is present. */}
+      {blendTop.length > 0 && (
+        <p className="mt-3 text-sm" data-testid="cio-current-strategy-blend">
+          <span className="text-muted">Current Strategy Blend: </span>
+          <span className="font-mono text-xs text-slate-300">
+            {blendTop.slice(0, 4)
+              .map(([n, v]) => `${n} ${(v * 100).toFixed(0)}%`)
+              .join('  ·  ')}
+          </span>
+        </p>
+      )}
+      {rec.implied_asset_allocation && (() => {
+        const ia = rec.implied_asset_allocation
+        // IG/HY detail is surfaced only when the backend overlay
+        // carried both fields. Once the backfill script has run and
+        // strategy_results_cache has the new keys on every row, this
+        // is always populated; pre-backfill rows fall through to the
+        // combined-bonds row.
+        const hasIgHy = typeof ia.ig_bond_pct === 'number'
+          && typeof ia.hy_bond_pct === 'number'
+        return (
+          <p className="mt-1 text-sm" data-testid="cio-implied-asset-allocation">
+            <span className="text-muted">Implied Asset Allocation: </span>
+            <span className="font-mono text-xs text-slate-300">
+              {`Equity ${(ia.equity_pct * 100).toFixed(0)}%`}
+              {hasIgHy ? (
+                `  ·  IG Bonds ${(ia.ig_bond_pct! * 100).toFixed(0)}%`
+                + `  ·  HY Bonds ${(ia.hy_bond_pct! * 100).toFixed(0)}%`
+              ) : (
+                `  ·  Bonds ${(ia.bond_pct * 100).toFixed(0)}%`
+              )}
+              {`  ·  Cash ${(ia.cash_pct * 100).toFixed(0)}%`}
+            </span>
+          </p>
+        )
+      })()}
+      {rec.blend_change_trigger && (
+        <p className="mt-1 text-sm" data-testid="cio-blend-change-trigger">
+          <span className="text-muted">Blend Change Trigger: </span>
+          <span className="text-text">{rec.blend_change_trigger}</span>
+        </p>
+      )}
+
+      {/* ── OOS validation (June 15 2026) ─────────────────────────────
+          Pulled from oos_summary cached at warm time (academic
+          submission freeze record). Renders the blend / benchmark
+          Sharpe + the explicit delta, plus a secondary "Blend
+          outperformed at N of M rebalance events" line. Hidden
+          silently when the overlay is null (cold cache). */}
+      {rec.oos_sharpe
+        && typeof rec.oos_sharpe.blend === 'number'
+        && typeof rec.oos_sharpe.benchmark === 'number'
+        && (() => {
+          const oos = rec.oos_sharpe!
+          const delta = (oos.blend as number) - (oos.benchmark as number)
+          const fmt = (n: number) => n.toFixed(2)
+          const sign = delta >= 0 ? '+' : ''
+          return (
+            <div className="mt-4" data-testid="cio-oos-sharpe">
+              <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
+                OOS Sharpe (submission lock)
+              </div>
+              <p className="text-sm leading-snug">
+                <span className="text-muted">Blend </span>
+                <span className="font-mono text-slate-300">
+                  {fmt(oos.blend as number)}
+                </span>
+                <span className="text-muted ml-3">Benchmark </span>
+                <span className="font-mono text-slate-300">
+                  {fmt(oos.benchmark as number)}
+                </span>
+                <span className="text-2xs text-muted ml-2">
+                  ({sign}{fmt(delta)} vs benchmark)
+                </span>
+              </p>
+              {typeof oos.value_add_events === 'number'
+                && typeof oos.total_events === 'number'
+                && oos.total_events > 0 && (
+                <p className="text-2xs text-muted mt-0.5"
+                  data-testid="cio-oos-events">
+                  Blend outperformed at {oos.value_add_events} of{' '}
+                  {oos.total_events} rebalance events
+                </p>
+              )}
+            </div>
+          )
+        })()}
+
+      {/* ── Per-regime blend shift (June 8 2026) ──────────────────────
+          Three rows -- BULL / BEAR / TRANSITION -- showing the
+          strategy weights, the asset-class implied split, and the
+          delta from the live portfolio. The endpoint overlays this
+          from analytics_metrics_cache 'regime_blends' crossed with
+          per-strategy avg_equity_weight / avg_bond_weight. Absent
+          when the cache is cold or the live current implied is
+          unavailable -- the card omits the whole section. */}
+      {rec.regime_blends_implied
+        && Object.keys(rec.regime_blends_implied).length > 0 && (
+        <div className="mt-4" data-testid="cio-regime-blends-implied">
+          <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
+            Blend Shift on Regime Flip
+          </div>
+          <div className="space-y-2">
+            {(['BULL', 'BEAR', 'TRANSITION'] as const).map((regime) => {
+              const entry = rec.regime_blends_implied?.[regime]
+              if (!entry) return null
+              // Top three strategies by weight -- matches the digest
+              // truncation so the surface stays readable.
+              const top = Object.entries(entry.weights)
+                .filter(([, w]) => Number(w) > 0)
+                .sort((a, b) => Number(b[1]) - Number(a[1]))
+                .slice(0, 3)
+              const weightStr = top
+                .map(([name, w]) => `${name} ${Math.round(Number(w) * 100)}%`)
+                .join(', ')
+              const tone = REGIME_TONE[regime] || 'text-text'
+              const dq = entry.equity_delta_pp
+              const db = entry.bond_delta_pp
+              const dig = entry.ig_bond_delta_pp
+              const dhy = entry.hy_bond_delta_pp
+              const hasIgHy = typeof entry.ig_bond_pct === 'number'
+                && typeof entry.hy_bond_pct === 'number'
+              const hasIgHyDelta = typeof dig === 'number'
+                && typeof dhy === 'number'
+              const fmtPp = (v: number) =>
+                `${v >= 0 ? '+' : ''}${v.toFixed(1)}pp`
+              return (
+                <div key={regime}
+                  data-testid={`cio-regime-blend-${regime}`}
+                  className="text-xs leading-snug">
+                  <div>
+                    <span className={`font-semibold ${tone}`}>
+                      {regime}:
+                    </span>{' '}
+                    <span className="text-slate-300">{weightStr}</span>
+                  </div>
+                  <div className="ml-4 text-slate-300 font-mono text-2xs">
+                    {`Equity ${(entry.equity_pct * 100).toFixed(1)}%`}
+                    {hasIgHy ? (
+                      ` | IG ${(entry.ig_bond_pct! * 100).toFixed(1)}%`
+                      + ` | HY ${(entry.hy_bond_pct! * 100).toFixed(1)}%`
+                    ) : (
+                      ` | Bonds ${(entry.bond_pct * 100).toFixed(1)}%`
+                    )}
+                  </div>
+                  {typeof dq === 'number' && typeof db === 'number' && (
+                    <div className="ml-4 text-muted font-mono text-2xs"
+                      data-testid={`cio-regime-blend-${regime}-delta`}>
+                      {`vs today: Equity ${fmtPp(dq)}`}
+                      {hasIgHyDelta ? (
+                        ` | IG ${fmtPp(dig!)} | HY ${fmtPp(dhy!)}`
+                      ) : (
+                        ` | Bonds ${fmtPp(db)}`
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Portfolio Constraints (standing disclosure) ───────────── */}
+      <div className="mt-4">
+        <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
+          Portfolio Constraints
+        </div>
+        <table className="text-xs w-full max-w-sm">
+          <tbody>
+            {PORTFOLIO_CONSTRAINTS.map((c) => (
+              <tr key={c.label}>
+                <td className="text-left text-muted py-0.5 pr-4">{c.label}</td>
+                <td className="text-right text-slate-300 font-mono py-0.5">
+                  {c.value}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className={`mt-2 text-2xs leading-relaxed ${
+          nearCeiling ? 'text-warning' : 'text-muted'}`}>
+          {nearCeiling
+            ? `Note: ${nearCeiling[0]} is at or near the concentration `
+              + 'ceiling. The blend cannot increase defensiveness further '
+              + 'without a constraint relaxation.'
+            : 'No constraints currently binding.'}
+        </p>
+      </div>
+
+      <button
+        type="button"
+        onClick={askCouncil}
+        className="mt-4 inline-flex items-center gap-1.5 text-xs text-electric
+                   hover:underline min-h-[44px] sm:min-h-0">
+        <MessageSquare className="w-3.5 h-3.5" />
+        Ask about this
+      </button>
 
       {limitations.length > 0 && (
         <div className="mt-4">

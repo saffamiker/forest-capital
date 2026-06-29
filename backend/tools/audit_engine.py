@@ -221,7 +221,16 @@ async def _finalise_audit(
 ) -> None:
     """Writes the completed audit_runs row. data_hash is the lightweight
     fingerprint of the data this run verified — smart audit caching
-    compares it against the live fingerprint. Fail-open."""
+    compares it against the live fingerprint. Fail-open.
+
+    June 25 2026 -- when this run completes (status='complete') and
+    carries a data_hash, auto-resolve every unresolved finding from
+    PRIOR audit runs sharing the same data_hash. The fresh run's
+    findings supersede the older ones for that data fingerprint;
+    leaving the older rows resolved=false caused them to accumulate
+    indefinitely and block report generation forever even after a
+    fresh audit confirmed the issue was no longer present.
+    """
     try:
         from sqlalchemy import text
 
@@ -243,8 +252,120 @@ async def _finalise_audit(
                 "dh": data_hash,
                 "md": json.dumps(metadata), "id": run_id})
             await session.commit()
+        # Supersede old findings -- best-effort, ENTIRELY separate
+        # from the finalise UPDATE so a failure here never undoes
+        # the run completion. Only fires when this run finished
+        # cleanly and we have a data_hash to scope by.
+        if status == "complete" and data_hash:
+            await _supersede_prior_findings(run_id, data_hash)
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_finalise_failed", run_id=run_id, error=str(exc))
+
+
+async def _supersede_prior_findings(
+    new_run_id: int, data_hash: str,
+) -> None:
+    """June 25 2026 -- auto-resolve findings from prior audit
+    runs that share the same data_hash as the newly-completed
+    run. Sets resolved=true, resolution_note='Superseded by audit
+    run #<new_run_id>', and (when the migration-044 columns exist)
+    auto_acknowledged=true / resolved_by='auto_supersede' /
+    resolved_at=now().
+
+    Why scoped by data_hash: a finding from an OLD data
+    fingerprint may have already been fixed by today's analytics;
+    the fresh run for that hash is the authoritative state. We
+    don't supersede across data_hashes -- a finding raised
+    against hash-A is meaningfully distinct from a finding
+    against hash-B and both should remain visible until either
+    is explicitly resolved by the team.
+
+    Fail-open: any DB error logs and returns. The new finding
+    rows still landed; the only side-effect is that the old rows
+    keep their resolved=false state and the team has to clear
+    them manually."""
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return
+        # Detect whether migration 044 columns exist. The first
+        # attempt uses the full UPDATE; on failure fall back to
+        # the legacy UPDATE that only sets resolved + note.
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await session.execute(text(
+                    "UPDATE audit_findings SET "
+                    "resolved = TRUE, "
+                    "resolution_note = :note, "
+                    "auto_acknowledged = TRUE, "
+                    "resolved_by = 'auto_supersede', "
+                    "resolved_at = NOW() "
+                    "WHERE resolved = FALSE "
+                    "AND audit_run_id IN ("
+                    "  SELECT id FROM audit_runs "
+                    "  WHERE data_hash = :dh "
+                    "  AND id <> :rid "
+                    "  AND status = 'complete'"
+                    ")"),
+                    {
+                        "note": (
+                            f"Superseded by audit run "
+                            f"#{new_run_id}"),
+                        "dh": data_hash, "rid": new_run_id,
+                    })
+                await session.commit()
+                superseded = (
+                    result.rowcount
+                    if hasattr(result, "rowcount") else 0)
+                if superseded:
+                    log.info(
+                        "audit_findings_superseded",
+                        new_run_id=new_run_id,
+                        data_hash=data_hash[:12],
+                        superseded_count=superseded)
+                return
+            except Exception:  # noqa: BLE001
+                # Pre-migration-044 column set -- retry with the
+                # legacy UPDATE that only touches resolved + note.
+                # Rollback the aborted transaction first.
+                try:
+                    await session.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                result = await session.execute(text(
+                    "UPDATE audit_findings SET "
+                    "resolved = TRUE, "
+                    "resolution_note = :note "
+                    "WHERE resolved = FALSE "
+                    "AND audit_run_id IN ("
+                    "  SELECT id FROM audit_runs "
+                    "  WHERE data_hash = :dh "
+                    "  AND id <> :rid "
+                    "  AND status = 'complete'"
+                    ")"),
+                    {
+                        "note": (
+                            f"Superseded by audit run "
+                            f"#{new_run_id}"),
+                        "dh": data_hash, "rid": new_run_id,
+                    })
+                await session.commit()
+                superseded = (
+                    result.rowcount
+                    if hasattr(result, "rowcount") else 0)
+                if superseded:
+                    log.info(
+                        "audit_findings_superseded_legacy",
+                        new_run_id=new_run_id,
+                        data_hash=data_hash[:12],
+                        superseded_count=superseded)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_supersede_failed",
+            new_run_id=new_run_id,
+            data_hash=(data_hash or "")[:12],
+            error=str(exc))
 
 
 async def get_last_completed_audit_hash() -> str | None:
@@ -471,7 +592,8 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
                 "status, platform_value, auditor_value, discrepancy, "
                 "formula_used, raw_inputs_hash, auditor_reasoning, "
                 "resolved, resolution_note, resolved_by, resolved_at, "
-                "auto_acknowledged FROM audit_findings "
+                "auto_acknowledged, locked_disclosure_text "
+                "FROM audit_findings "
                 "WHERE audit_run_id = :id ORDER BY layer, id"), {"id": run_id})
             findings = [_finding_row(r) for r in rows.fetchall()]
         out = _run_row(found)
@@ -488,8 +610,10 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
 
 def _finding_row(r: Any) -> dict[str, Any]:
     # resolved_by, resolved_at, auto_acknowledged were added by
-    # migration 044. Older rows have NULL / false for these; the
-    # PDF disclosures section renders missing values as a dash.
+    # migration 044. locked_disclosure_text was added by migration 055.
+    # Older rows have NULL / false for these; the PDF disclosures
+    # section renders missing values as a dash and the frontend
+    # omits the disclosure box for a NULL value.
     return {
         "id": r[0], "layer": r[1], "check_name": r[2], "metric": r[3],
         "strategy": r[4], "severity": r[5], "status": r[6],
@@ -500,6 +624,7 @@ def _finding_row(r: Any) -> dict[str, Any]:
         "resolved_at": r[16] if len(r) > 16 else None,
         "auto_acknowledged": bool(r[17]) if len(r) > 17 and r[17] is not None
                               else False,
+        "locked_disclosure_text": r[18] if len(r) > 18 else None,
     }
 
 
@@ -509,6 +634,7 @@ async def resolve_finding(
     note: str | None,
     *,
     resolved_by: str | None = None,
+    disclosure_text: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Sets or clears the acknowledgement on an audit finding — the WARN
@@ -524,6 +650,13 @@ async def resolve_finding(
     resolution_note and resolved_at — the row reverts to its
     pre-review state.
 
+    disclosure_text — optional. The verbatim disclosure the team agreed
+    to put into the report at acknowledge time. Stored in the
+    locked_disclosure_text column added by migration 055 so Bob can
+    copy-paste it into the brief without re-deriving. Cleared (set to
+    NULL) on unresolve so a revoked acknowledgement does not leave
+    a stale disclosure attached.
+
     Workstream A — a successful ack also writes an audit_acknowledgements
     row so the next re-run's carry pass (tools/audit_carry.apply_carry)
     can re-apply this review against an equivalent future finding. A
@@ -536,21 +669,30 @@ async def resolve_finding(
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return None
+        # Normalise disclosure_text -- treat empty/whitespace as None
+        # so a blank textarea produces a clean NULL.
+        locked_disclosure = (
+            (disclosure_text or "").strip() if resolved else None)
+        if locked_disclosure == "":
+            locked_disclosure = None
         async with AsyncSessionLocal() as session:
             result = await session.execute(text(
                 "UPDATE audit_findings SET resolved = :r, "
                 "resolution_note = :n, resolved_by = :by, "
                 "resolved_at = CASE WHEN :r THEN now() ELSE NULL END, "
                 "auto_acknowledged = CASE WHEN :r THEN false "
-                "                         ELSE auto_acknowledged END "
+                "                         ELSE auto_acknowledged END, "
+                "locked_disclosure_text = :ld "
                 "WHERE id = :id "
                 "RETURNING id, layer, check_name, metric, strategy, "
                 "severity, status, platform_value, auditor_value, "
                 "discrepancy, formula_used, raw_inputs_hash, "
                 "auditor_reasoning, resolved, resolution_note, "
-                "resolved_by, resolved_at, auto_acknowledged"),
+                "resolved_by, resolved_at, auto_acknowledged, "
+                "locked_disclosure_text"),
                 {"r": resolved, "n": note if resolved else None,
                  "by": resolved_by if resolved else None,
+                 "ld": locked_disclosure,
                  "id": finding_id})
             row = result.fetchone()
             await session.commit()
@@ -862,21 +1004,38 @@ async def compute_in02_attestation() -> dict[str, Any]:
         # was "parsed only 1 of 5" while compute_review_score saw
         # all five.
         n_sections: int | None = None
+        parse_error: bool | None = None
         if isinstance(meta, dict):
             md_count = meta.get("sections_rated")
             if isinstance(md_count, int) and md_count >= 0:
                 n_sections = md_count
+            pe = meta.get("parse_error")
+            if isinstance(pe, bool):
+                parse_error = pe
         if n_sections is None:
             try:
                 from tools.academic_review_score import compute_review_score
                 scored = compute_review_score(summary or "")
                 n_sections = int(scored.get("sections_rated") or 0)
+                if parse_error is None:
+                    parse_error = bool(scored.get("parse_error"))
                 if not overall:
                     overall = scored.get("rating")
             except Exception as _exc:  # noqa: BLE001
                 log.warning(
                     "in02_canonical_score_failed", error=str(_exc))
                 n_sections = 0
+        # Re-derive parse_error from the summary when the metadata row
+        # is old (pre-bridge-#82 metadata had no parse_error field) and
+        # n_sections came back zero. The canonical scorer is the
+        # source of truth.
+        if parse_error is None and n_sections == 0:
+            try:
+                from tools.academic_review_score import compute_review_score
+                parse_error = bool(
+                    compute_review_score(summary or "").get("parse_error"))
+            except Exception:  # noqa: BLE001
+                parse_error = False
 
         if n_sections >= 5:
             return {
@@ -893,17 +1052,36 @@ async def compute_in02_attestation() -> dict[str, Any]:
                 "n_sections": n_sections,
                 "overall_rating": overall,
             }
-        return {
-            "status": "WARN",
-            "evidence": (
+        # Bridge #82 — distinguish "arbiter response could not be
+        # parsed" from "fewer than five sections survived parsing".
+        # parse_error=True means the response carried text but the
+        # parser recognised zero sections; the user needs to investigate
+        # the arbiter run (refused / unparseable / heading drift) rather
+        # than retry the document.
+        if parse_error and n_sections == 0:
+            evidence = (
+                f"An Academic Review row exists ({email} on {when}), "
+                f"but the arbiter response could not be parsed — zero "
+                f"of five rated sections were recognised in a non-empty "
+                f"response. The arbiter may have refused, drifted from "
+                f"the rubric heading format, or returned an error "
+                f"payload; inspect the agent_interactions row and re-run "
+                f"the Academic Review."
+            )
+        else:
+            evidence = (
                 f"An Academic Review row exists ({email} on {when}), "
                 f"but the verdict parsed only {n_sections} of 5 rated "
                 f"sections — the arbiter response may have truncated. "
                 f"Re-run the Academic Review so the full five-section "
                 f"verdict lands."
-            ),
+            )
+        return {
+            "status": "WARN",
+            "evidence": evidence,
             "last_review_at": when,
             "n_sections": n_sections,
+            "parse_error": bool(parse_error),
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("in02_attestation_query_failed", error=str(exc))
@@ -1228,7 +1406,9 @@ async def _prewarm_strategy_cache(run_id: int) -> None:
         return
 
     try:
-        await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+        await set_strategy_cache(
+            strategy_hash, results_dict, n_observations=n_rows,
+            risk_free_monthly=history.get("risk_free_monthly"))
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_prewarm_cache_write_failed",
                     run_id=run_id, error=str(exc),

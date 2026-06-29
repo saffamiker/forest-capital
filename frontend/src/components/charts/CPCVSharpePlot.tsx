@@ -11,6 +11,7 @@ import type { CPCVStats } from '../../types/charts'
 import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
 import ChartExportButton from '../ChartExportButton'
 import InfoIcon from '../InfoIcon'
+import { useChartTheme } from '../../lib/useChartTheme'
 
 interface Props {
   cpcv: Record<string, CPCVStats>
@@ -18,6 +19,7 @@ interface Props {
 
 export default function CPCVSharpePlot({ cpcv }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const chartTheme = useChartTheme()
   const entries = Object.entries(cpcv).filter(([, v]) => v.n_paths > 0)
   if (entries.length === 0) {
     return (
@@ -131,7 +133,7 @@ export default function CPCVSharpePlot({ cpcv }: Props) {
               <line
                 x1={xPos(v.sharpe_median)} x2={xPos(v.sharpe_median)}
                 y1={y - 8} y2={y + 8}
-                stroke="#f9fafb" strokeWidth={2}
+                stroke={chartTheme.textPrimary} strokeWidth={2}
               />
             </g>
           )

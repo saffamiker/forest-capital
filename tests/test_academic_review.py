@@ -285,10 +285,15 @@ class TestScriptRubric:
         captured: dict[str, object] = {}
 
         def _fake_arbiter(context_block, peer_responses, multi_user,
-                          script_review, n_strategies=None):
+                          script_review, n_strategies=None,
+                          brief_review=False, deck_review=False,
+                          appendix_review=False):
             captured["multi_user"] = multi_user
             captured["script_review"] = script_review
             captured["n_strategies"] = n_strategies
+            captured["brief_review"] = brief_review
+            captured["deck_review"] = deck_review
+            captured["appendix_review"] = appendix_review
             return "stub verdict"
 
         monkeypatch.setattr(
@@ -480,3 +485,331 @@ class TestSectionFiveFallback:
         # 4000 gives the verdict comfortable headroom.
         from agents.academic_review import ARBITER_MAX_TOKENS
         assert ARBITER_MAX_TOKENS >= 4000
+
+
+# ── Brief-specific rubric (PR — academic review brief-specific rubric) ──────
+#
+# Background: applying the midpoint rubric to the executive brief
+# scored Section 5 (Final Recommendations) Needs Work mechanically
+# because the midpoint rubric expects "Next Steps and Open Questions"
+# framing — PR #344's INVESTABLE_CONCLUSION_GUARD deliberately frames
+# Section 5 as investment conclusions. The brief-specific rubric
+# replaces the four midpoint sections with the six brief sections
+# (Executive Summary / Methodology / Key Findings / Limitations /
+# Final Recommendations / Visuals) weighted 15/20/25/15/20/5.
+
+class TestBriefSpecificRubric:
+    """The brief-specific rubric removes the structural 5.5/10 floor
+    that the midpoint rubric was producing on every brief review."""
+
+    def test_brief_arbiter_instructions_constant_contains_six_sections(self):
+        from agents.academic_review import _ARBITER_INSTRUCTIONS_BRIEF
+        # All six section heading words present.
+        assert "Executive Summary" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Methodology" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Key Findings" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Limitations" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Final Recommendations" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Visuals" in _ARBITER_INSTRUCTIONS_BRIEF
+        # Header signals brief mode (not midpoint, not script).
+        assert "ARBITER VERDICT (EXECUTIVE BRIEF)" in _ARBITER_INSTRUCTIONS_BRIEF
+        # Audience framing — senior investment + FNA 670 academic panel.
+        assert "senior investment audience" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "FNA 670" in _ARBITER_INSTRUCTIONS_BRIEF
+        # Top-line summary lines.
+        assert "**Academic rigour:**" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "**Portfolio Manager insight:**" in _ARBITER_INSTRUCTIONS_BRIEF
+        # Section weights spelled out in the section headings.
+        assert "(15%)" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "(20%)" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "(25%)" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "(5%)" in _ARBITER_INSTRUCTIONS_BRIEF
+
+    def test_brief_prohibited_patterns_listed(self):
+        # The PROHIBITED PATTERNS block must call out the harness
+        # artifacts that have leaked into briefs before.
+        from agents.academic_review import _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Further research would benefit from" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Next steps include" in _ARBITER_INSTRUCTIONS_BRIEF
+        # Roles content out of scope for the brief.
+        assert "Roles and division of labor" in _ARBITER_INSTRUCTIONS_BRIEF
+        # The PM_CRITERION + harness-table detector pattern is verbatim
+        # so the arbiter scores those sections Needs Work on sight.
+        assert "PM_CRITERION" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Prior Issue" in _ARBITER_INSTRUCTIONS_BRIEF
+        assert "Resolution Applied" in _ARBITER_INSTRUCTIONS_BRIEF
+        # OOS Sharpe window-definition prohibition.
+        assert "OOS Sharpe" in _ARBITER_INSTRUCTIONS_BRIEF
+
+    def test_editor_to_review_type_routes_executive_brief_to_brief_review(self):
+        # Previously "other" (the catch-all) which routed the verdict
+        # through the midpoint rubric. The new value is the signal the
+        # rubric switch reads.
+        from agents.academic_review import _EDITOR_TO_REVIEW_TYPE
+        assert _EDITOR_TO_REVIEW_TYPE["executive_brief"] == "brief_review"
+
+    def test_build_arbiter_user_message_brief_mode_uses_brief_instructions(self):
+        # Wire-level: brief_review=True must pick the brief rubric.
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+            _ARBITER_INSTRUCTIONS_BRIEF, _ARBITER_INSTRUCTIONS,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        msg = build_arbiter_user_message(
+            "CTX", peer_responses, brief_review=True)
+        # Brief rubric heading is present.
+        assert "ARBITER VERDICT (EXECUTIVE BRIEF)" in msg
+        # The full brief instructions block is embedded.
+        assert _ARBITER_INSTRUCTIONS_BRIEF in msg
+        # The default (midpoint) rubric header is NOT present.
+        assert "ARBITER VERDICT (MIDPOINT CHECK)" not in msg
+        # Spot-check section weights.
+        assert "Key Findings and Insights (25%)" in msg
+        assert "Visuals (5%)" in msg
+
+    def test_brief_review_ignores_multi_user_section_6(self):
+        # Section 6 (Team Engagement and Division of Labour) is
+        # midpoint-only — a brief's verdict stays focused on the
+        # senior-investor read.
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        msg = build_arbiter_user_message(
+            "CTX", peer_responses, multi_user=True, brief_review=True)
+        assert "Team Engagement and Division of Labour" not in msg
+
+    def test_default_rubric_still_used_when_brief_review_false(self):
+        # Backward compatibility — every existing caller (script_review
+        # / midpoint / no kwargs) keeps its current behaviour.
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        msg = build_arbiter_user_message("CTX", peer_responses)
+        # Midpoint rubric content is present, brief content is not.
+        assert "ARBITER VERDICT (MIDPOINT CHECK)" in msg
+        assert "ARBITER VERDICT (EXECUTIVE BRIEF)" not in msg
+
+    def test_endpoint_routes_brief_query_param_to_arbiter(self, monkeypatch):
+        # Verify the SSE endpoint threads document_type=executive_brief
+        # through to run_arbiter_with_harness with brief_review=True.
+        from agents import academic_review
+        captured: dict[str, object] = {}
+
+        def _fake_arbiter(context_block, peer_responses, multi_user,
+                          script_review, n_strategies=None,
+                          brief_review=False, deck_review=False,
+                          appendix_review=False):
+            captured["script_review"] = script_review
+            captured["brief_review"] = brief_review
+            captured["deck_review"] = deck_review
+            captured["appendix_review"] = appendix_review
+            return "stub verdict"
+
+        monkeypatch.setattr(
+            academic_review, "run_arbiter_with_harness", _fake_arbiter)
+
+        # executive_brief → brief_review=True, script_review=False
+        r = client.post(
+            "/api/council/academic-review"
+            "?document_type=executive_brief",
+            headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        assert captured.get("brief_review") is True
+        assert captured.get("script_review") is False
+
+        # absent → brief_review=False
+        captured.clear()
+        r = client.post(
+            "/api/council/academic-review", headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        assert captured.get("brief_review") is False
+
+        # presentation_script → brief_review=False (script wins).
+        captured.clear()
+        r = client.post(
+            "/api/council/academic-review"
+            "?document_type=presentation_script",
+            headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        assert captured.get("brief_review") is False
+        assert captured.get("script_review") is True
+
+
+class TestDeckAndAppendixSpecificRubrics:
+    """The deck-specific + appendix-specific rubrics extend PR #351
+    (brief rubric) to the other two final-deliverable document
+    types. Both previously routed through the midpoint rubric and
+    landed at the structural 5.5/10 floor the brief used to."""
+
+    def test_deck_arbiter_instructions_six_sections_with_weights(self):
+        from agents.academic_review import _ARBITER_INSTRUCTIONS_DECK
+        assert "Opening and Central Argument" in _ARBITER_INSTRUCTIONS_DECK
+        assert "Analytical Evidence" in _ARBITER_INSTRUCTIONS_DECK
+        assert "Economic Storytelling" in _ARBITER_INSTRUCTIONS_DECK
+        assert "Live Demo and AI Methodology" in _ARBITER_INSTRUCTIONS_DECK
+        assert "Investment Recommendation" in _ARBITER_INSTRUCTIONS_DECK
+        assert "Presentation Quality" in _ARBITER_INSTRUCTIONS_DECK
+        # Header signals deck mode.
+        assert ("ARBITER VERDICT (PRESENTATION DECK)"
+                in _ARBITER_INSTRUCTIONS_DECK)
+        # The two top-line summary lines (academic + PM).
+        assert "**Academic rigour:**" in _ARBITER_INSTRUCTIONS_DECK
+        assert "**Portfolio Manager insight:**" in _ARBITER_INSTRUCTIONS_DECK
+        # All six section weights spelled out in the headings.
+        for w in ("(15%)", "(25%)", "(20%)", "(5%)"):
+            assert w in _ARBITER_INSTRUCTIONS_DECK
+
+    def test_appendix_arbiter_instructions_five_sections_with_weights(self):
+        from agents.academic_review import _ARBITER_INSTRUCTIONS_APPENDIX
+        # Five sections, not six.
+        assert ("Data Sources and Methodology"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        assert ("Portfolio Construction Methodology"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        assert ("All Calculations and Models"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        assert ("Performance Metrics and Visualizations"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        assert ("Sensitivity and Robustness Analysis"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        # Header signals appendix mode.
+        assert ("ARBITER VERDICT (ANALYTICAL APPENDIX)"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        # All five section weights present in the headings.
+        for w in ("(20%)", "(25%)", "(15%)"):
+            assert w in _ARBITER_INSTRUCTIONS_APPENDIX
+
+    def test_deck_prohibited_patterns_listed(self):
+        from agents.academic_review import _ARBITER_INSTRUCTIONS_DECK
+        # Brief-style prohibitions carry over.
+        assert ("Further research would benefit from"
+                in _ARBITER_INSTRUCTIONS_DECK)
+        assert "Roles and division of labor" in _ARBITER_INSTRUCTIONS_DECK
+        # Deck-specific: promotional AI language flagged.
+        assert "Promotional AI language" in _ARBITER_INSTRUCTIONS_DECK
+        # PM_CRITERION + harness-table detector pattern verbatim.
+        assert "PM_CRITERION" in _ARBITER_INSTRUCTIONS_DECK
+        assert "Prior Issue" in _ARBITER_INSTRUCTIONS_DECK
+
+    def test_appendix_prohibited_patterns_listed(self):
+        from agents.academic_review import _ARBITER_INSTRUCTIONS_APPENDIX
+        # Appendix-specific prohibitions: traceability and APA.
+        assert ("Figures not traceable to the data hash"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        assert ("Charts without figure numbers or APA notes"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        assert ("Sharpe ratios cited without study period definition"
+                in _ARBITER_INSTRUCTIONS_APPENDIX)
+        # Section 4 specifically references APA figure numbers.
+        assert "APA figure numbers" in _ARBITER_INSTRUCTIONS_APPENDIX
+
+    def test_editor_to_review_type_routes_deck_and_appendix(self):
+        from agents.academic_review import _EDITOR_TO_REVIEW_TYPE
+        assert _EDITOR_TO_REVIEW_TYPE["presentation_deck"] == "deck_review"
+        assert (_EDITOR_TO_REVIEW_TYPE["analytical_appendix"]
+                == "appendix_review")
+
+    def test_midpoint_paper_not_overlaid_into_review_context(self):
+        """June 21 2026 -- removed "midpoint_paper" from the editor-
+        draft overlay map. The May 27 midpoint paper deadline has
+        passed; the editor draft remains for audit history but it
+        no longer bleeds into the brief / deck / appendix review
+        contexts via docs_by_type["midpoint_draft"]. The academic_
+        documents-table row filter at tools/academic_context.py::
+        _INJECTION_EXCLUDED_TYPES already blocks the row-read path
+        (midpoint_draft is in that set); this test pins the overlay-
+        bypass closure."""
+        from agents.academic_review import _EDITOR_TO_REVIEW_TYPE
+        assert "midpoint_paper" not in _EDITOR_TO_REVIEW_TYPE
+
+    def test_injection_excluded_types_includes_midpoint_draft(self):
+        """Pin the academic_documents-table filter contract --
+        midpoint_draft rows uploaded to academic_documents must
+        NEVER reach the council review context."""
+        from tools.academic_context import _INJECTION_EXCLUDED_TYPES
+        assert "midpoint_draft" in _INJECTION_EXCLUDED_TYPES
+        assert "midpoint_requirements" in _INJECTION_EXCLUDED_TYPES
+
+    def test_build_arbiter_message_deck_mode_uses_deck_instructions(self):
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+            _ARBITER_INSTRUCTIONS_DECK,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        msg = build_arbiter_user_message(
+            "CTX", peer_responses, deck_review=True)
+        assert "ARBITER VERDICT (PRESENTATION DECK)" in msg
+        assert _ARBITER_INSTRUCTIONS_DECK in msg
+        # Brief / midpoint / appendix rubrics NOT present.
+        assert "ARBITER VERDICT (EXECUTIVE BRIEF)" not in msg
+        assert "ARBITER VERDICT (MIDPOINT CHECK)" not in msg
+        assert "ARBITER VERDICT (ANALYTICAL APPENDIX)" not in msg
+
+    def test_build_arbiter_message_appendix_mode_uses_appendix(self):
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+            _ARBITER_INSTRUCTIONS_APPENDIX,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        msg = build_arbiter_user_message(
+            "CTX", peer_responses, appendix_review=True)
+        assert "ARBITER VERDICT (ANALYTICAL APPENDIX)" in msg
+        assert _ARBITER_INSTRUCTIONS_APPENDIX in msg
+        assert "ARBITER VERDICT (PRESENTATION DECK)" not in msg
+        assert "ARBITER VERDICT (EXECUTIVE BRIEF)" not in msg
+        assert "ARBITER VERDICT (MIDPOINT CHECK)" not in msg
+
+    def test_deck_and_appendix_ignore_multi_user_section_6(self):
+        # Section 6 (Team Engagement) is midpoint-only.
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        deck_msg = build_arbiter_user_message(
+            "CTX", peer_responses, multi_user=True, deck_review=True)
+        assert "Team Engagement and Division of Labour" not in deck_msg
+        appx_msg = build_arbiter_user_message(
+            "CTX", peer_responses, multi_user=True, appendix_review=True)
+        assert "Team Engagement and Division of Labour" not in appx_msg
+
+    def test_endpoint_routes_deck_and_appendix(self, monkeypatch):
+        # Verify the SSE endpoint threads document_type=presentation_
+        # deck / analytical_appendix through to run_arbiter_with_harness
+        # with the matching flag set.
+        from agents import academic_review
+        captured: dict[str, object] = {}
+
+        def _fake_arbiter(context_block, peer_responses, multi_user,
+                          script_review, n_strategies=None,
+                          brief_review=False, deck_review=False,
+                          appendix_review=False):
+            captured["brief_review"] = brief_review
+            captured["deck_review"] = deck_review
+            captured["appendix_review"] = appendix_review
+            return "stub verdict"
+
+        monkeypatch.setattr(
+            academic_review, "run_arbiter_with_harness", _fake_arbiter)
+
+        # presentation_deck -> deck_review=True
+        r = client.post(
+            "/api/council/academic-review"
+            "?document_type=presentation_deck",
+            headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        assert captured.get("deck_review") is True
+        assert captured.get("brief_review") is False
+        assert captured.get("appendix_review") is False
+
+        # analytical_appendix -> appendix_review=True
+        captured.clear()
+        r = client.post(
+            "/api/council/academic-review"
+            "?document_type=analytical_appendix",
+            headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        assert captured.get("appendix_review") is True
+        assert captured.get("brief_review") is False
+        assert captured.get("deck_review") is False

@@ -53,8 +53,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, Request
@@ -152,6 +154,131 @@ class _AuthCodeStore:
             self._codes.pop(c, None)
 
 
+_TOKENS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tokens (
+    access_token TEXT PRIMARY KEY,
+    client_id    TEXT,
+    issued_at    INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tokens_expires_at
+    ON tokens(expires_at);
+"""
+
+
+class TokenStore:
+    """SQLite-backed issued-access-token store.
+
+    Why persistent: claude.ai stores the bearer token it received from
+    /token and re-uses it on every /mcp call. If the bridge keeps the
+    issued tokens in-memory only, a restart invalidates every prior
+    token and claude.ai is forced through the full authorization-code
+    flow again — visible to the user as a "please re-connect" prompt
+    on every desktop reboot. Persisting the tokens to the existing
+    queue.db SQLite file makes the bearer survive a restart, which is
+    the whole point of an access token in OAuth.
+
+    Schema (one row per issued token):
+      access_token TEXT PRIMARY KEY  the bearer claude.ai sends
+      client_id    TEXT              the OAuth client that earned it
+      issued_at    INTEGER           epoch seconds (debug + audit)
+      expires_at   INTEGER           epoch seconds (the validity cap)
+
+    Concurrency: shares queue.db with the prompt queue, which already
+    runs WAL + synchronous=NORMAL. The Queue constructor sets those
+    pragmas on first connect, so by the time the TokenStore creates
+    its table the pragmas are already in effect — there is nothing
+    extra to configure here.
+
+    Cleanup: validate() opportunistically deletes the row when it
+    detects an expired token. There is no separate sweeper thread —
+    the queue is small (one row per connect flow) and rows that are
+    never re-validated stay until the next process restart triggers
+    a sweep_expired() at startup. That is the load-existing-tokens
+    step from the spec: it is implemented as a sweep + nothing else
+    because validation reads SQLite on every request, so a separate
+    in-memory cache is not needed.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        # Create the parent directory if it doesn't exist (mirrors the
+        # Queue class — keeps the store usable without external setup).
+        p = Path(db_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as c:
+            c.executescript(_TOKENS_SCHEMA)
+        # Drop any tokens that expired before this process started.
+        self.sweep_expired()
+
+    def _connect(self) -> sqlite3.Connection:
+        # isolation_level=None — same convention as the Queue. Each
+        # statement is its own transaction unless we BEGIN explicitly.
+        c = sqlite3.connect(self.db_path, isolation_level=None)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def issue(
+        self, *, client_id: str, ttl_seconds: int,
+    ) -> tuple[str, int]:
+        """Mint a fresh random access token and persist it.
+
+        Returns (access_token, expires_in_seconds). The token is 32
+        bytes of secrets.token_urlsafe, which is the same entropy class
+        as authorization codes — collisions are not a concern at the
+        single-user scale this bridge runs at.
+        """
+        now = int(time.time())
+        expires_at = now + int(ttl_seconds)
+        token = secrets.token_urlsafe(32)
+        with self._connect() as c:
+            c.execute(
+                "INSERT INTO tokens "
+                "(access_token, client_id, issued_at, expires_at) "
+                "VALUES (?, ?, ?, ?)",
+                (token, client_id, now, expires_at))
+        return token, ttl_seconds
+
+    def validate(self, token: str) -> bool:
+        """True iff `token` is in the table and has not expired.
+
+        An expired row is deleted on detection so the table stays
+        small without a separate sweeper. A non-existent row is a
+        plain False — no exception, no logging (validation is a hot
+        path and the unauthenticated 401 carries no token detail to
+        Claude.ai anyway)."""
+        if not token:
+            return False
+        now = int(time.time())
+        with self._connect() as c:
+            row = c.execute(
+                "SELECT expires_at FROM tokens "
+                "WHERE access_token = ?",
+                (token,)).fetchone()
+            if row is None:
+                return False
+            if int(row["expires_at"]) <= now:
+                # Stale — clean up and reject.
+                c.execute(
+                    "DELETE FROM tokens WHERE access_token = ?",
+                    (token,))
+                return False
+        return True
+
+    def sweep_expired(self) -> int:
+        """DELETE every row whose expires_at is in the past. Returns
+        the number of rows removed. Called from __init__ as the
+        load-existing-tokens step from the spec: there's nothing to
+        load into memory (validate() hits SQLite directly), but a
+        startup sweep keeps the table bounded across long-running
+        restarts. Idempotent."""
+        now = int(time.time())
+        with self._connect() as c:
+            cur = c.execute(
+                "DELETE FROM tokens WHERE expires_at <= ?", (now,))
+            return int(cur.rowcount or 0)
+
+
 def _verify_pkce(
     verifier: str, challenge: str, method: str,
 ) -> bool:
@@ -183,9 +310,17 @@ def register_oauth_routes(app: FastAPI, cfg: BridgeConfig) -> None:
     """Mounts the OAuth 2.1 endpoints on `app`. Idempotent per app —
     called once from create_app. The discovery routes are always
     safe to expose; /authorize and /token error cleanly when no
-    client credentials are configured."""
+    client credentials are configured.
+
+    Two stores: the authorization-CODE store is in-memory (codes are
+    short-lived single-use intermediates the user re-issues if
+    they're lost), and the TOKEN store is SQLite-backed (issued
+    bearers must outlive a bridge restart or Claude.ai's connector
+    re-authenticates every time the bridge bounces)."""
     store = _AuthCodeStore()
     app.state.oauth_code_store = store
+    token_store = TokenStore(cfg.db_path)
+    app.state.oauth_token_store = token_store
 
     # ── Discovery ───────────────────────────────────────────────────────
 
@@ -325,10 +460,17 @@ def register_oauth_routes(app: FastAPI, cfg: BridgeConfig) -> None:
         if not ok:
             return _token_error("invalid_grant", err)
 
+        # Mint a fresh random access token and persist it. Each
+        # successful authorization-code exchange gets its own token —
+        # Claude.ai stores what we return here and replays it on every
+        # /mcp call. The TokenStore persists to queue.db so the token
+        # survives a bridge restart (the whole point of this layer).
+        access_token, expires_in = token_store.issue(
+            client_id=client_id, ttl_seconds=_TOKEN_TTL_SECONDS)
         return JSONResponse({
-            "access_token": cfg.auth_token,
+            "access_token": access_token,
             "token_type": "Bearer",
-            "expires_in": _TOKEN_TTL_SECONDS,
+            "expires_in": expires_in,
             "scope": _SCOPE,
         })
 

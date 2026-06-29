@@ -769,23 +769,33 @@ export default function QAHub() {
         ) : <AuditViewerSummary />}
       </section>
 
-      {/* Section 3 — Academic Review (read-visible / team-write-gated).
-          Relocated from the Council screen on May 28 2026. The section
-          card + verdict + peer responses are visible to every
-          authenticated user; the Run / Re-run / Cancel buttons are
-          enabled only for team members. State persists across
-          navigation via academicReviewStore (Zustand, in-memory,
-          keyed on the audit data_hash). */}
+      {/* Section 3 — Cross-Document Review (read-visible /
+          team-write-gated). Relocated from the Council screen on May
+          28 2026. Relabelled June 22 2026 to distinguish from the
+          per-document review surfaces in each editor's Writing
+          Assistant: this section runs the council against ALL FOUR
+          deliverables together; the editor surfaces run a single-
+          document focused review. State persists across navigation
+          via academicReviewStore (Zustand, in-memory, keyed on the
+          audit data_hash). */}
       <section
         className="space-y-3"
         data-section-id="academic-review"
-        data-section-label="Academic Review">
+        data-section-label="Cross-Document Review">
         <div>
-          <h2 className="text-base font-semibold text-white">Academic Review</h2>
+          <h2 className="text-base font-semibold text-white">
+            Cross-Document Review
+          </h2>
           <p className="text-xs text-muted mt-0.5">
-            Five-section peer review of the portfolio research by the
-            Council's academic advisor panel. Read-visible to every
-            authenticated user; the Run / Re-run controls are team-only.
+            Reviews all four deliverables together against the
+            panel-defense rubric. Run this after all documents are
+            generated and edited. Individual document reviews live
+            inside each editor's Writing Assistant panel. For the
+            final pre-submission check, use the{' '}
+            <span className="font-semibold text-electric">
+              Submission Readiness Review
+            </span>{' '}
+            on the Reports page.
           </p>
         </div>
         <AcademicReviewSection />

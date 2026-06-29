@@ -189,14 +189,24 @@ def _payload_hash(raw_data: dict[str, Any]) -> str:
 
 async def current_data_hash() -> str:
     """
-    A lightweight fingerprint of the data the statistical audit verifies:
-    the row counts and newest dates of market_data_monthly,
-    ff_factors_monthly and strategy_results_cache. It changes only when
-    new rows are appended or the strategy cache is recomputed — not on a
-    restart — so a matching hash means the audit is genuinely still current.
+    A lightweight fingerprint of the MARKET DATA the statistical audit
+    verifies: row counts, newest dates, and last_updated timestamps of
+    market_data_monthly and ff_factors_monthly. It changes only when new
+    market data is ingested — not on a restart, and (June 22 2026) not
+    when downstream caches are merely refreshed against unchanged data.
+
+    HISTORICAL NOTE: through June 21 2026 this hash also included
+    strategy_results_cache table metadata. That was a design flaw --
+    running POST /api/v1/admin/refresh-appendix-caches (or any backtester
+    run) updates strategy_results_cache.last_updated, which then flipped
+    the platform fingerprint even when market data was unchanged. The
+    c421fb89 -> 4de6bbbc hash drift that surfaced during executive brief
+    + appendix regeneration was caused by exactly this -- not by market
+    data drift. The strategy_results_cache table records derived state;
+    derived state churn must not invalidate the upstream-data fingerprint.
 
     Cheap by design (get_data_status issues only COUNT/MAX queries, never
-    a full payload assembly). Returns "" on any failure — an empty hash
+    a full payload assembly). Returns "" on any failure -- an empty hash
     never matches, so the audit is treated as stale rather than wrongly
     served from cache.
     """
@@ -206,8 +216,8 @@ async def current_data_hash() -> str:
         status = await get_data_status()
         if not status.get("available"):
             return ""
-        relevant = ("market_data_monthly", "ff_factors_monthly",
-                    "strategy_results_cache")
+        # MARKET DATA TABLES ONLY -- never derived/cache tables.
+        relevant = ("market_data_monthly", "ff_factors_monthly")
         parts: list[str] = []
         for t in status.get("tables", []):
             if t.get("name") in relevant:
@@ -215,7 +225,7 @@ async def current_data_hash() -> str:
                     f"{t.get('name')}:{t.get('row_count')}:"
                     f"{t.get('max_date')}:{t.get('last_updated')}")
         if not parts:
-            # No relevant table reported — treat as "nothing to fingerprint"
+            # No relevant table reported -- treat as "nothing to fingerprint"
             # rather than hashing an empty string into a matchable value.
             return ""
         parts.sort()

@@ -11,6 +11,8 @@ import type { CVRadarPoint } from '../../types/charts'
 import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
 import ChartExportButton from '../ChartExportButton'
 import InfoIcon from '../InfoIcon'
+import { useChartTheme } from '../../lib/useChartTheme'
+import type { ChartTheme } from '../../lib/exportTheme'
 
 const AXES: (keyof CVRadarPoint)[] = [
   'walk_forward', 'cpcv', 'permutation', 'regime', 'oos', 'stability',
@@ -28,7 +30,9 @@ interface Props {
   radar: Record<string, CVRadarPoint>
 }
 
-function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
+function RadarSmall({
+  name, point, chartTheme,
+}: { name: string; point: CVRadarPoint; chartTheme: ChartTheme }) {
   const SIZE = 160
   const cx = SIZE / 2
   const cy = SIZE / 2
@@ -55,7 +59,10 @@ function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
   const polygon = points.map((p) => `${p.x},${p.y}`).join(' ')
 
   return (
-    <div className="bg-navy-800/60 rounded p-2 border border-border/40">
+    <div
+      className="rounded p-2 border border-border/40"
+      style={{ background: chartTheme.background }}
+    >
       <div className="text-2xs mb-1 text-center flex items-center justify-center gap-1.5">
         <span className="text-muted">{prettyName(name)}</span>
         {badgeColor && (
@@ -77,12 +84,12 @@ function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
           <line
             key={p.axis as string}
             x1={cx} y1={cy} x2={p.xAxisEnd} y2={p.yAxisEnd}
-            stroke="#1e3a5c" strokeWidth={0.5}
+            stroke={chartTheme.gridStroke} strokeWidth={0.5}
           />
         ))}
         {/* Concentric grid circles at 0.5 and 1.0 */}
-        <circle cx={cx} cy={cy} r={radius} stroke="#1e3a5c" fill="none" strokeWidth={0.5} />
-        <circle cx={cx} cy={cy} r={radius * 0.5} stroke="#1e3a5c" fill="none" strokeWidth={0.5} strokeDasharray="2,2" />
+        <circle cx={cx} cy={cy} r={radius} stroke={chartTheme.gridStroke} fill="none" strokeWidth={0.5} />
+        <circle cx={cx} cy={cy} r={radius * 0.5} stroke={chartTheme.gridStroke} fill="none" strokeWidth={0.5} strokeDasharray="2,2" />
         {/* Filled polygon — title hovers anywhere in the shape */}
         <polygon points={polygon} fill={color} fillOpacity={0.35} stroke={color} strokeWidth={1.5}>
           <title>{tooltipLine(name, 'CV stability axes', `WF ${point.walk_forward.toFixed(2)}, CPCV ${point.cpcv.toFixed(2)}, Stab ${point.stability.toFixed(2)}`)}</title>
@@ -92,7 +99,7 @@ function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
           <text
             key={p.axis as string}
             x={p.xLabel} y={p.yLabel + 3}
-            fill="#64748b" fontSize="8" textAnchor="middle"
+            fill={chartTheme.textSecondary} fontSize="8" textAnchor="middle"
           >
             {AXIS_LABELS[p.axis as keyof CVRadarPoint]}
           </text>
@@ -104,6 +111,7 @@ function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
 
 export default function CVStabilityRadar({ radar }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const chartTheme = useChartTheme()
   const entries = Object.entries(radar)
   if (entries.length === 0) {
     return (
@@ -139,7 +147,7 @@ export default function CVStabilityRadar({ radar }: Props) {
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
         {entries.map(([name, point]) => (
-          <RadarSmall key={name} name={name} point={point} />
+          <RadarSmall key={name} name={name} point={point} chartTheme={chartTheme} />
         ))}
       </div>
     </div>

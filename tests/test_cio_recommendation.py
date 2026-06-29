@@ -104,6 +104,93 @@ class TestGenerateRecommendation:
         assert "—" not in rec["signal"]
         assert "—" not in rec["dissenting_view"]
 
+
+# ── get_prior_recommendation (June 5 2026) ────────────────────────────────
+
+
+class TestGetPriorRecommendation:
+    """The helper that backs Section C of the transparency structure.
+    Returns the most recent recommendation written under a data_hash
+    that differs from the current one — None when no such row exists.
+    Fail-open contract: any DB error returns None and the caller
+    omits Section C cleanly."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_db_unavailable(self, monkeypatch):
+        # Test env has no DB, so _DB_AVAILABLE is False and the helper
+        # short-circuits without ever opening a session. Pins the
+        # fail-open contract.
+        from tools import cio_recommendation as cio_mod
+
+        monkeypatch.setattr(cio_mod, "_DB_AVAILABLE", False)
+        result = await cio_mod.get_prior_recommendation("any-hash-here")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_current_hash_empty(self):
+        # Empty hash means we can't tell what's "different from current"
+        # so the helper refuses to query (returning the latest row would
+        # mis-attribute it as a prior). Pins the safety check.
+        from tools import cio_recommendation as cio_mod
+
+        assert await cio_mod.get_prior_recommendation("") is None
+        # The async signature is callable — keyword-mistyping check.
+        assert await cio_mod.get_prior_recommendation(None) is None  # type: ignore[arg-type]
+
+    def test_signature_matches_other_readers(self):
+        # The three DB readers (get_cached_for_hash, get_latest_
+        # recommendation, get_prior_recommendation) should follow the
+        # same shape — all async, all returning dict | None, all fail-
+        # open. This pin catches a future signature drift.
+        import inspect
+
+        from tools import cio_recommendation as cio_mod
+
+        sig = inspect.signature(cio_mod.get_prior_recommendation)
+        assert list(sig.parameters.keys()) == ["current_data_hash"]
+        assert inspect.iscoroutinefunction(cio_mod.get_prior_recommendation)
+
+
+# ── CIO system prompt: Section A/B/C mandate (June 5 2026) ────────────────
+
+
+class TestSystemPromptStructureMandate:
+    """The CIO system prompt is the contract for every council output.
+    Section A / B / C are mandatory; this test pins each section's
+    name + the CONDITIONAL nature of Section C so a later prompt
+    refactor doesn't quietly drop the structure."""
+
+    def test_three_sections_named_in_system_prompt(self):
+        from agents.cio import _SYSTEM_PROMPT
+
+        # The three section headers, exactly as the model is told to
+        # write them. A drift on any of these breaks parsing of the
+        # response in the frontend (where the panel reads the section
+        # boundaries).
+        assert "### A. Signal snapshot" in _SYSTEM_PROMPT
+        assert "### B. Weight justification" in _SYSTEM_PROMPT
+        assert "### C. Shift narrative" in _SYSTEM_PROMPT
+
+    def test_section_c_is_conditional(self):
+        from agents.cio import _SYSTEM_PROMPT
+
+        # Section C only fires when a prior recommendation is in the
+        # data block. The CONDITIONAL keyword + the "OMIT Section C
+        # entirely" instruction are the two halves of that contract.
+        assert "CONDITIONAL" in _SYSTEM_PROMPT
+        assert "prior_recommendation" in _SYSTEM_PROMPT
+        assert "OMIT Section C" in _SYSTEM_PROMPT
+
+    def test_meta_questions_skip_the_structure(self):
+        # Meta questions (peer-reviewer anticipation, framing) don't
+        # get A/B/C because they aren't strategy recommendations.
+        # Pinned so a later refactor doesn't accidentally apply the
+        # mandate universally.
+        from agents.cio import _SYSTEM_PROMPT
+
+        assert "META questions" in _SYSTEM_PROMPT
+        assert "skip the A/B/C structure" in _SYSTEM_PROMPT
+
     def test_confidence_mirrors_context(self):
         ctx = cio.compute_context(
             _strategy_results(120, 6), _hmm_result(120), _CURRENT)
@@ -123,3 +210,435 @@ class TestGenerateRecommendation:
         assert rec["confidence"]["regime"] == "BULL"
         assert rec["confidence"]["ess_warning"] is False
         assert rec["recommendation"] and rec["key_risk"]
+
+
+# ── Persistence recovery (June 18 2026) ──────────────────────────────────
+#
+# When the LLM call fails on a warm and the deterministic fallback is
+# persisted under a data_hash, the previous ON CONFLICT DO NOTHING
+# pinned that fallback row -- a later successful warm at the same hash
+# was silently dropped, leaving the digest stuck on "Live regime
+# unavailable" until the next monthly data tick changed the hash.
+#
+# The fix flips the conflict resolution to a guarded UPSERT: a real
+# LLM row (any model that is NOT 'deterministic_fallback') overwrites
+# a previously stored fallback; the reverse case (real then fallback)
+# never overwrites. These tests pin the SQL string shape -- the live
+# behaviour is verified on Render where the actual Postgres engine
+# evaluates the WHERE clause; the CI test DB is fail-open SQLite so
+# this catches regressions at the statement-shape layer.
+
+
+# ── LLM JSON parse hardening (June 19 2026) ──────────────────────────────
+#
+# The CIO recommendation LLM occasionally emits preamble text before the
+# JSON body or trailing prose after the closing brace. The previous
+# json.loads on a best-effort slice surfaced cryptic "Expecting ',' "
+# delimiter errors that gave no clue what the model had emitted.
+# _parse_recommendation_json hardens the path:
+#   * markdown fences (with or without `json` tag) are stripped,
+#   * the body is bracketed by find('{') / rfind('}') so any preamble
+#     or trailing prose is discarded,
+#   * a raw-preview WARNING fires on parse failure so Render logs carry
+#     the truncated response that broke the parse.
+
+
+class TestParseRecommendationJson:
+
+    def test_parses_clean_object(self):
+        out = cio._parse_recommendation_json(
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BULL"}}')
+        assert out["signal"] == "s"
+        assert out["confidence"]["regime"] == "BULL"
+
+    def test_strips_markdown_fence_with_json_tag(self):
+        out = cio._parse_recommendation_json(
+            "```json\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BEAR"}}\n'
+            "```")
+        assert out["confidence"]["regime"] == "BEAR"
+
+    def test_strips_preamble_before_first_brace(self):
+        out = cio._parse_recommendation_json(
+            "Here is the JSON object you requested:\n\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "TRANSITION"}}')
+        assert out["confidence"]["regime"] == "TRANSITION"
+
+    def test_strips_trailing_prose_after_last_brace(self):
+        out = cio._parse_recommendation_json(
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BULL"}}\n\n'
+            "Note: this concludes the recommendation.")
+        assert out["confidence"]["regime"] == "BULL"
+
+    def test_raises_value_error_when_no_object_braces(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        with pytest.raises(ValueError):
+            cio._parse_recommendation_json(
+                "Sorry, I cannot produce this output.")
+        events = [e for e, _ in captured]
+        assert "cio_recommendation_no_json_object" in events
+        # The raw preview survives so the operator can see what the
+        # model actually emitted.
+        kwargs = next(kw for e, kw in captured
+                      if e == "cio_recommendation_no_json_object")
+        assert "Sorry, I cannot produce this output." \
+            in kwargs.get("raw_preview", "")
+
+    def test_logs_raw_preview_on_parse_failure(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        # The brace-pair lookup succeeds but the body is malformed
+        # JSON. The original delimiter error must propagate, AND the
+        # raw preview must land in the structured log so a regression
+        # hunter can see what the model wrote.
+        bad = ('{"signal": "s", '
+               '"dissenting_view": "d", '
+               '"confidence": {regime: "BULL"}}')   # unquoted key
+        import json as _json
+        with pytest.raises(_json.JSONDecodeError):
+            cio._parse_recommendation_json(bad)
+        events = [e for e, _ in captured]
+        assert "cio_recommendation_json_parse_failed" in events
+
+    def test_fence_wrapped_clean_json_parses(self):
+        """The model occasionally wraps the JSON body in a fenced code
+        block (` ```json {...} ``` `). The regex-anchored fence strip
+        peels both the leading and trailing fences before the brace-
+        pair extraction so the body parses cleanly."""
+        raw = (
+            "```json\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BULL"}}\n'
+            "```")
+        out = cio._parse_recommendation_json(raw)
+        assert out["signal"] == "s"
+        assert out["confidence"]["regime"] == "BULL"
+
+    def test_fence_wrapped_without_json_tag_parses(self):
+        """Fence without the `json` tag is the older Anthropic shape;
+        the regex matches a bare ``` and the body still parses."""
+        raw = (
+            "```\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BEAR"}}\n'
+            "```")
+        out = cio._parse_recommendation_json(raw)
+        assert out["confidence"]["regime"] == "BEAR"
+
+    def test_fence_with_uppercase_tag_parses(self):
+        """The regex is case-insensitive so ` ```JSON ` is treated
+        the same as ` ```json `."""
+        raw = (
+            "```JSON\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "TRANSITION"}}\n'
+            "```")
+        out = cio._parse_recommendation_json(raw)
+        assert out["confidence"]["regime"] == "TRANSITION"
+
+    def test_fence_plus_truncation_raises_clear_error(self, monkeypatch):
+        """The compound failure mode the Render logs surfaced:
+        ` ```json\n{ ... signal cut mid-string ` with no closing brace
+        and no closing fence. The fence is stripped by the regex; the
+        rfind('}') returns -1; ValueError must surface with a clear
+        message naming truncation as the suspected cause (not a cryptic
+        delimiter error)."""
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        raw = (
+            "```json\n"
+            '{\n  "signal": "The regime classifier assigns a 97.4% '
+            'posterior probability to BULL... historically the cycle '
+            "has shown that")
+        with pytest.raises(ValueError, match="No JSON object found"):
+            cio._parse_recommendation_json(raw)
+        # The structured warn fires with the raw preview so an operator
+        # reading Render logs can see the truncation point.
+        events = [e for e, _ in captured]
+        assert "cio_recommendation_no_json_object" in events
+        kwargs = next(kw for e, kw in captured
+                      if e == "cio_recommendation_no_json_object")
+        assert "97.4% posterior probability" in kwargs.get(
+            "raw_preview", "")
+
+    def test_unfenced_truncation_surfaces_distinct_error(
+            self, monkeypatch):
+        """An unfenced body that truncates mid-string deserves a
+        DISTINCT error message ("Truncated LLM response: no closing
+        brace found") that names raising max_tokens as the next
+        diagnostic step -- separates "model refused" from "model ran
+        out of budget mid-response"."""
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        raw = (
+            '{\n  "signal": "The regime classifier assigns... '
+            "historically the cycle")
+        with pytest.raises(ValueError,
+                           match="Truncated LLM response"):
+            cio._parse_recommendation_json(raw)
+        events = [e for e, _ in captured]
+        assert "cio_recommendation_no_json_object" in events
+
+    def test_clean_unfenced_json_unchanged(self):
+        """The regex fence-strip is a no-op when no fence is present;
+        unfenced clean JSON must parse exactly as it did before the
+        hardening, with no behavioural change."""
+        raw = (
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BULL", "probability": 0.97}, '
+            '"recommendation": "r", "key_risk": "k"}')
+        out = cio._parse_recommendation_json(raw)
+        assert out["signal"] == "s"
+        assert out["confidence"]["probability"] == 0.97
+        assert out["recommendation"] == "r"
+
+    def test_raises_when_root_is_not_a_dict(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        # A JSON array at the root level should not be accepted as a
+        # recommendation -- the caller treats only dicts as valid.
+        # The brace-pair scan would pull the empty {} from a body
+        # like "[{...}]" -- guard by isinstance check at the end.
+        # Construct a response where the brace-pair extraction yields
+        # a non-object: a bare string in braces.
+        with pytest.raises(ValueError):
+            cio._parse_recommendation_json('{"just a value"}')
+        # Either parse_failed (more likely -- malformed) or
+        # not_object (if the slice happened to parse). Both are
+        # acceptable signals -- the contract is just "no dict, no
+        # acceptance".
+        events = {e for e, _ in captured}
+        assert events.intersection({
+            "cio_recommendation_json_parse_failed",
+            "cio_recommendation_json_not_object",
+        })
+
+
+class TestPersistRecoveryUpsert:
+
+    @pytest.mark.asyncio
+    async def test_persist_uses_guarded_do_update(self, monkeypatch):
+        """The ON CONFLICT clause is DO UPDATE with the
+        deterministic_fallback guard, not DO NOTHING. Captures the
+        SQL text passed to session.execute and pins both halves of
+        the WHERE clause (existing row must be a fallback, new row
+        must NOT be a fallback)."""
+        from tools import cio_recommendation as cio_mod
+
+        captured: dict = {"sql": None, "params": None, "committed": False}
+
+        class _FakeSession:
+            async def execute(self, sql, params):
+                captured["sql"] = str(sql)
+                captured["params"] = params
+
+            async def commit(self):
+                captured["committed"] = True
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+        # Force the DB-available branch + redirect AsyncSessionLocal to
+        # the fake. The fake captures the SQL string for inspection.
+        monkeypatch.setattr(cio_mod, "_DB_AVAILABLE", True)
+        monkeypatch.setattr(
+            cio_mod, "AsyncSessionLocal", lambda: _FakeSession())
+
+        await cio_mod._persist(
+            "abc123",
+            {"signal": "s", "confidence": {"regime": "BULL"},
+             "dissenting_view": "d", "limitations": ["a"],
+             "_model": "claude-sonnet-4-6"},
+            "BULL")
+
+        sql = captured["sql"] or ""
+        assert "ON CONFLICT (data_hash) DO UPDATE" in sql
+        # The recovery guard: only overwrite if the existing row is a
+        # fallback. This is the half that lets a successful warm clear
+        # a previously poisoned cache row.
+        assert (
+            "cio_recommendations.model "
+            "      = 'deterministic_fallback'" in sql)
+        # The reverse guard: never overwrite a real row with a fallback.
+        assert (
+            "EXCLUDED.model "
+            "      IS DISTINCT FROM 'deterministic_fallback'" in sql)
+        # computed_at bumps so reads ordered by recency see the
+        # corrected row immediately.
+        assert "computed_at = now()" in sql
+        # The DO NOTHING shape MUST be gone -- a regression that
+        # accidentally restores it would re-introduce the digest
+        # poisoning.
+        assert "DO NOTHING" not in sql
+        assert captured["committed"] is True
+
+    @pytest.mark.asyncio
+    async def test_persist_short_circuits_when_db_unavailable(
+            self, monkeypatch):
+        """The Render-side path runs on Postgres; CI runs without a DB.
+        With _DB_AVAILABLE False the helper must return immediately
+        without raising, so the test matrix mirrors the production
+        fail-open contract."""
+        from tools import cio_recommendation as cio_mod
+
+        monkeypatch.setattr(cio_mod, "_DB_AVAILABLE", False)
+        # No fake session needed -- the short-circuit fires first.
+        await cio_mod._persist(
+            "abc123",
+            {"signal": "s", "_model": "deterministic_fallback"},
+            "BULL")
+        # If we reach here without raising, the contract held.
+
+    @pytest.mark.asyncio
+    async def test_persist_swallows_db_errors(self, monkeypatch):
+        """A DB failure during persistence must log + return, never
+        raise -- otherwise a warm failure would poison the entire
+        warm pipeline rather than just the CIO recommendation surface."""
+        from tools import cio_recommendation as cio_mod
+
+        class _ExplodingSession:
+            async def execute(self, *_args, **_kw):
+                raise RuntimeError("boom")
+
+            async def commit(self):  # pragma: no cover -- never reached
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+        monkeypatch.setattr(cio_mod, "_DB_AVAILABLE", True)
+        monkeypatch.setattr(
+            cio_mod, "AsyncSessionLocal", lambda: _ExplodingSession())
+
+        # Must not raise.
+        await cio_mod._persist(
+            "abc123",
+            {"signal": "s", "_model": "claude-sonnet-4-6"},
+            "BULL")
+
+
+class TestRecCarriesBlendWeights:
+    """Pre-fix, the rec dict that _regenerate_under_key and
+    get_cio_recommendation passed to _persist contained only the
+    four-component narrative + confidence + limitations. blend_weights
+    lived in compute_context's output but was never written to
+    raw_json, so the read path returned cio_row with no blend_weights
+    and every {{BLEND_*_WT}} + {{CURRENT_*_PCT}} token rendered
+    em-dash on the data reference sheet.
+
+    These tests pin the callsite contract: every path that calls
+    _persist must merge blend_weights from built["context"] into rec
+    first, so the read path (get_latest_recommendation -> dict(raw_json))
+    surfaces it directly without needing a separate overlay."""
+
+    @pytest.mark.asyncio
+    async def test_regenerate_under_key_persists_blend_weights(
+            self, monkeypatch):
+        from tools import cio_recommendation as cio_mod
+
+        captured: dict = {"rec": None}
+
+        async def _fake_build_live_context():
+            return {
+                "context": {
+                    "regime": "BULL",
+                    "blend_weights": {
+                        "REGIME_SWITCHING": 0.5,
+                        "BENCHMARK": 0.3,
+                        "CLASSIC_60_40": 0.2,
+                    },
+                },
+                "macro": "macro text",
+            }
+
+        def _fake_generate(context, macro):
+            return {
+                "signal": "s",
+                "recommendation": "r",
+                "confidence": {"regime": "BULL"},
+                "dissenting_view": "d",
+                "key_risk": "k",
+                "limitations": ["a"],
+                "_model": "claude-sonnet-4-6",
+            }
+
+        async def _fake_persist(key, rec, regime):
+            captured["rec"] = rec
+
+        monkeypatch.setattr(
+            cio_mod, "_build_live_context", _fake_build_live_context)
+        monkeypatch.setattr(
+            cio_mod, "generate_recommendation", _fake_generate)
+        monkeypatch.setattr(cio_mod, "_persist", _fake_persist)
+
+        await cio_mod._regenerate_under_key("test_key_X")
+
+        assert captured["rec"] is not None
+        assert "blend_weights" in captured["rec"]
+        bw = captured["rec"]["blend_weights"]
+        assert bw["REGIME_SWITCHING"] == 0.5
+        assert bw["BENCHMARK"] == 0.3
+        assert bw["CLASSIC_60_40"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_regenerate_under_key_handles_missing_blend_weights(
+            self, monkeypatch):
+        """When compute_context didn't produce blend_weights (e.g.
+        the regime fit failed), persist gets an empty dict rather
+        than missing the field entirely -- the read path then sees
+        cio_row["blend_weights"] == {} which the substitution
+        layer treats as 'no blend' and renders em-dash without
+        raising."""
+        from tools import cio_recommendation as cio_mod
+        captured: dict = {"rec": None}
+
+        async def _fake_build_live_context():
+            return {"context": {"regime": "BULL"},
+                    "macro": ""}  # no blend_weights
+
+        def _fake_generate(c, m):
+            return {"signal": "s", "_model": "x"}
+
+        async def _fake_persist(k, rec, r):
+            captured["rec"] = rec
+
+        monkeypatch.setattr(
+            cio_mod, "_build_live_context", _fake_build_live_context)
+        monkeypatch.setattr(
+            cio_mod, "generate_recommendation", _fake_generate)
+        monkeypatch.setattr(cio_mod, "_persist", _fake_persist)
+
+        await cio_mod._regenerate_under_key("test_key_Y")
+
+        assert captured["rec"]["blend_weights"] == {}

@@ -17,9 +17,13 @@ export interface ActivityEvent {
   user: string
   user_name: string
   session_type: 'analytical' | 'testing' | null
-  // commit
+  // commit (a "Development Entry" in the user-facing report)
   sha?: string
   message?: string
+  // Plain-English, non-technical one-sentence summary of the commit
+  // message, generated + cached server-side (migration 049). The primary
+  // label in the report; `message` is shown muted beneath it.
+  plain_summary?: string | null
   files_changed?: number | null
   insertions?: number | null
   deletions?: number | null
@@ -79,6 +83,9 @@ export interface ActivitySummary {
   total_interactions: number
   analytical_sessions_only: boolean
   test_coverage?: { steps_attested: number; testers: number }
+  // True merged-PR ("Platform Release") count from the GitHub API; null
+  // when unavailable (no token / API error).
+  platform_releases?: number | null
 }
 
 /** One row of the AI cost summary — a member or an interaction type. */

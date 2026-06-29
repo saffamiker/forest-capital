@@ -1,3 +1,21 @@
+# DEPRECATED -- June 2026
+# This agent was used for the FNA 670 midpoint peer review surface
+# (POST /api/council/peer-review). That endpoint was retired in
+# PR-B (June 2026) and the frontend surface was removed in PR #338.
+#
+# The defense-prep helpers in this module (build_defense_prep_context_block,
+# render_defense_prep_context_block, run_defense_prep_with_harness) are
+# still imported by main.py's /api/council/defense-prep endpoint, which
+# is NOT in the PR-B retirement scope. The peer-review-specific helpers
+# (build_peer_review_*_prompt, run_peer_review_with_harness,
+# extract_peer_paper_text, mock_peer_review_verdict) are now unreachable
+# through any documented endpoint.
+#
+# This file is preserved as reference material for the five-section
+# critique pattern (sections A-E) which may inform future self-review
+# surfaces. Do not import the peer-review-specific helpers in new code.
+# Safe to delete the peer-review helpers after July 2026 if no reuse
+# planned; the defense-prep helpers remain in active use.
 """agents/peer_review.py — Peer Review Assistant + Thesis Defense Prep.
 
 Item 7 (May 23 2026). Two related features built on the
@@ -511,15 +529,359 @@ def _peer_review_system_prompt() -> str:
     )
 
 
+# Full per-term primer text — kept out of the initial-generation system
+# prompt to reduce per-call input tokens (and overall generation latency,
+# the proximate cause of the May 30 Defense Prep timeout on Render). The
+# initial system prompt lists the term INDEX only; the full text below is
+# available to a future follow-up Q&A endpoint that detects a primer
+# question and injects only the relevant per-term block.
+_DEFENSE_PREP_FULL_PRIMERS = (
+    "TECHNICAL PRIMERS — FULL DEFINITIONS.\n"
+    "Each primer follows the same shape: what it measures or does, why "
+    "it matters for this study, and an honest limitation. A primer never "
+    "defines a term using the term itself.\n\n"
+
+    "SHARPE RATIO. Measures average excess return per unit of total "
+    "volatility — return per unit of risk taken. Why for this study: "
+    "the headline yardstick the panel will compare the regime-conditional "
+    "blend against the benchmark on. Limitation: assumes symmetric "
+    "returns, so a strategy with frequent small gains and rare large "
+    "losses looks better than it deserves.\n\n"
+
+    "CVaR (Conditional Value-at-Risk). Measures the average loss across "
+    "the worst-case slice of outcomes (the worst 1% of months at "
+    "CVaR-99). Why: captures left-tail (downside) risk that variance and "
+    "Sharpe both ignore. Limitation: estimated from a finite sample "
+    "(~286 monthly observations here), so the deepest-tail figure "
+    "carries real uncertainty.\n\n"
+
+    "CAGR (Compound Annual Growth Rate). The constant annual growth "
+    "rate that, compounded over the period, would produce the observed "
+    "cumulative return. Why: a single, comparable, compounding-aware "
+    "annual headline. Limitation: hides the path — a smooth journey and "
+    "a violently volatile one can share the same CAGR.\n\n"
+
+    "MAXIMUM DRAWDOWN. The largest peak-to-trough decline an investor "
+    "in the strategy would have actually lived through. Why: the loss "
+    "number that drives behavioural risk — whether the holder sticks "
+    "with the strategy through the trough. Limitation: a single "
+    "realised history, not a forecast of the next worst case.\n\n"
+
+    "CORRELATION. Measures how two return series move together on a -1 "
+    "to +1 scale. Why: the equity-bond figure shifted from around -0.05 "
+    "pre-2022 to +0.57 post-2022, which is the central finding driving "
+    "the rest of the study. Limitation: a linear, average measure — can "
+    "miss state-dependent or tail-dependent comovement that only "
+    "appears in stress.\n\n"
+
+    "COVARIANCE. The joint variability of two return series in their "
+    "native units (the building block of the variance of a weighted "
+    "portfolio). Why: feeds the optimiser directly — Min Variance and "
+    "Max Sharpe Rolling allocate against the rolling 36-month "
+    "covariance matrix. Limitation: estimated covariance is noisy, "
+    "especially for short windows.\n\n"
+
+    "EFFICIENT FRONTIER. The set of portfolios that achieve the highest "
+    "expected return for each level of risk (or the lowest risk for "
+    "each expected return). Why: visualises whether the "
+    "regime-conditional blend is doing useful work or being dominated "
+    "by simpler static mixes. Limitation: a single-period mean-variance "
+    "snapshot — no path awareness and no regime conditioning of its "
+    "own.\n\n"
+
+    "BETA and FACTOR EXPOSURE. Beta measures how sensitively a "
+    "strategy's returns move with a benchmark; factor exposure "
+    "generalises this to named risk drivers (market, size, value, "
+    "momentum). Why: separates active skill from passive loadings on "
+    "common factors. Limitation: regression coefficients drift through "
+    "time, so a single beta or factor loading is an average that can "
+    "mask regime-dependent behaviour.\n\n"
+
+    "MOMENTUM STRATEGY. Rotates into assets that have outperformed over "
+    "a recent lookback window, on the premise that short-horizon trends "
+    "persist. Why: a long-documented anomaly and one of the dynamic "
+    "strategies tested here. Limitation: vulnerable to sharp reversals "
+    "when a trend breaks — the OOS window contains such an event.\n\n"
+
+    "VOLATILITY TARGETING. Scales portfolio exposure up or down each "
+    "month so realised volatility hits a fixed target. Why: delivers a "
+    "more stable risk experience to the holder across calm and "
+    "turbulent regimes. Limitation: necessarily lags realised "
+    "volatility shifts — it tends to de-risk after the move it was "
+    "meant to dampen has already happened.\n\n"
+
+    "RISK PARITY. Allocates so each asset contributes EQUALLY to total "
+    "portfolio risk — not equal dollar weight. Why: corrects 60/40's "
+    "equity-risk dominance without leverage; bonds carry more weight "
+    "than they would on a market-cap basis. Limitation: leans on the "
+    "historical risk profile, which moved sharply in 2022 and changed "
+    "the implied allocation.\n\n"
+
+    "REGIME SWITCHING. Allocates differently in different market states "
+    "(BULL, BEAR, TRANSITION) using a model to infer the current state "
+    "from observable returns. Why: lets the portfolio adapt to "
+    "structural breaks rather than holding one allocation through every "
+    "environment. Limitation: only as good as the regime-inference "
+    "model — a misclassified turning point costs real money.\n\n"
+
+    "REBALANCING. Periodically returns the portfolio to its target "
+    "weights as price moves drift it away. Why: enforces the strategy "
+    "— without rebalancing, the winning asset slowly takes over and the "
+    "design dissolves. Limitation: each rebalance carries a transaction "
+    "cost (tested at 10/15/20 bps per event in the sensitivity "
+    "analysis).\n\n"
+
+    "BACKTESTING vs OUT-OF-SAMPLE TESTING. Backtesting runs the "
+    "strategy on historical data; out-of-sample testing runs it on a "
+    "separate period that was NOT used to design the strategy. Why: "
+    "in-sample results can be overfit — the OOS window is the honest "
+    "test of whether the rule generalises. Limitation: even an OOS "
+    "result is one realised history, not a guarantee about the next "
+    "period.\n\n"
+
+    "STATISTICAL SIGNIFICANCE. A measure of how unlikely the observed "
+    "effect would be if the strategy had no real edge and the result "
+    "came from chance alone. Why: separates a genuine outperformance "
+    "from a lucky draw. Limitation: depends heavily on sample size — "
+    "with this study's window, the outperformance is real in magnitude "
+    "but our sample is too small to prove it statistically, which we "
+    "disclose explicitly.\n\n"
+
+    "BLACK-LITTERMAN MODEL. Combines the market-implied equilibrium "
+    "returns with the user's own views to produce more stable, "
+    "optimisation-ready return estimates. Why: addresses mean-variance "
+    "optimisation's extreme sensitivity to noisy mean estimates; one of "
+    "the static blended strategies tested here. Limitation: the views "
+    "themselves are subjective — without strong views the model "
+    "collapses back toward market-cap weights."
+)
+
+
 def _defense_prep_system_prompt() -> str:
     return (
-        "You are a mock panel of senior FNA 670 reviewers + "
-        "Forest Capital partners stress-testing the team's "
-        "midpoint draft before the cohort meetup and the July 1 "
-        "panel. Generate the sharpest realistic anticipated "
-        "questions across three categories — technical, "
-        "academic, governance — with rehearsable responses. "
-        "Honest about limitations beats performative defence."
+        # ── ROLE ────────────────────────────────────────────────────────
+        "You are a mock panel of senior FNA 670 reviewers and Forest "
+        "Capital partners stress-testing the team's draft (the document "
+        "supplied in the user message) before the cohort meetup and the "
+        "July 1 panel. Generate the sharpest realistic anticipated "
+        "questions across three categories — technical, academic, "
+        "governance — with rehearsable responses. Honest about "
+        "limitations beats performative defence.\n\n"
+
+        # ── TWO QUESTIONER LEVELS ───────────────────────────────────────
+        "TWO QUESTIONER LEVELS. Read each question and choose the "
+        "register before answering:\n"
+        "  - PEER questions come from MSFA cohort-mates. Use the PEER "
+        "FRAMING below — accessible language, business analogies, "
+        "practical focus.\n"
+        "  - PROFESSOR questions (Dr. Panttser's technical follow-ons) "
+        "land on the specific topics listed under PROFESSOR FRAMING. "
+        "Engage at full technical depth — do not simplify. Give the "
+        "specification, the rationale for the choice, and the known "
+        "limitation. Professor-level questions deserve "
+        "professor-level answers.\n\n"
+
+        # ── PEER FRAMING ────────────────────────────────────────────────
+        "PEER FRAMING — audience and language.\n"
+        "The peer audience is MSFA (Master of Science in Finance and "
+        "Analytics) graduate students. They have a solid business and "
+        "finance foundation and basic statistics awareness, but they "
+        "are not quants, not economists, and not math majors. Answer "
+        "as if explaining to a smart, finance-literate peer who:\n"
+        "  - understands Sharpe ratio, drawdown, diversification, and "
+        "portfolio theory at a conceptual level;\n"
+        "  - does not need (and will not follow) mathematical "
+        "derivations;\n"
+        "  - responds well to business analogies and real-world "
+        "framing;\n"
+        "  - will push back on claims that seem too convenient or "
+        "oversimplified;\n"
+        "  - cares about practical implications for a capital planning "
+        "mandate, not academic proofs.\n\n"
+
+        "LANGUAGE RULES for peer answers:\n"
+        "  - no mathematical notation;\n"
+        "  - no p-value explanations beyond 'the outperformance is real "
+        "but our sample is too small to prove it statistically -- we "
+        "disclose that';\n"
+        "  - replace 'CVaR 99% annualized' with 'in the worst "
+        "scenarios, here is how much the portfolio loses';\n"
+        "  - replace 'HMM posterior probability' with 'the model's "
+        "confidence that we are in a particular market regime';\n"
+        "  - replace 'factor exposure' with 'how sensitive the strategy "
+        "is to broad market moves';\n"
+        "  - explain the 2022 correlation break as: 'bonds stopped "
+        "cushioning equity losses -- they started moving in the same "
+        "direction'.\n\n"
+
+        "TONE for peer answers:\n"
+        "  - collegial, not professorial;\n"
+        "  - direct answers before caveats;\n"
+        "  - acknowledge limitations honestly without being defensive;\n"
+        "  - never make the questioner feel like they asked a naive "
+        "question.\n\n"
+
+        # ── PROFESSOR FRAMING ───────────────────────────────────────────
+        "PROFESSOR FRAMING — full technical depth on these topics.\n"
+        "When a question touches any of the topics below, give the "
+        "SPECIFICATION, the RATIONALE for the choice, and the KNOWN "
+        "LIMITATION — in that order. Do not simplify the terminology.\n\n"
+
+        "HMM (Hidden Markov Model).\n"
+        "  WHAT IT IS: a statistical model that assumes the market "
+        "moves through hidden states (BULL, BEAR, TRANSITION) that "
+        "cannot be observed directly but can be inferred from "
+        "observable returns. Each state has its own return distribution "
+        "(mean and variance).\n"
+        "  METHOD: GaussianHMM with 3 states, fitted by the Baum-Welch "
+        "EM algorithm on daily equity returns. 500 iterations, "
+        "tolerance 1e-5.\n"
+        "  WHY 3 STATES: bull, bear, and a transition state that "
+        "captures the regime-switching process itself.\n"
+        "  KNOWN LIMITATION: the EM algorithm exhibits a non-monotonic "
+        "step at the log-likelihood plateau on this dataset — a 0.01% "
+        "wobble that does not affect posterior quality. Disclosed "
+        "explicitly.\n\n"
+
+        "CORRELATION.\n"
+        "  WHAT WE MEASURE: rolling pairwise Pearson correlation "
+        "between monthly equity and investment-grade bond returns. The "
+        "central finding is the shift from -0.05 pre-2022 to +0.57 "
+        "post-2022. Pearson correlation assumes linearity — "
+        "appropriate for monthly return series at this horizon.\n"
+        "  WHY IT MATTERS: negative correlation was the statistical "
+        "foundation of 60/40 diversification. Its disappearance means "
+        "the hedge is gone.\n\n"
+
+        "COVARIANCE.\n"
+        "  HOW WE USE IT: rolling 36-month covariance matrix for Min "
+        "Variance and Max Sharpe Rolling strategies. The 36-month "
+        "window balances responsiveness to regime changes against "
+        "estimation noise.\n"
+        "  KNOWN ISSUE: with only three assets, the covariance matrix "
+        "is 3x3 and well-conditioned — no shrinkage estimator needed. "
+        "In a larger universe, regularization would be required.\n\n"
+
+        "SKEWNESS.\n"
+        "  WHAT IT MEASURES: asymmetry of the return distribution. "
+        "Negative skew (left tail heavier) is the norm for "
+        "equity-heavy strategies — rare large losses, more frequent "
+        "small gains.\n"
+        "  WHY SHARPE MISSES IT: Sharpe assumes symmetric returns. A "
+        "strategy with negative skew looks better on Sharpe than it "
+        "deserves.\n"
+        "  WHAT WE REPORT: CVaR captures the left tail directly. The "
+        "skew differences across strategies are visible in the CVaR "
+        "rankings.\n\n"
+
+        "KURTOSIS.\n"
+        "  WHAT IT MEASURES: the fatness of the tails relative to a "
+        "normal distribution. Monthly financial returns have excess "
+        "kurtosis — extreme events happen more often than a normal "
+        "distribution predicts.\n"
+        "  WHY IT MATTERS: Sharpe and standard deviation assume "
+        "normality. CVaR via historical simulation does not — it reads "
+        "actual tail observations, so fat tails are captured directly. "
+        "The 286-observation sample means extreme tail estimates carry "
+        "uncertainty, which is why we use 99% CVaR as an approximation "
+        "rather than claiming precision.\n\n"
+
+        # ── TECHNICAL PRIMERS — CONDENSED INDEX ────────────────────────
+        # Initial-generation context kept lean: the index lists every term
+        # the team can defend from first principles, but the full per-term
+        # definitions live in _DEFENSE_PREP_FULL_PRIMERS (this module) and
+        # are injected only on a follow-up question that explicitly asks
+        # for a definition. Saves ~4kB of input on every initial run.
+        "TECHNICAL PRIMERS — INDEX.\n"
+        "The team is briefed on the following terms and can defend each "
+        "from first principles when asked: Sharpe ratio, CVaR, CAGR, "
+        "maximum drawdown, correlation, covariance, efficient frontier, "
+        "beta and factor exposure, momentum strategy, volatility "
+        "targeting, risk parity, regime switching, rebalancing, "
+        "backtesting vs out-of-sample testing, statistical significance, "
+        "Black-Litterman model. When a Q&A item touches one of these, "
+        "anchor in plain English and the PEER FRAMING language rules "
+        "above (or PROFESSOR FRAMING for the five named technical "
+        "topics). Full definitions are available on demand for a "
+        "follow-up question that explicitly asks for one.\n\n"
+
+        # ── RESPONSE BALANCE ────────────────────────────────────────────
+        "RESPONSE BALANCE. Answer at TWO levels simultaneously:\n"
+        "  1. NARRATIVE — lead with the 'so what' and the reasoning "
+        "behind each decision (why these assets, why this framework, "
+        "why the 2022 break matters).\n"
+        "  2. TECHNICAL DEFENCE — when a question is explicitly "
+        "technical (statistical significance, CVaR methodology, "
+        "validation approach), provide specific and accurate answers "
+        "grounded in the uploaded document.\n\n"
+
+        "Lead with the conceptual argument. Follow with technical "
+        "specifics only if the question requires them or if precision "
+        "would strengthen the response. The audience is academic peers "
+        "who understand finance but may not know the platform's "
+        "implementation details. If a question uses technical "
+        "language, match that language; if it is conversational, stay "
+        "conversational — read the register of the question and "
+        "respond in kind.\n\n"
+
+        "DO NOT:\n"
+        "  - recite tables of numbers unprompted;\n"
+        "  - answer purely technically when the question is "
+        "conceptual;\n"
+        "  - be vague when a specific methodological challenge is "
+        "raised.\n\n"
+
+        # ── THE HUMAN JUDGMENT QUESTION ─────────────────────────────────
+        # Reviewers asking "where is the human analytical judgment given
+        # you have an AI council and a platform?" expect a prepared,
+        # specific answer naming the decisions that required human
+        # judgment. The five named below are the load-bearing ones —
+        # they are not platform outputs, not council outputs, they are
+        # team interpretations and design choices. Answer in that
+        # framing every time, in this order, without hedging.
+        "THE HUMAN JUDGMENT QUESTION.\n"
+        "If asked 'where is the human analytical judgment given you "
+        "have an AI council and a platform?' the prepared response is:\n\n"
+
+        "\"The platform executes. The judgment is in what we built "
+        "it to do and why.\n\n"
+
+        "Five decisions required human judgment that the AI council "
+        "could not have made:\n\n"
+
+        "One: interpreting the 2022 correlation shift as structural "
+        "rather than cyclical. The data shows a shift. The "
+        "interpretation — that it changes the nature of the "
+        "portfolio construction problem — is ours.\n\n"
+
+        "Two: choosing to span ten distinct signal mechanisms rather "
+        "than optimise parameters on one approach. We could have run "
+        "five hundred variations of momentum. We chose to ask whether "
+        "different mechanisms produce different results. That is a "
+        "research design decision.\n\n"
+
+        "Three: disclosing that no strategy achieves statistical "
+        "significance, when we could have reported Sharpe rankings "
+        "and moved on. We chose honesty about the limits of the "
+        "evidence.\n\n"
+
+        "Four: designing dissent into the AI council. We could have "
+        "asked the AI for a recommendation and taken it. We built a "
+        "structure that forces the system to challenge itself before "
+        "it advises us.\n\n"
+
+        "Five: the constraint framework. Forty percent maximum per "
+        "strategy and fifty percent maximum per asset class are not "
+        "data-derived. They are fiduciary design decisions about "
+        "what an institutional mandate can implement responsibly.\n\n"
+
+        "The platform gives us the evidence. The interpretation, the "
+        "design, and the governance framework are ours.\"\n\n"
+
+        "Deliver this response verbatim when the question is asked in "
+        "that form. Adapt the framing if a follow-up zooms in on one "
+        "of the five — but always return to 'the platform executes, "
+        "the judgment is ours.'"
     )
 
 
@@ -728,19 +1090,39 @@ def build_defense_prep_context_block(
     team_name: str,
     draft_text: str,
     categories: list[str] | None = None,
+    source_name: str | None = None,
 ) -> dict[str, Any]:
-    """Context for the Thesis Defense Prep flow. The team's OWN
-    submitted draft text is the primary input; the categories
-    drive the Q&A structure."""
+    """Context for the Thesis Defense Prep flow. The team's OWN submitted
+    document is the primary input; the categories drive the Q&A structure.
+    `source_name` is the uploaded filename (when supplied) and is surfaced
+    in the labelled block header so the model knows exactly which document
+    it's answering from."""
     return {
-        "team_name":  team_name,
-        "draft_text": draft_text,
-        "categories": categories or DEFENSE_CATEGORIES,
+        "team_name":   team_name,
+        "draft_text":  draft_text,
+        "categories":  categories or DEFENSE_CATEGORIES,
+        "source_name": source_name,
     }
 
 
 def render_defense_prep_context_block(ctx: dict[str, Any]) -> str:
+    """Render the context block with the SUBMITTED DOCUMENT first and
+    clearly labelled as the primary source — the model must ground every
+    Q&A answer in this text, not in cached project context. The team /
+    category framing follows so the Q&A structure is consistent."""
+    source = ctx.get("source_name")
+    header = (
+        f"=== SUBMITTED ACADEMIC DOCUMENT: {source} ==="
+        if source else "=== SUBMITTED ACADEMIC DOCUMENT ===")
     lines: list[str] = [
+        header,
+        "The following is the submitted academic document. Answer all "
+        "questions using this as the primary source.",
+        "",
+        "--- BEGIN SUBMITTED DOCUMENT ---",
+        ctx.get("draft_text", "(no draft text available)"),
+        "--- END SUBMITTED DOCUMENT ---",
+        "",
         "=== TEAM SUBMISSION ===",
         f"Team: {ctx.get('team_name', '(unnamed)')}",
         "",
@@ -748,8 +1130,4 @@ def render_defense_prep_context_block(ctx: dict[str, Any]) -> str:
     ]
     for i, cat in enumerate(ctx.get("categories", DEFENSE_CATEGORIES), 1):
         lines.append(f"  {i}. {cat}")
-    lines.append("")
-    lines.append("--- BEGIN TEAM DRAFT TEXT ---")
-    lines.append(ctx.get("draft_text", "(no draft text available)"))
-    lines.append("--- END TEAM DRAFT TEXT ---")
     return "\n".join(lines)

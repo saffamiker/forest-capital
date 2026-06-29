@@ -167,3 +167,83 @@ def test_two_workers_cannot_claim_same_row(tmp_queue_path):
 def test_get_returns_none_for_unknown_id(tmp_queue_path):
     q = Queue(tmp_queue_path)
     assert q.get(9999) is None
+
+
+# ── purge_pending_and_running (June 3 2026) ───────────────────────────────
+
+
+def test_purge_cancels_pending_rows(tmp_queue_path):
+    """Pending rows flip to 'cancelled' and the returned count
+    matches. Their completed_at gets stamped so the audit trail
+    knows when the purge happened."""
+    q = Queue(tmp_queue_path)
+    a = q.enqueue("first")
+    b = q.enqueue("second")
+    n = q.purge_pending_and_running()
+    assert n == 2
+    for pid in (a, b):
+        row = q.get(pid)
+        assert row is not None
+        assert row["status"] == "cancelled"
+        assert row["completed_at"] is not None
+
+
+def test_purge_cancels_running_rows(tmp_queue_path):
+    """A worker that died mid-prompt left its row in 'running'.
+    The purge must clear it too — that's the whole point."""
+    q = Queue(tmp_queue_path)
+    pid = q.enqueue("stuck")
+    q.claim_next("worker-that-died")
+    # row is now running
+    n = q.purge_pending_and_running()
+    assert n == 1
+    row = q.get(pid)
+    assert row is not None
+    assert row["status"] == "cancelled"
+
+
+def test_purge_preserves_complete_and_failed(tmp_queue_path):
+    """Terminal rows are part of the audit trail and must not be
+    touched. Cancellation is for in-flight work only."""
+    q = Queue(tmp_queue_path)
+    done = q.enqueue("done")
+    q.claim_next("w")
+    q.post_result(done, result="ok")
+    bad = q.enqueue("bad")
+    q.claim_next("w")
+    q.post_result(bad, error="boom")
+    pending = q.enqueue("pending")
+    n = q.purge_pending_and_running()
+    assert n == 1   # only the pending row
+    assert q.get(done)["status"] == "complete"
+    assert q.get(bad)["status"] == "failed"
+    assert q.get(pending)["status"] == "cancelled"
+
+
+def test_purge_empty_queue_returns_zero(tmp_queue_path):
+    """No pending or running rows → purge is a no-op that returns 0,
+    never raises. The endpoint can be called repeatedly without harm."""
+    q = Queue(tmp_queue_path)
+    assert q.purge_pending_and_running() == 0
+
+
+def test_purge_is_idempotent(tmp_queue_path):
+    """A second call right after the first finds nothing to cancel —
+    same contract as the empty case. The endpoint can be re-tried
+    safely from a flaky network."""
+    q = Queue(tmp_queue_path)
+    q.enqueue("a")
+    q.enqueue("b")
+    assert q.purge_pending_and_running() == 2
+    assert q.purge_pending_and_running() == 0
+
+
+def test_status_snapshot_surfaces_cancelled_count(tmp_queue_path):
+    """status_snapshot() picks up rows by GROUP BY status, so the
+    'cancelled' total appears under its own key after a purge —
+    same way it shows complete/failed today."""
+    q = Queue(tmp_queue_path)
+    q.enqueue("a")
+    q.purge_pending_and_running()
+    snap = q.status_snapshot()
+    assert snap["counts"].get("cancelled") == 1

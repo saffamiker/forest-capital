@@ -141,11 +141,19 @@ class TestGetAndInject:
     def test_get_returns_empty_string_on_cold_cache(self):
         assert macro_context.get_macro_context() == ""
 
-    def test_inject_is_a_noop_on_cold_cache(self):
-        # A cold deploy (no digest yet) MUST render bitwise identical to
-        # the pre-FEATURE-2 wire format — the agent runs text-only.
+    def test_inject_on_cold_cache_appends_unavailable_disclosure(self):
+        # Bridge #61 FIX 3: a cold deploy (no digest yet) now appends a
+        # "MACRO CONTEXT UNAVAILABLE" disclosure instead of silently
+        # returning the unmodified prompt. Agents must never be
+        # silently reasoning without macro context. The role prompt is
+        # still at the head; only an explicit disclosure follows.
+        # Reset both fields so this test is independent of any cache
+        # state left by an earlier test in the suite.
+        macro_context._set_cache_for_test("", generated_at=None)
         prompt = "SYSTEM PROMPT FOR EQUITY ANALYST"
-        assert macro_context.inject_macro_context(prompt) == prompt
+        out = macro_context.inject_macro_context(prompt)
+        assert out.startswith(prompt)
+        assert "MACRO CONTEXT UNAVAILABLE" in out
 
     def test_inject_appends_when_cache_populated(self):
         macro_context._set_cache_for_test("\n=== MACRO ===\nx\n")

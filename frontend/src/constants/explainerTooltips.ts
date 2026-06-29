@@ -279,6 +279,25 @@ export const EXPLAINER_TOOLTIPS: Record<string, string> = {
     + 'bonds that maximises the Sharpe ratio. Dynamic strategies that plot '
     + 'above this point outperform the theoretical static optimum.',
 
+  // ── Council Performance Record — summary banner ───────────────────────────
+  council_record_sharpe:
+    'Sharpe ratio measures return per unit of risk. Higher is better. The '
+    + 'post-2022 period is the true out-of-sample test window — the model '
+    + 'was trained on pre-2022 data only.',
+
+  switching_costs:
+    'Transaction costs applied at each rebalance event — a month where the '
+    + 'blend weights shifted more than 2% in any single strategy. Net Sharpe '
+    + 'is the gross Sharpe minus the annualized cost drag (one-way bps per '
+    + 'rebalance), so the figure stays comparable with the gross Sharpe above.',
+
+  rebalancing_events:
+    'A rebalancing event occurs when the regime-conditional optimizer shifts '
+    + 'blend weights by more than 2% in response to a change in the HMM '
+    + 'posterior probability. Only months where at least one strategy\'s '
+    + 'weight changed by more than 2 percentage points are shown. Each event '
+    + 'incurs a transaction cost applied in the sensitivity analysis above.',
+
   // ── Dashboard page — strategy names (derived from strategyMetadata) ────────
   ...STRATEGY_TOOLTIPS,
 }

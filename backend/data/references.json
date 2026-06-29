@@ -120,5 +120,55 @@
     "source": "Journal of Business & Economic Statistics, 23(4), 365-380",
     "apa": "Hansen, P. R. (2005). A test for superior predictive ability. Journal of Business & Economic Statistics, 23(4), 365-380.",
     "use_for": ["SPA test", "Hansen SPA", "data snooping", "superior predictive ability"]
+  },
+  "hamilton_1989": {
+    "author": "Hamilton, J. D.",
+    "year": 1989,
+    "title": "A new approach to the economic analysis of nonstationary time series and the business cycle",
+    "source": "Econometrica, 57(2), 357-384",
+    "apa": "Hamilton, J. D. (1989). A new approach to the economic analysis of nonstationary time series and the business cycle. Econometrica, 57(2), 357-384. https://doi.org/10.2307/1912559",
+    "url": "https://www.jstor.org/stable/1912559",
+    "doi": "10.2307/1912559",
+    "use_for": ["Hidden Markov Model", "regime detection", "HMM methodology", "regime-switching foundational"]
+  },
+  "carhart_1997": {
+    "author": "Carhart, M. M.",
+    "year": 1997,
+    "title": "On Persistence in Mutual Fund Performance",
+    "source": "Journal of Finance, 52(1), 57-82",
+    "apa": "Carhart, M. M. (1997). On Persistence in Mutual Fund Performance. Journal of Finance, 52(1), 57-82. https://doi.org/10.1111/j.1540-6261.1997.tb03808.x",
+    "url": "https://onlinelibrary.wiley.com/doi/10.1111/j.1540-6261.1997.tb03808.x",
+    "doi": "10.1111/j.1540-6261.1997.tb03808.x",
+    "use_for": ["Carhart four-factor model", "momentum factor", "factor attribution", "mutual fund persistence"]
+  },
+  "ang_bekaert_2002": {
+    "author": "Ang, A., & Bekaert, G.",
+    "year": 2002,
+    "title": "International Asset Allocation With Regime Shifts",
+    "source": "Review of Financial Studies, 15(4), 1137-1187",
+    "apa": "Ang, A., & Bekaert, G. (2002). International Asset Allocation With Regime Shifts. Review of Financial Studies, 15(4), 1137-1187. https://doi.org/10.1093/rfs/15.4.1137",
+    "url": "https://academic.oup.com/rfs/article-abstract/15/4/1137/1573773",
+    "doi": "10.1093/rfs/15.4.1137",
+    "use_for": ["regime-conditional asset allocation", "international diversification", "regime shifts"]
+  },
+  "harvey_liu_zhu_2016": {
+    "author": "Harvey, C. R., Liu, Y., & Zhu, H.",
+    "year": 2016,
+    "title": "...and the Cross-Section of Expected Returns",
+    "source": "Review of Financial Studies, 29(1), 5-68",
+    "apa": "Harvey, C. R., Liu, Y., & Zhu, H. (2016). ...and the Cross-Section of Expected Returns. Review of Financial Studies, 29(1), 5-68. https://doi.org/10.1093/rfs/hhv059",
+    "url": "https://academic.oup.com/rfs/article-abstract/29/1/5/1843824",
+    "doi": "10.1093/rfs/hhv059",
+    "use_for": ["multiple testing problem", "FDR correction", "cross-section of returns", "factor zoo"]
+  },
+  "bailey_lopez_de_prado_2014": {
+    "author": "Bailey, D. H., & López de Prado, M.",
+    "year": 2014,
+    "title": "The deflated Sharpe ratio: Correcting for selection bias, backtest overfitting, and non-normality",
+    "source": "Journal of Portfolio Management, 40(5), 94-107",
+    "apa": "Bailey, D. H., & López de Prado, M. (2014). The deflated Sharpe ratio: Correcting for selection bias, backtest overfitting, and non-normality. Journal of Portfolio Management, 40(5), 94-107. https://doi.org/10.3905/jpm.2014.40.5.094",
+    "url": "https://www.pm-research.com/content/iijpormgmt/40/5/94",
+    "doi": "10.3905/jpm.2014.40.5.094",
+    "use_for": ["deflated Sharpe ratio", "DSR", "backtest overfitting", "selection bias correction"]
   }
 }

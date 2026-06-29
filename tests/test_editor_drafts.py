@@ -94,23 +94,12 @@ class TestEditorEndpointGating:
 # ── Marker helpers — pure logic ───────────────────────────────────────────────
 
 class TestEditorContentBuilders:
-    def test_midpoint_to_editor_builds_tiptap_and_text(self):
-        from tools.editor_content import midpoint_to_editor
-        cj, ct = midpoint_to_editor({
-            "methodology": "Method para.", "results": "Results para.",
-            "roles": "Roles para.", "next_steps": "Next steps para."})
-        assert cj["type"] == "doc"
-        # Four H1 section headings.
-        headings = [n for n in cj["content"] if n.get("type") == "heading"]
-        assert len(headings) == 4
-        # May 26 2026 — the six section [[BOB]] callouts were removed.
-        # The Academic Writer's prose now stands as each section's
-        # interpretation; no placeholder blocks should appear in the
-        # generated editor content. The word-count-warning [[BOB:
-        # WORD COUNT WARNING …]] is a separate transient alert and
-        # only fires when word_validation reports drift — not here.
-        assert ct.count("[[BOB:") == 0
-        assert "BOB —" not in ct  # no section callouts at all
+    # PR-B (June 2026) deleted the midpoint_to_editor adapter
+    # alongside the midpoint endpoint retirement. The corresponding
+    # test_midpoint_to_editor_builds_tiptap_and_text test is gone with
+    # it; the analytical_appendix_to_editor + executive_brief_to_editor
+    # adapters remain and are covered by tests below + by
+    # test_executive_brief_structure.py.
 
     def test_deck_to_editor_builds_sixteen_canvas_slides(self):
         from tools.editor_content import deck_to_editor
@@ -128,13 +117,24 @@ class TestEditorContentBuilders:
         # Every one of the 16 slides carries a non-empty body text element
         # — the five narrative-keyed slides from the generated narratives,
         # the rest from the static seed. No slide opens blank.
+        #
+        # June 26 2026 -- element ids namespaced by slide_id
+        # ('s{id}_body') instead of the previous hardcoded
+        # 'el_002'. The id-rename fix in editor_content.py was
+        # required because build_editor_pptx looks up chart PNGs
+        # by element id and the old hardcoded ids collapsed every
+        # slide's chart_pngs entry to a single key (every slide
+        # showed the same chart in the exported PPTX). This test
+        # now matches the body element via its 'body' suffix.
         from tools.editor_content import deck_to_editor
         cj, _ = deck_to_editor({
             "thesis": "A thesis.", "conclusions": "- one",
             "recommendations": "- rec", "ai_leverage": "AI narrative."})
         assert len(cj["slides"]) == 16
         for s in cj["slides"]:
-            body = next(e for e in s["elements"] if e["id"] == "el_002")
+            body = next(
+                e for e in s["elements"]
+                if str(e.get("id", "")).endswith("_body"))
             assert body["type"] == "text"
             assert body["content"].strip()
 
@@ -144,27 +144,46 @@ class TestEditorContentBuilders:
         from tools.editor_content import deck_to_editor
         cj, _ = deck_to_editor({})
         for s in cj["slides"]:
-            body = next(e for e in s["elements"] if e["id"] == "el_002")
+            body = next(
+                e for e in s["elements"]
+                if str(e.get("id", "")).endswith("_body"))
             assert body["content"].strip()
 
     def test_executive_brief_to_editor_builds_tiptap_and_text(self):
+        """June 18 2026 -- the brief was rewritten to the FNA 670
+        rubric's six required sections in rubric order. The previous
+        structure (June 6) carried non-rubric "Five Human Decisions"
+        and "Part II preview" sections; the rubric-aligned structure
+        below replaces those entirely. The editor adapter must render
+        every section in order with the new keys.
+
+        June 28 2026 -- Section 6 'Visuals' removed (orphan from
+        June 26 spec removal); brief now ends at Section 5. Test
+        updated to pin five headings."""
         from tools.editor_content import executive_brief_to_editor
         cj, ct = executive_brief_to_editor({
-            "exec_summary": "Summary para.", "methodology": "Method para.",
-            "finding_1": "F1.", "finding_2": "F2.", "finding_3": "F3.",
-            "finding_4": "F4.", "limitations": "Limits.",
-            "recommendations": "Recs."})
+            "executive_summary":     "Executive summary para.",
+            "methodology":           "Methodology para.",
+            "key_findings":          "Key findings para.",
+            "limitations":           "Limitations para.",
+            "final_recommendations": "Final recommendations para.",
+        })
         assert cj["type"] == "doc"
-        # Eight H1 section headings.
+        # Five H1 section headings -- Section 6 was an orphan
+        # and is removed from both the editor + the DOCX builder.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
-        assert len(headings) == 8
-        assert "Executive Summary" in ct
-        # May 26 2026 — the three judgement-section [[BOB]] callouts
-        # (FRAMING / JUDGEMENT / RECOMMENDATION) were removed. The
-        # Academic Writer's prose now stands as each section's
-        # interpretation.
+        assert len(headings) == 5
+        # The five section headings in rubric order.
+        assert "1. Executive Summary" in ct
+        assert "2. Methodology Overview" in ct
+        assert "3. Key Findings and Insights" in ct
+        assert "4. Limitations and Risks" in ct
+        assert "5. Final Recommendations" in ct
+        # Orphan Section 6 must NOT reappear.
+        assert "6. Visuals to Demonstrate the Insights" not in ct
+        # No legacy [[BOB]] callouts.
         assert ct.count("[[BOB:") == 0
-        assert "BOB —" not in ct
+        assert "BOB --" not in ct
 
 
 # ── CRUD round-trips — skip without a live database ───────────────────────────
@@ -243,17 +262,11 @@ class TestDraftOnGeneration:
     # Generation is async — the endpoint returns 202 and a background
     # task creates the draft. The generation helper is exercised directly
     # (it creates the editor draft and returns its id).
-    def test_midpoint_generation_creates_a_draft(self, clean_editor_drafts):
-        if not _db_ready():
-            pytest.skip("no live database")
-        import main
-        _bytes, _fn, _media, draft_id = _run(
-            main._generate_midpoint_document("thaob@queens.edu"))
-        assert draft_id is not None
-        got = client.get(f"{DRAFTS}/{draft_id}", headers=TEAM)
-        assert got.status_code == 200
-        assert got.json()["document_type"] == "midpoint_paper"
-        assert got.json()["created_from"] == "generated"
+    #
+    # PR-B (June 2026) deleted _generate_midpoint_document; the midpoint
+    # drafts-on-generation test is gone with it. Existing midpoint
+    # drafts still open via build_editor_docx which reads from the
+    # TipTap content_json directly.
 
     def test_executive_brief_generation_creates_a_draft(
         self, clean_editor_drafts,
@@ -271,11 +284,15 @@ class TestDraftOnGeneration:
 
 
 class TestInEditorExport:
-    def test_export_docx_from_a_paper_draft(self, clean_editor_drafts):
+    # PR-B (June 2026) retired /api/v1/export/midpoint-paper; the
+    # in-editor docx-export contract is now pinned via the
+    # executive-brief endpoint (same _editor_export() implementation,
+    # different document type).
+    def test_export_docx_from_a_brief_draft(self, clean_editor_drafts):
         if not _db_ready():
             pytest.skip("no live database")
         created = client.post(DRAFTS, headers=TEAM, json={
-            "document_type": "midpoint_paper", "title": "Export draft",
+            "document_type": "executive_brief", "title": "Export draft",
             "content_json": {"type": "doc", "content": [
                 {"type": "heading", "attrs": {"level": 1},
                  "content": [{"type": "text", "text": "1. Methodology"}]},
@@ -284,7 +301,7 @@ class TestInEditorExport:
             ]},
             "content_text": "1. Methodology Body paragraph."})
         did = created.json()["id"]
-        resp = client.post("/api/v1/export/midpoint-paper", headers=TEAM,
+        resp = client.post("/api/v1/export/executive-brief", headers=TEAM,
                             json={"editor_draft_id": did})
         assert resp.status_code == 200
         # A valid .docx is a ZIP — the PK magic bytes.
@@ -315,7 +332,7 @@ class TestInEditorExport:
         assert "UAT-NOTE rehearsal line" in notes
 
     def test_export_unknown_draft_is_404(self):
-        resp = client.post("/api/v1/export/midpoint-paper", headers=TEAM,
+        resp = client.post("/api/v1/export/executive-brief", headers=TEAM,
                             json={"editor_draft_id": 999999999})
         assert resp.status_code == 404
 

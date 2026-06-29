@@ -1,0 +1,894 @@
+"""Email digest (Component 1) — section assemblers + send wrapper.
+
+Each section assembler must:
+  - return a DigestSection with non-empty html + text
+  - fail-open when its upstream source is missing
+  - render the user-spec'd content (warm states, releases, regime,
+    blend weights, deadlines)
+
+The top-level build_digest_email + send_daily_digest are tested
+end-to-end with the dev-env Resend short-circuit (no real network).
+"""
+from __future__ import annotations
+
+import os
+import sys
+from datetime import date
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-at-least-32-characters-long")
+os.environ.setdefault("MASTER_API_KEY", "test_master_key")
+
+from tools.email_digest import (  # noqa: E402
+    _git_authors_for,
+    _hours_ago_utc,
+    _section_deadlines,
+    _section_implied_asset_allocation,
+    _section_latest_cio_recommendation,
+    _section_platform_health,
+    _section_platform_usage,
+    _section_rebalance_triggers,
+    _section_team_activity,
+    _section_warm_history,
+    _truncate_to_word_cap,
+    _week_start_utc,
+    build_digest_email,
+    send_daily_digest,
+)
+
+
+# ── Per-section pure assemblers (no DB / network) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_platform_health_renders_without_warm_state():
+    """The section degrades cleanly when get_warm_state() has not yet
+    been hit (cold process state). It must still produce non-empty
+    HTML + text so a digest sent on cold deploy isn't blank.
+
+    June 2 2026 — the section became async (invariant fallback +
+    alembic_version both read from the DB), so the test awaits."""
+    s = await _section_platform_health()
+    assert s.title == "Platform health"
+    assert "<table" in s.html
+    assert "PLATFORM HEALTH" in s.text
+    assert "Last warm:" in s.text
+    assert "DB head:" in s.text
+    # The DB-head value renders one of the three permitted states:
+    # a real version_num from alembic_version, or 'unavailable' on
+    # any failure path. The old 'unknown' literal is retired.
+    assert "DB head:" in s.text
+    # In test env without a live DB the value must be 'unavailable',
+    # never 'unknown'.
+    assert "unknown" not in s.text
+
+
+def test_deadlines_renders_known_project_dates():
+    """The two practicum deadlines are hardcoded — June 3 cohort
+    review and July 1 final submission. The section must surface both
+    with their ISO dates and a days-remaining badge."""
+    today = date(2026, 6, 1)
+    s = _section_deadlines(today=today)
+    assert "Cohort peer review" in s.html
+    assert "Executive brief" in s.html
+    # Days-remaining badges from the fixed today.
+    assert "2026-06-03" in s.html
+    assert "2026-07-01" in s.html
+    # Color cue: 2 days out is red (≤7-day band).
+    assert "#ef4444" in s.html or "in 2 days" in s.html
+    assert "in 30 days" in s.html
+
+
+def test_deadlines_past_dates_show_past_badge():
+    """A date already in the rear-view mirror should show 'past'
+    rather than a misleading days-remaining count."""
+    today = date(2026, 8, 1)
+    s = _section_deadlines(today=today)
+    assert "past" in s.html
+    assert "past" in s.text
+
+
+# ── Top-level build (async, exercises every section) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_build_digest_email_returns_subject_html_text():
+    subject, html, text = await build_digest_email()
+    assert subject.startswith("AnalyticsDesk daily digest — ")
+    # HTML has the expected wrapping + each section.
+    assert "<html>" in html
+    assert "Platform health" in html
+    assert "Platform releases" in html
+    assert "Analytics snapshot" in html
+    assert "Platform usage" in html
+    assert "Team activity" in html
+    assert "Warm history" in html
+    assert "Open work" in html
+    assert "Deadlines" in html
+    # Plain-text fallback covers every section too.
+    assert "PLATFORM HEALTH" in text
+    assert "PLATFORM RELEASES" in text
+    assert "ANALYTICS SNAPSHOT" in text
+    assert "PLATFORM USAGE" in text
+    assert "TEAM ACTIVITY" in text
+    assert "WARM HISTORY" in text
+    assert "OPEN WORK" in text
+    assert "DEADLINES" in text
+    # Unsubscribe / opt-out copy per the spec.
+    assert "DIGEST_RECIPIENTS" in text or "unsubscribe" in text.lower()
+
+
+# ── send_daily_digest — dev-env short-circuit ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_daily_digest_returns_dev_message_id(monkeypatch):
+    """In test env send_email() returns a deterministic dev-<tag>
+    message id; the wire path is fully exercised without Resend."""
+    monkeypatch.setenv(
+        "DIGEST_RECIPIENTS",
+        "michael@example.com,bob@example.com,molly@example.com")
+    result = await send_daily_digest()
+    assert result["sent"] is True
+    assert result["message_id"].startswith("dev-")
+    assert len(result["recipients"]) == 3
+    assert result["subject"].startswith("AnalyticsDesk daily digest")
+
+
+@pytest.mark.asyncio
+async def test_send_daily_digest_skips_when_no_recipients(monkeypatch):
+    """In production with DIGEST_RECIPIENTS unset, the helper must
+    log + return sent=False rather than firing a no-recipient send.
+    In test env, a placeholder kicks in so the send still lands —
+    this exercises the placeholder path."""
+    monkeypatch.setenv("DIGEST_RECIPIENTS", "")
+    result = await send_daily_digest()
+    # In test env, the placeholder digest-dev@analyticsdesk.app fills
+    # in, so the send still goes through — confirms fail-open contract.
+    assert result["sent"] is True
+    assert result["recipients"] == ["digest-dev@analyticsdesk.app"]
+
+
+@pytest.mark.asyncio
+async def test_send_daily_digest_uses_digest_sender(
+    monkeypatch, capsys,
+):
+    """The daily digest must send from `digest@analyticsdesk.app`,
+    NOT the platform's generic RESEND_FROM_EMAIL. The dev-env path
+    prints the From address; capture it to confirm the per-purpose
+    override took effect even when the env var disagrees."""
+    monkeypatch.setenv("DIGEST_RECIPIENTS", "michael@example.com")
+    # Set RESEND_FROM_EMAIL to something OTHER than the digest mailbox
+    # so the test catches the per-call override (not a coincidental
+    # env-var match).
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "wrong@example.com")
+    result = await send_daily_digest()
+    assert result["sent"] is True
+    out = capsys.readouterr().out
+    assert "From:    digest@analyticsdesk.app" in out
+    assert "wrong@example.com" not in out
+
+
+# ── Time-window helpers (US/Eastern WTD) ──────────────────────────────────
+
+
+def test_week_start_anchors_to_eastern_monday():
+    """The WTD window must start at Mon 00:00 ET, NOT UTC. A digest
+    fired Wed 14:00 UTC (= Wed 10:00 ET in summer) should report
+    WTD as starting Mon 04:00 UTC (= Mon 00:00 EDT)."""
+    from datetime import datetime, timezone
+    fixed = datetime(2026, 6, 3, 14, 0, tzinfo=timezone.utc)
+    start = _week_start_utc(fixed)
+    # June 1 2026 is a Monday — EDT (UTC-4) → Mon 00:00 EDT = Mon 04:00 UTC.
+    assert start.isoformat() == "2026-06-01T04:00:00+00:00"
+
+
+def test_week_start_handles_monday_morning_correctly():
+    """Cron fires 11:00 UTC on a Monday (= 07:00 ET). WTD must be
+    today's Mon 00:00 ET, not last week's."""
+    from datetime import datetime, timezone
+    fixed = datetime(2026, 6, 1, 11, 0, tzinfo=timezone.utc)
+    start = _week_start_utc(fixed)
+    assert start.isoformat() == "2026-06-01T04:00:00+00:00"
+
+
+def test_hours_ago_simple():
+    from datetime import datetime, timezone
+    fixed = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    assert _hours_ago_utc(24, fixed).isoformat() == (
+        "2026-06-01T12:00:00+00:00")
+
+
+def test_git_authors_includes_mapped_personal_email():
+    """Michael commits as mikeruurds@gmail; the digest must count those
+    commits against ruurdsm@queens.edu via GIT_AUTHOR_EMAIL_MAP."""
+    authors = _git_authors_for("ruurdsm@queens.edu")
+    assert "ruurdsm@queens.edu" in authors
+    assert "mikeruurds@gmail.com" in authors
+
+
+def test_git_authors_unmapped_returns_self_only():
+    authors = _git_authors_for("thaob@queens.edu")
+    assert authors == {"thaob@queens.edu"}
+
+
+# ── Section 4 — Platform usage ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_platform_usage_renders_without_db():
+    """No live DB in the test env — the section must fail-open with
+    the table shell present and zeros in every category row, so a
+    cold-deploy digest still sends with a recognisable section."""
+    s = await _section_platform_usage()
+    assert s.title == "Platform usage"
+    assert "Council queries" in s.html
+    assert "Defense Prep" in s.html
+    assert "Peer Review" in s.html
+    assert "Other" in s.html
+    assert "Total" in s.html
+    # Text fallback carries the column headers and the three primary
+    # categories so a plain-text reader sees the structure.
+    assert "PLATFORM USAGE" in s.text
+    assert "Council queries" in s.text
+    assert "24h" in s.text
+    assert "WTD" in s.text
+
+
+# ── Section 5 — Team activity ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_team_activity_renders_three_team_members():
+    """Bob, Molly, and Michael always appear in the table — even when
+    every count is zero. The digest is an operational signal that
+    confirms each team member's activity (or lack thereof)."""
+    s = await _section_team_activity()
+    assert s.title == "Team activity"
+    for name in ("Michael", "Bob", "Molly"):
+        assert name in s.html, f"missing {name} in HTML"
+        assert name in s.text, f"missing {name} in text"
+    # Column headers — the four signals the user spec'd.
+    for label in ("Commits", "Doc edits", "UAT", "Logins"):
+        assert label in s.html
+
+
+@pytest.mark.asyncio
+async def test_team_activity_michael_appears_first():
+    """Michael is sysadmin and the lead engineer — the canonical first
+    row of every team-attribution table in the platform. The digest
+    must follow the same convention so a reader scanning columns
+    finds the same identity in the same place every day."""
+    s = await _section_team_activity()
+    michael_pos = s.html.find("Michael")
+    bob_pos = s.html.find("Bob")
+    molly_pos = s.html.find("Molly")
+    assert 0 <= michael_pos < bob_pos
+    assert michael_pos < molly_pos
+
+
+# ── Section 6 — Warm history ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_warm_history_renders_empty_state_without_rows():
+    """The section must produce a non-empty 'no warm runs' placeholder
+    when the analytics_metrics_cache has no invariant_summary rows
+    in the last 7 days — same shape as a fresh deploy."""
+    s = await _section_warm_history()
+    assert s.title == "Warm history"
+    # In test env without a populated cache, the placeholder copy
+    # appears in BOTH the HTML and the text fallback.
+    assert "Warm history (last 7 days)" in s.html
+    assert "WARM HISTORY (last 7 days)" in s.text
+    assert ("No warm runs" in s.html
+            or "No warm runs" in s.text)
+
+
+# ── June 5 2026 — three new sections (digest #17 + #18) ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_renders_placeholder_on_cold_cache():
+    """In the test env strategy_results_cache + forward_projection are
+    both cold. The section must still render — the title appears, the
+    placeholder body explains why it's empty, and neither half of the
+    DigestSection is blank."""
+    s = await _section_implied_asset_allocation()
+    assert s.title == "Implied asset allocation"
+    assert "Implied asset allocation" in s.html
+    # Placeholder copy on the cold path.
+    assert "No live blend" in s.html or "No live blend" in s.text
+    # The text fallback always renders — the section never returns
+    # html-only.
+    assert s.text.strip()
+
+
+# ── June 21 2026 — table/line reconciliation (#322) ──────────────────────
+#
+# The implied asset allocation TABLE and the "Current implied allocation"
+# LINE in the CIO recommendation section used to read from different
+# blend sources (forward_projection.blend_weights vs
+# regime_blends.blends[regime]), producing ~1.4pp equity discrepancies.
+# Both now share regime_blends.blends[regime] + compute_implied_asset_
+# allocation so the table portfolio total MUST equal the line. The
+# tests below pin the IG/HY columns + the per-row fallback + the
+# portfolio-total parity + the footnote conditional.
+
+_FAKE_BLENDS = {"BULL": {"S1": 0.6, "S2": 0.4}}
+_FAKE_STRATEGIES_FULL_SPLIT = {
+    "S1": {"avg_equity_weight": 0.85, "avg_bond_weight": 0.15,
+           "avg_ig_weight": 0.10, "avg_hy_weight": 0.05},
+    "S2": {"avg_equity_weight": 0.70, "avg_bond_weight": 0.30,
+           "avg_ig_weight": 0.25, "avg_hy_weight": 0.05},
+}
+_FAKE_STRATEGIES_PARTIAL_SPLIT = {
+    # S1 carries the PR #315 fields; S2 predates the backfill --
+    # exercises the per-row fallback path.
+    "S1": {"avg_equity_weight": 0.85, "avg_bond_weight": 0.15,
+           "avg_ig_weight": 0.10, "avg_hy_weight": 0.05},
+    "S2": {"avg_equity_weight": 0.70, "avg_bond_weight": 0.30},
+}
+
+
+def _patch_digest_sources(
+    monkeypatch, *, strategies, blends=_FAKE_BLENDS, regime="BULL",
+):
+    """Patch every read the table makes so it sees the supplied mock
+    state. Same patches apply to compute_implied_asset_allocation (it
+    reads the strategy cache) so the table total and the helper agree
+    on the exact same inputs."""
+    from tools import email_digest, cio_recommendation, cache, \
+        precomputed_analytics
+
+    async def _fake_strategies():
+        return strategies
+
+    async def _fake_metric(kind):
+        if kind == "regime_blends":
+            return {"blends": blends}
+        return {}
+
+    async def _fake_recommendation():
+        return {"regime": regime, "confidence": {"regime": regime}}
+
+    monkeypatch.setattr(
+        cache, "get_latest_strategy_cache", _fake_strategies)
+    monkeypatch.setattr(
+        precomputed_analytics, "get_latest_metric", _fake_metric)
+    monkeypatch.setattr(
+        cio_recommendation, "get_latest_recommendation",
+        _fake_recommendation)
+    # compute_implied_asset_allocation reads via tools.cache too --
+    # the strategies patch above already covers it.
+    return email_digest
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_renders_ig_hy_split_columns(
+    monkeypatch,
+):
+    """When every strategy in the live blend carries avg_ig_weight +
+    avg_hy_weight the table renders five columns (Strategy / Weight /
+    Equity / IG Bonds / HY Bonds) and the updated footnote fires."""
+    _patch_digest_sources(
+        monkeypatch, strategies=_FAKE_STRATEGIES_FULL_SPLIT)
+    s = await _section_implied_asset_allocation()
+    assert "IG Bonds" in s.html
+    assert "HY Bonds" in s.html
+    assert "IG Bonds" in s.text
+    assert "HY Bonds" in s.text
+    # New (non-stale) footnote when IG/HY are surfacing.
+    assert "investment-grade (IG) and high-yield (HY)" in s.html
+    # Stale footnote must NOT be present.
+    assert "per-strategy IG/HY tilt is not persisted" not in s.html
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_falls_back_when_split_missing(
+    monkeypatch,
+):
+    """When at least one strategy in the live blend lacks
+    avg_ig_weight / avg_hy_weight the table falls back to the four-
+    column combined-Bonds layout and the original footnote (now
+    qualified with 'for one or more rows') fires. No crash."""
+    _patch_digest_sources(
+        monkeypatch, strategies=_FAKE_STRATEGIES_PARTIAL_SPLIT)
+    s = await _section_implied_asset_allocation()
+    # Four-column layout: no IG/HY column headers.
+    assert "IG Bonds" not in s.html
+    assert "HY Bonds" not in s.html
+    # Combined Bonds column still present.
+    assert ">Bonds<" in s.html
+    # Qualified fallback footnote -- not a stale generic one.
+    assert "combined investment-grade + high-yield" in s.html
+    assert "for one or more rows" in s.html
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_portfolio_total_matches_cio_line(
+    monkeypatch,
+):
+    """Both the table portfolio total and the CIO line consume
+    compute_implied_asset_allocation on the same regime_blends + the
+    same strategy cache, so the rendered equity / IG / HY percentages
+    must be byte-identical. This is the load-bearing reconciliation
+    test for the June 21 2026 bug -- if they ever drift again, this
+    fires."""
+    from tools.cio_recommendation import compute_implied_asset_allocation
+
+    _patch_digest_sources(
+        monkeypatch, strategies=_FAKE_STRATEGIES_FULL_SPLIT)
+
+    table = await _section_implied_asset_allocation()
+    implied = await compute_implied_asset_allocation(
+        _FAKE_BLENDS["BULL"])
+
+    # The line formats with the exact same _fmt_pct (1 decimal). Build
+    # the same string the CIO line would render and assert the table
+    # total row carries it verbatim.
+    eq_str = f"{float(implied['equity_pct']) * 100:.1f}%"
+    ig_str = f"{float(implied['ig_bond_pct']) * 100:.1f}%"
+    hy_str = f"{float(implied['hy_bond_pct']) * 100:.1f}%"
+    # The portfolio total row carries each as <b>...</b> -- match the
+    # rendered cell content directly.
+    assert f"<b>{eq_str}</b>" in table.html
+    assert f"<b>{ig_str}</b>" in table.html
+    assert f"<b>{hy_str}</b>" in table.html
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_stale_footnote_absent_when_split_renders(
+    monkeypatch,
+):
+    """The pre-#315 footnote (which claimed the IG/HY tilt is not
+    persisted to the strategy cache) is incorrect now that the cache
+    holds avg_ig_weight + avg_hy_weight. When the split columns
+    render, neither the old stand-alone footnote nor any subset of
+    its load-bearing phrase ('not persisted to the strategy cache')
+    may appear."""
+    _patch_digest_sources(
+        monkeypatch, strategies=_FAKE_STRATEGIES_FULL_SPLIT)
+    s = await _section_implied_asset_allocation()
+    assert "IG Bonds" in s.html and "HY Bonds" in s.html
+    assert "not persisted to the strategy cache" not in s.html
+    assert "not persisted to the strategy cache" not in s.text
+
+
+@pytest.mark.asyncio
+async def test_latest_cio_recommendation_renders_placeholder_on_cold_cache():
+    """Without a populated cio_recommendations table the section still
+    fires — header present, placeholder explaining the empty cache,
+    text fallback non-empty."""
+    s = await _section_latest_cio_recommendation()
+    assert s.title == "CIO recommendation"
+    assert "CIO recommendation" in s.html
+    assert ("No CIO recommendation cached" in s.html
+            or "No CIO recommendation cached" in s.text
+            or "carries no narrative text" in s.html)
+    assert s.text.strip()
+
+
+# ── Bridge (June 15 2026): restructured CIO recommendation section ───
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_renders_full_posterior_breakdown(
+    monkeypatch,
+):
+    """Block A includes the three-state posterior on the line below
+    the regime header so the reader can see whether the dominant
+    probability is overwhelming or marginal."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {
+                "regime": "TRANSITION",
+                "probability": 0.84,
+                "ess": 35.0,
+                "ess_warning": False,
+                "posterior": {
+                    "BULL": 0.05, "TRANSITION": 0.84, "BEAR": 0.11,
+                },
+            },
+            "regime": "TRANSITION",
+            "signal": "Test signal.",
+            "recommendation": "Hold the regime blend.",
+            "dissenting_view": "Test dissent.",
+            "key_risk": "Test risk.",
+            "computed_at": "2026-06-15T12:00:00+00:00",
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    # Header line carries regime + probability + "confidence" word.
+    assert "TRANSITION" in s.text
+    assert "84.0%" in s.text
+    # Posterior breakdown shows all three states in canonical order.
+    assert "BULL 5.0%" in s.text
+    assert "TRANSITION 84.0%" in s.text
+    assert "BEAR 11.0%" in s.text
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_renders_ess_warning_sub_line(monkeypatch):
+    """When ess_warning is true, an ESS note renders on its own line
+    so the reader sees the regime signal is less reliable."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {
+                "regime": "BEAR",
+                "probability": 0.70,
+                "ess": 12.5,
+                "ess_warning": True,  # the flag we're pinning
+            },
+            "regime": "BEAR",
+            "signal": "Test signal.",
+            "recommendation": "Hold defensive blend.",
+            "computed_at": "2026-06-15T12:00:00+00:00",
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert "low ESS" in s.text
+    assert "12" in s.text   # the ESS value (rounded)
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_renders_deterministic_fallback_notice(
+    monkeypatch,
+):
+    """When the LLM call failed and the deterministic fallback wrote
+    the row, a notice line appears in the digest so the reader knows
+    they're seeing a structured fallback, not a live LLM run."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {"regime": "BULL", "probability": 0.80},
+            "regime": "BULL",
+            "signal": "Fallback signal.",
+            "recommendation": "Fallback recommendation.",
+            "model": "deterministic_fallback",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert "deterministic" in s.text.lower()
+    assert "live regime unavailable" in s.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_no_posterior_does_not_crash(monkeypatch):
+    """Older cache rows may carry a confidence dict with no posterior
+    sub-dict. The digest must skip the posterior line silently rather
+    than crashing or rendering 'None'."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {
+                "regime": "BULL",
+                "probability": 0.80,
+                # No posterior key on this row.
+            },
+            "regime": "BULL",
+            "signal": "Test signal.",
+            "recommendation": "Test recommendation.",
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert s.text.strip()
+    # No 'None' or empty-posterior tokens leak into the rendered text.
+    assert "None" not in s.text
+    # The CIO recommendation header still rendered.
+    assert "BULL" in s.text
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_carries_dissenting_view_and_key_risk(
+    monkeypatch,
+):
+    """Block D surfaces the dissenting view and key risk so a reader
+    who only sees the email knows the model's strongest counter-
+    argument and the most material outcome to monitor."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {"regime": "BEAR", "probability": 0.78},
+            "regime": "BEAR",
+            "signal": "Bear signal.",
+            "recommendation": "Hold defensive blend.",
+            "dissenting_view": "The bond sleeve assumes post-2022 "
+                               "correlation does not invert further.",
+            "key_risk": "Sharp regime reversal between monthly reads.",
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert "Dissenting view:" in s.text
+    assert "bond sleeve assumes" in s.text
+    assert "Key risk:" in s.text
+    assert "Sharp regime reversal" in s.text
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_omits_limitations(monkeypatch):
+    """Per spec, the four mandatory limitations are NOT rendered in
+    the digest -- they're too verbose for email and live on the site
+    card. Pin this so a future contributor doesn't re-add them."""
+    from tools import email_digest
+
+    LIM_TEXT = (
+        "Three-asset universe constraint (equities, investment-grade "
+        "bonds, high-yield bonds only).")
+
+    async def _fake_rec():
+        return {
+            "confidence": {"regime": "BULL", "probability": 0.85},
+            "regime": "BULL",
+            "signal": "s.",
+            "recommendation": "r.",
+            "limitations": [
+                LIM_TEXT,
+                "Post-2022 sample size: 40 months.",
+            ],
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert LIM_TEXT not in s.text
+    assert "Three-asset universe" not in s.text
+
+
+@pytest.mark.asyncio
+async def test_rebalance_triggers_omits_watch_point_values(monkeypatch):
+    """The watch point VALUES moved to the CIO section (Block B). The
+    rebalance triggers section keeps the threshold LANGUAGE only -- no
+    duplication of the live numbers."""
+    from tools import email_digest
+
+    async def _fake_signals():
+        return {
+            "vix_level": 18.20,
+            "credit_spread": 2.50,
+            "yield_curve_slope": 0.30,
+            "equity_trend": 0.05,
+            "hmm_regime": "BULL",
+        }
+    monkeypatch.setattr(
+        email_digest, "_read_latest_regime_signals_for_digest",
+        _fake_signals)
+
+    s = await email_digest._section_rebalance_triggers()
+    # The pre-restructure section rendered "VIX 18.20 — sustained rise
+    # above {VIX_HIGH_THRESHOLD}..." which embedded the live value.
+    # Post-restructure it renders "VIX — sustained rise above
+    # {VIX_HIGH_THRESHOLD}..." with no live value.
+    assert "VIX 18.20" not in s.text
+    assert "Credit spread 2.50" not in s.text
+    # The threshold language still renders so the reader knows what
+    # would flip the regime. The exact threshold values come from
+    # config (VIX_HIGH_THRESHOLD etc.) -- we don't pin the numbers
+    # here so a future config change doesn't break this test.
+    assert "rise above" in s.text and "signals BEAR" in s.text
+    assert "widening above" in s.text
+    # And the live regime label "HMM regime: BULL" should NOT appear
+    # (it's in the CIO header now); only the generic state-shift
+    # phrasing remains.
+    assert "HMM regime: BULL" not in s.text
+
+
+@pytest.mark.asyncio
+async def test_rebalance_triggers_renders_placeholder_on_cold_cache():
+    """No regime_signals_cache rows + no regime_blends metric → the
+    section falls open to a placeholder. Header present, text
+    non-empty."""
+    s = await _section_rebalance_triggers()
+    assert s.title == "What would trigger a rebalance"
+    assert "What would trigger a rebalance" in s.html
+    assert ("No regime signals or blend targets" in s.html
+            or "No regime signals or blend targets" in s.text)
+
+
+# ── Bridge (June 8 2026): implied + delta lines in blend-shift rows ──
+
+@pytest.mark.asyncio
+async def test_rebalance_triggers_renders_implied_and_delta_sub_lines(
+    monkeypatch,
+):
+    """When the regime_blends metric AND the strategy cache are both
+    warm, each blend-shift row carries two sub-lines:
+      Line 1: "Equity X% | Bonds Y%" -- the regime's implied split.
+      Line 2: "vs today: Equity +/-Z.Zpp | Bonds +/-Z.Zpp" -- the
+              delta from the current portfolio in percentage points.
+
+    Test stubs the cache reads so the test stays decoupled from a
+    live cache row."""
+    from tools import email_digest
+
+    # Stub the regime_signals + regime_blends caches so the section
+    # has both signals (the live regime label) and per-regime blends.
+    async def _fake_signals():
+        return {
+            "vix_level": 18.0,
+            "credit_spread": 2.5,
+            "yield_curve_slope": 0.3,
+            "equity_trend": 0.05,
+            "hmm_regime": "BULL",     # live regime label
+        }
+
+    async def _fake_metric(kind):
+        if kind == "regime_blends":
+            return {
+                "blends": {
+                    # BULL is the live regime -> drives current_implied.
+                    # BULL = 50/50 DYN/STAT
+                    "BULL": {"DYN": 0.5, "STAT": 0.5},
+                    # BEAR shifts much more defensive
+                    "BEAR": {"DYN": 0.0, "STAT": 1.0},
+                }
+            }
+        return None
+
+    async def _fake_strategy_cache():
+        return {
+            "DYN":  {"avg_equity_weight": 1.00,
+                     "avg_bond_weight":   0.00},   # 100% equity
+            "STAT": {"avg_equity_weight": 0.00,
+                     "avg_bond_weight":   1.00},   # 100% bond
+        }
+
+    monkeypatch.setattr(
+        email_digest, "_read_latest_regime_signals_for_digest",
+        _fake_signals)
+    # get_latest_metric is imported lazily INSIDE the function from
+    # tools.precomputed_analytics; patch it at its source.
+    monkeypatch.setattr(
+        "tools.precomputed_analytics.get_latest_metric", _fake_metric)
+    monkeypatch.setattr(
+        "tools.cache.get_latest_strategy_cache", _fake_strategy_cache)
+
+    s = await _section_rebalance_triggers()
+    # The implied line for BULL (50/50 DYN/STAT) -> 50% equity,
+    # 50% bond. The implied line for BEAR (100% STAT) -> 0% equity,
+    # 100% bond.
+    assert "Equity 50.0% | Bonds 50.0%" in s.text
+    assert "Equity 0.0% | Bonds 100.0%" in s.text
+    # Delta: live regime is BULL with current 50/50; BEAR shift to
+    # 0% equity / 100% bond is -50pp / +50pp.
+    assert "Equity -50.0pp | Bonds +50.0pp" in s.text
+    # The BULL row's delta is 0 since it IS the current regime.
+    assert "Equity +0.0pp | Bonds +0.0pp" in s.text
+
+
+def test_truncate_to_word_cap_below_cap_returns_unchanged():
+    text = "one two three"
+    assert _truncate_to_word_cap(text, 5) == text
+
+
+def test_truncate_to_word_cap_above_cap_truncates_with_ellipsis():
+    text = "one two three four five six"
+    out = _truncate_to_word_cap(text, 3)
+    # First three words, ellipsis at the end.
+    assert out.startswith("one two three")
+    assert out.endswith("…")
+    # Original five-word remainder is gone.
+    assert "four" not in out
+
+
+def test_truncate_to_word_cap_exact_cap_returns_unchanged():
+    text = "one two three"
+    # When count == cap, no truncation — same string back.
+    assert _truncate_to_word_cap(text, 3) == text
+
+
+def test_truncate_to_word_cap_empty_input():
+    assert _truncate_to_word_cap("", 3) == ""
+
+
+@pytest.mark.asyncio
+async def test_build_digest_includes_three_new_section_titles():
+    """The top-level build still works after wiring three new sections.
+    All three titles appear in the assembled HTML; the morning skim
+    sees them at the TOP, not buried below the ops content. A blank
+    cache renders placeholders, not skipped sections.
+
+    Ordering contract (June 6 2026 reorder per operator request):
+    CIO recommendation -> Implied asset allocation -> Rebalance
+    triggers all precede Platform health / Releases / Warm history /
+    Open work so the morning skim sees the allocation decision first.
+    """
+    subject, html, text = await build_digest_email()
+    assert "Implied asset allocation" in html
+    assert "CIO recommendation" in html
+    assert "What would trigger a rebalance" in html
+    # Text fallback carries the same three.
+    assert "IMPLIED ASSET ALLOCATION" in text
+    assert "CIO RECOMMENDATION" in text
+    assert "WHAT WOULD TRIGGER A REBALANCE" in text
+    # Primary ordering contract: the three decision sections lead the
+    # digest, with the analytics-triplet appearing BEFORE platform
+    # health, warm history, and open work.
+    html_lc = html.lower()
+    cio_idx = html_lc.index("cio recommendation")
+    blend_idx = html_lc.index("implied asset allocation")
+    trigger_idx = html_lc.index("what would trigger a rebalance")
+    health_idx = html_lc.index("platform health")
+    warm_idx = html_lc.index("warm history")
+    open_idx = html_lc.index("open work")
+    # Decision triplet appears in the named order at the top.
+    assert cio_idx < blend_idx < trigger_idx
+    # Decision triplet precedes the ops sections.
+    assert trigger_idx < health_idx
+    assert trigger_idx < warm_idx
+    assert trigger_idx < open_idx
+
+
+@pytest.mark.asyncio
+async def test_digest_section_order_bridge_84():
+    """Bridge #84: the Analytics snapshot (current regime, live blend
+    weights, OOS Sharpe) is operationally critical and must appear
+    immediately after the rebalance-triggers block -- BEFORE platform
+    health, NOT below release history. Release history / commit
+    summaries are useful as a "what shipped" footer and must sit at
+    the bottom of the digest.
+
+    The previous order tucked Analytics snapshot below the Releases
+    block, so the morning operator's most decision-relevant numbers
+    appeared after the cosmetic "what shipped" list."""
+    _, html, text = await build_digest_email()
+    html_lc = html.lower()
+
+    trigger_idx = html_lc.index("what would trigger a rebalance")
+    analytics_idx = html_lc.index("analytics snapshot")
+    health_idx = html_lc.index("platform health")
+    releases_idx = html_lc.index("platform releases")
+    open_idx = html_lc.index("open work")
+
+    # Bridge #84 contract: Analytics snapshot moves UP -- it sits
+    # immediately after the rebalance trigger and BEFORE the platform
+    # health block.
+    assert trigger_idx < analytics_idx, (
+        "Analytics snapshot must follow the rebalance trigger.")
+    assert analytics_idx < health_idx, (
+        "Analytics snapshot must precede platform health.")
+
+    # Bridge #84 contract: Releases moves DOWN to the bottom -- below
+    # platform health, below the analytics snapshot, below open work.
+    assert releases_idx > analytics_idx, (
+        "Releases must NOT appear above the analytics snapshot.")
+    assert releases_idx > health_idx, (
+        "Releases must NOT appear above the platform health block.")
+    assert releases_idx > open_idx, (
+        "Releases must sit at the bottom -- below open work.")
+
+    # Text fallback carries the same ordering -- the contract is
+    # presentation-agnostic so an operator using a plain-text client
+    # sees the same priority.
+    text_lc = text.lower()
+    text_trigger = text_lc.index("what would trigger a rebalance")
+    text_analytics = text_lc.index("analytics snapshot")
+    text_health = text_lc.index("platform health")
+    text_releases = text_lc.index("platform releases")
+    assert text_trigger < text_analytics < text_health
+    assert text_releases > text_analytics
+    assert text_releases > text_health

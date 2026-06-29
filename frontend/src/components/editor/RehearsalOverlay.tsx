@@ -398,13 +398,33 @@ function SlidePanel(
               height: CANVAS_HEIGHT * scale,
               background: slide.background || '#FFFFFF',
             }}>
-            {slide.elements.map((el) => (el.type === 'text'
-              ? <RehearsalText key={el.id} el={el} scale={scale} />
-              : <RehearsalChart key={el.id}
+            {slide.elements.map((el) => {
+              if (el.type === 'text') {
+                return <RehearsalText key={el.id} el={el}
+                                      scale={scale} />
+              }
+              if (el.type === 'chart') {
+                return <RehearsalChart key={el.id}
                   chartKey={el.chartKey}
                   state={charts[el.chartKey]}
                   x={el.x * scale} y={el.y * scale}
-                  w={el.width * scale} h={el.height * scale} />))}
+                  w={el.width * scale} h={el.height * scale} />
+              }
+              // June 26 2026 -- new 'table' element type
+              // renders as a dashed-border placeholder in
+              // rehearsal mode (presenters rehearse delivery,
+              // not table content).
+              return (
+                <div key={el.id} style={{
+                  position: 'absolute',
+                  left: el.x * scale, top: el.y * scale,
+                  width: el.width * scale,
+                  height: el.height * scale,
+                  border: '1px dashed #94A3B8',
+                  background: 'rgba(241, 245, 249, 0.6)',
+                }} />
+              )
+            })}
           </div>
         ) : (
           <p className="text-muted text-xs italic">

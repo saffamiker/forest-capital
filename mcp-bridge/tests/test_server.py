@@ -118,6 +118,88 @@ def test_rest_status_includes_worker_flag(cfg):
     assert body["worker_enabled"] is False  # default off
 
 
+# ── /admin/purge-queue (June 3 2026) ───────────────────────────────────────
+
+
+def test_purge_queue_requires_token(cfg):
+    """Same auth gate as every other operator endpoint — without the
+    bearer token the route 401s. The purge changes queue state so it
+    cannot be public even on localhost."""
+    client = _client(cfg)
+    r = client.post("/admin/purge-queue")
+    assert r.status_code == 401
+
+
+def test_purge_queue_with_wrong_token_returns_401(cfg):
+    client = _client(cfg)
+    r = client.post(
+        "/admin/purge-queue",
+        headers={"Authorization": "Bearer not-the-right-token"})
+    assert r.status_code == 401
+
+
+def test_purge_queue_cancels_pending_rows_and_returns_count(cfg):
+    """The endpoint runs the queue purge and returns the count of
+    rows cancelled plus a fresh status snapshot — one round-trip
+    confirms the action landed."""
+    client = _client(cfg)
+    # Seed two pending prompts.
+    for _ in range(2):
+        r = client.post(
+            "/push", json={"prompt": "x"}, headers=_auth(cfg))
+        assert r.status_code == 200
+    # Purge.
+    r = client.post("/admin/purge-queue", headers=_auth(cfg))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cancelled"] == 2
+    # The snapshot in the response shows the post-purge state — no
+    # second round-trip needed.
+    assert body["snapshot"]["counts"].get("cancelled") == 2
+    assert body["snapshot"]["counts"].get("pending", 0) == 0
+
+
+def test_purge_queue_idempotent_on_empty_queue(cfg):
+    """A purge against an empty queue is a clean no-op — returns 0,
+    never raises. Lets operator scripts retry safely."""
+    client = _client(cfg)
+    r = client.post("/admin/purge-queue", headers=_auth(cfg))
+    assert r.status_code == 200
+    assert r.json()["cancelled"] == 0
+
+
+def test_purge_queue_preserves_terminal_rows(cfg):
+    """Completed rows are part of the audit trail — the endpoint
+    must NOT touch them. Only in-flight (pending/running) rows
+    flip to cancelled."""
+    client = _client(cfg)
+    # Push + complete a row through the queue API directly.
+    push = client.post(
+        "/push", json={"prompt": "done"}, headers=_auth(cfg))
+    pid = push.json()["prompt_id"]
+    # Drive it to complete via the queue (no public REST drain step,
+    # so reach in via the app's queue handle the same way the worker
+    # does).
+    from mcp_bridge.server import create_app
+    app = create_app(cfg)
+    app.state.queue.claim_next("worker")
+    app.state.queue.post_result(pid, result="ok")
+    # Push one more — that becomes the pending row.
+    client_two = _client(cfg)
+    client_two.post(
+        "/push", json={"prompt": "pending"}, headers=_auth(cfg))
+    r = client_two.post(
+        "/admin/purge-queue", headers=_auth(cfg))
+    body = r.json()
+    # The completed row from BEFORE the second client + the new
+    # pending row from the second client share the same on-disk
+    # SQLite db (cfg.db_path is shared), so we expect cancelled=1
+    # — the new pending row — and complete >= 1 untouched.
+    assert body["cancelled"] == 1
+    counts = body["snapshot"]["counts"]
+    assert counts.get("complete", 0) >= 1
+
+
 # ── MCP tools: each method end to end ──────────────────────────────────────
 
 
@@ -271,3 +353,368 @@ def test_status_method_reports_queue_counts(cfg):
     assert counts["pending"] == 3
     assert counts["running"] == 0
     assert counts["complete"] == 0
+
+
+# ── MCP lifecycle handshake ─────────────────────────────────────────────────
+#
+# Claude.ai's "Add Custom Connector" conversation toggle (Anthropic/
+# Toolbox 1.0.0) runs three JSON-RPC calls in order:
+#   1. initialize                     — server returns handshake info
+#   2. notifications/initialized      — client ACK, server replies 202
+#   3. tools/list                     — server returns the tool catalog
+# All three must succeed for the toggle to flip from "couldn't
+# connect" to ON. These tests pin the contract.
+
+
+def test_initialize_returns_protocol_version_capabilities_and_serverinfo(cfg):
+    """The `initialize` response is the spec'd shape: protocolVersion
+    echoed back, tools capability advertised, serverInfo carrying the
+    bridge's name + version."""
+    client = _client(cfg)
+    r = client.post(
+        "/mcp", headers={**_auth(cfg),
+                         "User-Agent": "Anthropic/Toolbox 1.0.0"},
+        json=_rpc("initialize", {
+            "protocolVersion": "2025-11-25",
+            "capabilities":    {},
+            "clientInfo":      {"name": "Anthropic/Toolbox"},
+        }))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 1
+    result = body["result"]
+    assert result["protocolVersion"] == "2025-11-25"
+    assert result["capabilities"] == {"tools": {}}
+    assert result["serverInfo"]["name"] == "mcp-bridge"
+    # The bridge ships its version in mcp_bridge/__init__.py; whatever
+    # that string is, it must surface here as a non-empty value so the
+    # client knows what server it's talking to.
+    assert isinstance(result["serverInfo"]["version"], str)
+    assert result["serverInfo"]["version"]
+
+
+def test_notifications_initialized_returns_empty_202(cfg):
+    """`notifications/initialized` is a JSON-RPC NOTIFICATION (no id).
+    The server MUST NOT respond with a JSON-RPC envelope. We return
+    HTTP 202 with a zero-byte body — a strict client would reject a
+    `null`-bodied response as a malformed envelope."""
+    client = _client(cfg)
+    r = client.post(
+        "/mcp", headers=_auth(cfg),
+        json={
+            "jsonrpc": "2.0",
+            "method":  "notifications/initialized",
+            "params":  {},
+        })
+    assert r.status_code == 202
+    # Zero-byte body — not the literal "null".
+    assert r.content == b""
+
+
+def test_unknown_notification_is_silently_accepted(cfg):
+    """JSON-RPC 2.0: a server SHOULD silently ignore unknown
+    notifications. The bridge returns 202 with an empty body and
+    leaves a diagnostic log line behind (covered by the diagnostic
+    logging contract, not this test)."""
+    client = _client(cfg)
+    r = client.post(
+        "/mcp", headers=_auth(cfg),
+        json={
+            "jsonrpc": "2.0",
+            "method":  "notifications/some_future_method",
+            "params":  {},
+        })
+    assert r.status_code == 202
+    assert r.content == b""
+
+
+def test_tools_list_surfaces_four_tools_with_input_schemas(cfg):
+    """`tools/list` returns the four bridge tools in MCP shape:
+      push_prompt — prompt:str (required), session_id:str (optional)
+      get_result  — prompt_id:str (required)
+      status      — no params
+      claim_next  — no params (June 4 2026 — exposes the existing
+                    _h_claim_next handler so Claude Code can pull
+                    pending prompts when worker dispatch is unreliable)
+
+    The names, descriptions, and required-field sets are pinned here
+    because Claude.ai's UI surfaces them verbatim and a silent rename
+    would break the user's saved tool toggles."""
+    client = _client(cfg)
+    r = client.post("/mcp", json=_rpc("tools/list", {}, req_id=2),
+                     headers=_auth(cfg))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 2
+    tools = body["result"]["tools"]
+    assert isinstance(tools, list)
+    assert len(tools) == 4
+
+    by_name = {t["name"]: t for t in tools}
+    assert set(by_name) == {
+        "push_prompt", "get_result", "status", "claim_next"}
+
+    push = by_name["push_prompt"]
+    assert "Push a prompt" in push["description"]
+    assert push["inputSchema"]["type"] == "object"
+    assert push["inputSchema"]["properties"]["prompt"]["type"] == "string"
+    assert (push["inputSchema"]["properties"]["session_id"]["type"]
+            == "string")
+    assert push["inputSchema"]["required"] == ["prompt"]
+
+    get_r = by_name["get_result"]
+    assert "Get the result" in get_r["description"]
+    assert (get_r["inputSchema"]["properties"]["prompt_id"]["type"]
+            == "string")
+    assert get_r["inputSchema"]["required"] == ["prompt_id"]
+
+    st = by_name["status"]
+    assert "queue status" in st["description"]
+    assert st["inputSchema"] == {"type": "object", "properties": {}}
+
+    cn = by_name["claim_next"]
+    assert "Claim the next pending prompt" in cn["description"]
+    # No params required — handler defaults claimed_by="live".
+    assert cn["inputSchema"] == {"type": "object", "properties": {}}
+
+
+# ── tools/call — the MCP invocation path ────────────────────────────────────
+
+
+import json as _json  # local alias — keeps the existing _rpc helper isolated
+
+
+def _tools_call(client, cfg, name, arguments=None, rid=10):
+    """Helper — sends a tools/call request and returns the parsed body."""
+    return client.post(
+        "/mcp", headers=_auth(cfg),
+        json=_rpc("tools/call",
+                   {"name": name, "arguments": arguments or {}},
+                   req_id=rid)).json()
+
+
+def test_tools_call_push_prompt_returns_mcp_content_envelope(cfg):
+    """tools/call wraps the underlying handler's dict in the MCP
+    content envelope: {content: [{type: 'text', text: <JSON string>}]}.
+    Claude.ai's LLM parses the text JSON to extract structured fields."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "push_prompt",
+                       {"prompt": "hello from claude.ai"}, rid=20)
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 20
+    content = body["result"]["content"]
+    assert isinstance(content, list)
+    assert len(content) == 1
+    assert content[0]["type"] == "text"
+    parsed = _json.loads(content[0]["text"])
+    assert parsed["status"] == "pending"
+    assert isinstance(parsed["prompt_id"], int)
+
+
+def test_tools_call_get_result_coerces_string_prompt_id(cfg):
+    """tools/list advertises get_result.prompt_id as `string` per the
+    user spec, but the underlying _h_get_result expects int. The
+    tools/call dispatcher coerces digit-string → int so the schema
+    Claude.ai sees and the handler the CLI uses stay reconciled."""
+    client = _client(cfg)
+    # Push first so we have a real id to fetch.
+    push = _tools_call(client, cfg, "push_prompt",
+                       {"prompt": "for coercion"}, rid=21)
+    pid = _json.loads(push["result"]["content"][0]["text"])["prompt_id"]
+
+    body = _tools_call(client, cfg, "get_result",
+                       {"prompt_id": str(pid)}, rid=22)
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed["id"] == pid
+    assert parsed["prompt"] == "for coercion"
+    assert parsed["status"] == "pending"
+
+
+def test_tools_call_get_result_also_accepts_int_prompt_id(cfg):
+    """The coercion is one-way (string → int). An int passed
+    directly must still work — the CLI / mobile path has always
+    called with int and that contract is unchanged."""
+    client = _client(cfg)
+    push = _tools_call(client, cfg, "push_prompt",
+                       {"prompt": "native int path"}, rid=23)
+    pid = _json.loads(push["result"]["content"][0]["text"])["prompt_id"]
+
+    body = _tools_call(client, cfg, "get_result",
+                       {"prompt_id": pid}, rid=24)
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed["id"] == pid
+
+
+def test_tools_call_status_returns_queue_snapshot(cfg):
+    """No-argument tool. The status snapshot lands JSON-stringified
+    in the content envelope."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "status", {}, rid=25)
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed["alive"] is True
+    assert "counts" in parsed
+    assert parsed["worker_enabled"] is False
+
+
+def test_tools_call_unknown_tool_returns_invalid_params(cfg):
+    """An unknown tool name surfaces as a JSON-RPC invalid_params
+    error (-32602). Claude.ai handles that as a tool-call failure
+    rather than a transport-level error."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "frobnicate", {}, rid=26)
+    assert "error" in body
+    assert body["error"]["code"] == -32602
+    # The error message names the tool that was attempted AND lists
+    # what is known — useful in the bridge log + in Claude.ai's
+    # surfaced error pane.
+    assert "frobnicate" in body["error"]["message"]
+    assert "push_prompt" in body["error"]["message"]
+
+
+# ── claim_next via tools/call (June 4 2026) ────────────────────────────────
+
+
+def test_tools_call_claim_next_returns_pending_prompt(cfg):
+    """tools/call claim_next returns the oldest pending prompt's full
+    row under the `prompt` key. CC reads prompt_id from
+    result.prompt.id and the actual content from result.prompt.prompt.
+    This is the path that replaces unreliable worker dispatch."""
+    client = _client(cfg)
+    # Seed one pending prompt via the queue API.
+    push = _tools_call(client, cfg, "push_prompt",
+                       {"prompt": "actively pull me"}, rid=30)
+    pushed_id = _json.loads(push["result"]["content"][0]["text"])["prompt_id"]
+
+    body = _tools_call(client, cfg, "claim_next", {}, rid=31)
+    assert "error" not in body
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed["prompt"] is not None
+    assert parsed["prompt"]["id"] == pushed_id
+    assert parsed["prompt"]["prompt"] == "actively pull me"
+    # Row transitions to 'running' the moment it's claimed — same
+    # contract every other consumer of Queue.claim_next relies on.
+    assert parsed["prompt"]["status"] == "running"
+    # claimed_by defaults to "live" since the schema declares no args.
+    assert parsed["prompt"]["claimed_by"] == "live"
+
+
+def test_tools_call_claim_next_returns_null_on_empty_queue(cfg):
+    """An empty queue returns {prompt: null} — Claude Code reads this
+    as 'nothing to do' and stays idle. Never raises."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "claim_next", {}, rid=32)
+    assert "error" not in body
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed == {"prompt": None}
+
+
+def test_tools_call_claim_next_is_atomic(cfg):
+    """Two back-to-back tools/call claim_next invocations against a
+    single pending row — the FIRST claims, the SECOND sees an empty
+    queue. The atomicity contract Queue.claim_next holds for the
+    direct-method path holds for tools/call too because tools/call
+    dispatches to the same handler."""
+    client = _client(cfg)
+    _tools_call(client, cfg, "push_prompt",
+                {"prompt": "single row"}, rid=33)
+    first = _tools_call(client, cfg, "claim_next", {}, rid=34)
+    second = _tools_call(client, cfg, "claim_next", {}, rid=35)
+    first_payload = _json.loads(first["result"]["content"][0]["text"])
+    second_payload = _json.loads(second["result"]["content"][0]["text"])
+    assert first_payload["prompt"] is not None
+    assert second_payload["prompt"] is None
+
+
+def test_tools_call_missing_name_returns_error(cfg):
+    client = _client(cfg)
+    body = client.post("/mcp", headers=_auth(cfg),
+                        json=_rpc("tools/call",
+                                  {"arguments": {}}, req_id=27)).json()
+    assert "error" in body
+    assert body["error"]["code"] == -32602
+
+
+def test_tools_call_missing_required_argument_surfaces_handler_error(cfg):
+    """The underlying handler's validation (push_prompt requires a
+    non-empty `prompt`) propagates through tools/call as a JSON-RPC
+    error — the dispatcher's `except ValueError` arm catches it."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "push_prompt", {}, rid=28)
+    assert "error" in body
+    assert body["error"]["code"] == -32602
+    assert "prompt" in body["error"]["message"].lower()
+
+
+def test_tools_list_then_tools_call_round_trip(cfg):
+    """End-to-end: list the tools, then invoke each one. This is the
+    flow Claude.ai runs after a successful initialize handshake."""
+    client = _client(cfg)
+    auth = _auth(cfg)
+    listed = client.post(
+        "/mcp", headers=auth,
+        json=_rpc("tools/list", {}, req_id=30)).json()
+    names = [t["name"] for t in listed["result"]["tools"]]
+    assert set(names) == {
+        "push_prompt", "get_result", "status", "claim_next"}
+
+    # Every advertised tool answers a tools/call invocation without
+    # a JSON-RPC error. claim_next is exercised LAST so its claim
+    # doesn't mark the row pushed for the get_result roundtrip as
+    # 'running' before get_result fetches it.
+    ordered = ["push_prompt", "get_result", "status", "claim_next"]
+    for i, name in enumerate(ordered, start=31):
+        # Minimal viable arguments per tool.
+        if name == "push_prompt":
+            args = {"prompt": "roundtrip"}
+        elif name == "get_result":
+            # Need a real id — push first.
+            push = _tools_call(client, cfg, "push_prompt",
+                               {"prompt": "roundtrip-target"}, rid=100)
+            pid = _json.loads(
+                push["result"]["content"][0]["text"])["prompt_id"]
+            args = {"prompt_id": str(pid)}
+        else:
+            # status + claim_next both take no required args.
+            args = {}
+        body = _tools_call(client, cfg, name, args, rid=i)
+        assert "error" not in body, f"tools/call {name} failed: {body}"
+        assert body["result"]["content"][0]["type"] == "text"
+
+
+def test_full_handshake_then_existing_tool_still_works(cfg):
+    """End-to-end: run the three lifecycle calls in order, then prove
+    the existing direct-method dispatch is untouched. This is the
+    contract the user spec'd — the handshake adds new behaviour
+    'alongside the existing push_prompt / get_result / status tool
+    handlers' — those keep working unchanged."""
+    client = _client(cfg)
+    auth = _auth(cfg)
+
+    init = client.post("/mcp", headers=auth, json=_rpc(
+        "initialize", {"protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "Anthropic/Toolbox"}}))
+    assert init.status_code == 200
+    assert init.json()["result"]["protocolVersion"] == "2025-11-25"
+
+    ack = client.post(
+        "/mcp", headers=auth,
+        json={"jsonrpc": "2.0",
+              "method": "notifications/initialized", "params": {}})
+    assert ack.status_code == 202
+    assert ack.content == b""
+
+    listed = client.post("/mcp", headers=auth,
+                         json=_rpc("tools/list", {}, req_id=2))
+    assert listed.status_code == 200
+    assert len(listed.json()["result"]["tools"]) == 4
+
+    # The direct-method path the local CLI and the mobile relay
+    # already use is unchanged.
+    pushed = client.post("/mcp", headers=auth, json=_rpc(
+        "push_prompt", {"prompt": "post-handshake test"}))
+    assert pushed.status_code == 200
+    assert "result" in pushed.json()
+    assert pushed.json()["result"]["status"] == "pending"

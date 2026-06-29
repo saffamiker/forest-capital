@@ -116,6 +116,47 @@ dual-dissenter caveat). Use bullet lists where appropriate. A wall of \
 unstructured prose reads as unfinished — every council response must be \
 scannable.
 
+MANDATORY THREE-SECTION TRANSPARENCY STRUCTURE FOR STRATEGY-RECOMMENDATION \
+RESPONSES. The academic panel cited "black box" reasoning as a weakness; this \
+structure makes the per-strategy decision auditable. Every strategy-recommendation \
+response MUST open with three named sections in this exact order, before any \
+free-form narrative:
+
+`### A. Signal snapshot`
+The three most important regime signals driving the current blend. ONE \
+bullet per signal. Each bullet MUST include the actual value AND a directional \
+verb (tightening / widening / rising / falling / steepening / inverting) AND \
+the analytical implication in one sentence. Example: `**Credit spread 2.72** — \
+tightening from 3.1 over the last 30 days, signals reduced stress but not full \
+risk-on.` Three bullets. No more, no less. Pick the three highest-information \
+signals for THIS regime; do not default to a fixed list.
+
+`### B. Weight justification`
+ONE bullet per strategy in the recommended blend. Each MUST name the strategy, \
+its weight, its regime-conditional Sharpe in the current regime, AND its Sharpe \
+in at least one ALTERNATIVE regime so the reader sees why this strategy carries \
+weight HERE specifically. Example: `**Min Variance 40%** — TRANSITION-regime \
+Sharpe 0.71 leads all strategies in this regime; its BULL-regime Sharpe of 0.52 \
+falls behind Momentum (1.04), so the weight is regime-driven, not absolute.` \
+Cover every non-zero strategy in the blend.
+
+`### C. Shift narrative` (CONDITIONAL — only when a prior_recommendation field \
+is present in the data block)
+What changed since the prior recommendation and why the blend moved. State \
+the prior blend, the current blend, name the specific signal value that \
+shifted (with old and new value), and connect it to the weight change. \
+Example: `Previous blend: 35/45/20 under TRANSITION. Current: 30/50/20 under \
+TRANSITION. **Min Variance +5pp** because VIX rose from 13.2 to 16.1 (current \
+page_context vs prior signal_text), indicating elevated uncertainty consistent \
+with late TRANSITION.` If no prior_recommendation field is present, OMIT \
+Section C entirely — do not invent a comparison.
+
+These three sections come BEFORE the existing 7-step strategy template. The 7-step \
+template still runs (Gemini engagement, Grok engagement, dual-dissenter caveat, \
+recommended-and-not-recommended strategies, primary recommendation, key risk) but \
+AFTER A / B / (C). META questions (peer-reviewer anticipation, framing) skip the \
+A/B/C structure entirely — those are not strategy recommendations.
+
 VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
 rolling_correlation, cumulative_returns, regime_signals, \
 regime_conditional_returns, factor_loadings, rolling_excess_return. Use \
@@ -182,6 +223,9 @@ class CIO:
         query: str,
         strategy_results: dict[str, Any],
         history: dict[str, Any] | None = None,
+        *,
+        live_context: dict[str, Any] | None = None,
+        prior_recommendation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Runs the full council deliberation and returns a CouncilDebateResponse.
@@ -197,6 +241,16 @@ class CIO:
             query:            The user's portfolio analysis question.
             strategy_results: All 10 strategy results from run_all_strategies().
             history:          Full history dict — enables FI correlation analysis.
+            live_context:     Page-scoped or question-bundle context dict
+                              (PR #229 / PR #262). Threaded into the draft
+                              consensus + synthesis prompts as the
+                              `page_context` block. Optional — None matches
+                              the pre-PR-229 behaviour exactly.
+                              June 3 2026 — the streaming variant has
+                              accepted this since PR #229; bringing the
+                              sync path in line so the baseline-capture
+                              script measures apples-to-apples against
+                              the production stream.
         """
         # Phase timing — every log line carries elapsed= seconds since the
         # deliberation began. When a council 502s on Render the last
@@ -234,7 +288,9 @@ class CIO:
             # line (CI catch May 23 2026).
             return self._deliberate_inner(
                 query, strategy_results, history,
-                deliberation_start=deliberation_start)
+                deliberation_start=deliberation_start,
+                live_context=live_context,
+                prior_recommendation=prior_recommendation)
         finally:
             clear_active_strategies()
 
@@ -245,6 +301,8 @@ class CIO:
         history: dict[str, Any] | None = None,
         *,
         deliberation_start: float | None = None,
+        live_context: dict[str, Any] | None = None,
+        prior_recommendation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The original deliberation body — wrapped by deliberate()
         so the per-request strategy-context ContextVar is set up
@@ -253,7 +311,11 @@ class CIO:
         deliberation_start — forwarded from deliberate() so the
         elapsed= phase-timing log lines below reference the same
         wall-clock anchor the outer wrapper opened with. Defaults
-        to time.time() when called directly (test paths)."""
+        to time.time() when called directly (test paths).
+
+        live_context — page-scoped or question-bundle context dict
+        (PR #229 / PR #262). Threaded into _compile_draft_consensus
+        and _synthesise as the `page_context` block."""
         if deliberation_start is None:
             deliberation_start = time.time()
         # Step 1-5: Brief the four specialists IN PARALLEL. Each .analyse()
@@ -312,18 +374,24 @@ class CIO:
 
         # Step 6: Compile draft consensus — CIO summarises specialist views
         draft_consensus = self._compile_draft_consensus(
-            query, equity_report, fi_report, risk_report, quant_report, strategy_results
+            query, equity_report, fi_report, risk_report, quant_report,
+            strategy_results, live_context=live_context,
         )
 
         # Step 7-8: dissent — Gemini (blind spots) + Grok (stress test).
         # Both run before synthesis so the CIO sees both critiques together
-        # and can flag concerns raised by both as hard caveats.
+        # and can flag concerns raised by both as hard caveats. Each
+        # dissenter now receives live_context so its objections ground in
+        # the same regime / blend / posterior snapshot the CIO consumes
+        # rather than reverse-engineering from the council prose.
         _tag_agent("independent_analyst")
-        gemini_report = self._gemini.challenge(draft_consensus, strategy_results)
+        gemini_report = self._gemini.challenge(
+            draft_consensus, strategy_results, live_context=live_context)
         log.info("gemini_challenge_received",
                  elapsed=round(time.time() - deliberation_start, 2))
         _tag_agent("contrarian_analyst")
-        grok_report = self._grok.challenge(draft_consensus, strategy_results)
+        grok_report = self._grok.challenge(
+            draft_consensus, strategy_results, live_context=live_context)
         log.info("grok_challenge_received",
                  elapsed=round(time.time() - deliberation_start, 2))
 
@@ -339,6 +407,8 @@ class CIO:
             risk_report,
             quant_report,
             strategy_results,
+            live_context=live_context,
+            prior_recommendation=prior_recommendation,
         )
 
         log.info("council_deliberation_complete",
@@ -365,6 +435,8 @@ class CIO:
         query: str,
         strategy_results: dict[str, Any],
         history: dict[str, Any] | None = None,
+        live_context: dict[str, Any] | None = None,
+        prior_recommendation: dict[str, Any] | None = None,
     ) -> Iterator[tuple[str, Any, ...]]:
         """
         Phase-by-phase generator variant of deliberate().
@@ -459,19 +531,23 @@ class CIO:
         _tag_agent("cio")
         draft_consensus = self._compile_draft_consensus(
             query, equity_report, fi_report, risk_report, quant_report,
-            strategy_results,
+            strategy_results, live_context=live_context,
         )
         yield ("draft_ready", draft_consensus)
 
-        # Phases 3 + 4: dissent (Gemini, then Grok)
+        # Phases 3 + 4: dissent (Gemini, then Grok). Both receive
+        # live_context so objections ground in the same regime / blend
+        # snapshot the CIO consumes.
         _tag_agent("independent_analyst")
-        gemini_report = self._gemini.challenge(draft_consensus, strategy_results)
+        gemini_report = self._gemini.challenge(
+            draft_consensus, strategy_results, live_context=live_context)
         log.info("gemini_challenge_received",
                  elapsed=round(time.time() - deliberation_start, 2))
         yield ("dissent_complete", "gemini", gemini_report)
 
         _tag_agent("contrarian_analyst")
-        grok_report = self._grok.challenge(draft_consensus, strategy_results)
+        grok_report = self._grok.challenge(
+            draft_consensus, strategy_results, live_context=live_context)
         log.info("grok_challenge_received",
                  elapsed=round(time.time() - deliberation_start, 2))
         yield ("dissent_complete", "grok", grok_report)
@@ -483,7 +559,8 @@ class CIO:
         cio_synthesis = self._synthesise(
             query, draft_consensus, gemini_report, grok_report,
             equity_report, fi_report, risk_report, quant_report,
-            strategy_results,
+            strategy_results, live_context=live_context,
+            prior_recommendation=prior_recommendation,
         )
         synthesis_text = (
             cio_synthesis.get("technical_findings", {})
@@ -520,6 +597,7 @@ class CIO:
         risk_report: dict[str, Any],
         quant_report: dict[str, Any],
         strategy_results: dict[str, Any],
+        live_context: dict[str, Any] | None = None,
     ) -> str:
         """
         Asks Opus to synthesise the four specialist reports into a draft.
@@ -532,27 +610,30 @@ class CIO:
         significant = self._get_significant(strategy_results)
         n_sig = len(significant)
 
-        context = json.dumps(
-            {
-                "query": query,
-                "significant_strategies": significant,
-                "equity_summary": equity_report.get("summary", ""),
-                "fi_summary": fi_report.get("summary", ""),
-                "risk_summary": risk_report.get("summary", ""),
-                "quant_summary": quant_report.get("summary", ""),
-                "risk_technical": {
-                    k: v
-                    for k, v in risk_report.get("technical_findings", {}).items()
-                    if k in ("n_strategies_significant", "significant_strategies",
-                             "worst_drawdown", "best_sharpe")
-                },
-                "fi_correlation": fi_report.get("technical_findings", {}).get(
-                    "breakdown_detected"
-                ),
+        context_block: dict[str, Any] = {
+            "query": query,
+            "significant_strategies": significant,
+            "equity_summary": equity_report.get("summary", ""),
+            "fi_summary": fi_report.get("summary", ""),
+            "risk_summary": risk_report.get("summary", ""),
+            "quant_summary": quant_report.get("summary", ""),
+            "risk_technical": {
+                k: v
+                for k, v in risk_report.get("technical_findings", {}).items()
+                if k in ("n_strategies_significant", "significant_strategies",
+                         "worst_drawdown", "best_sharpe")
             },
-            indent=2,
-            default=str,
-        )
+            "fi_correlation": fi_report.get("technical_findings", {}).get(
+                "breakdown_detected"
+            ),
+        }
+        # page_context — the live cached data for the page the question was
+        # asked from (recommendation / performance / prediction). Present
+        # only when the request carried a context_scope; otherwise omitted
+        # and the draft is unchanged from the pre-scope behaviour.
+        if live_context:
+            context_block["page_context"] = live_context
+        context = json.dumps(context_block, indent=2, default=str)
 
         user_message = (
             f"Based on these specialist reports, compile a draft consensus "
@@ -588,6 +669,8 @@ class CIO:
         risk_report: dict[str, Any],
         quant_report: dict[str, Any],
         strategy_results: dict[str, Any],
+        live_context: dict[str, Any] | None = None,
+        prior_recommendation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Final CIO synthesis — engages with both Gemini and Grok before recommending.
@@ -596,6 +679,12 @@ class CIO:
         specialist data simultaneously. Any concern raised by BOTH dissenters
         is flagged as a hard caveat. Single-dissenter concerns are still
         addressed but carry less weight.
+
+        When the question was asked from a council-facing page,
+        live_context carries that page's live cached data (the
+        recommendation / performance / prediction scope). It is injected
+        into the DATA block as page_context and the user message tells the
+        CIO to ground its answer in it.
         """
         significant = self._get_significant(strategy_results)
         gemini_objections = gemini_report.get("technical_findings", {}).get(
@@ -605,26 +694,49 @@ class CIO:
             "objections", []
         )
 
-        context = json.dumps(
-            {
-                "query": query,
-                "draft_consensus": draft_consensus,
-                "gemini_objections": gemini_objections,
-                "grok_objections": grok_objections,
-                "significant_strategies": significant,
-                "specialist_summaries": {
-                    "equity": equity_report.get("summary", ""),
-                    "fixed_income": fi_report.get("summary", ""),
-                    "risk": risk_report.get("summary", ""),
-                    "quant": quant_report.get("summary", ""),
-                },
-                "quant_technical": {
-                    k: v
-                    for k, v in quant_report.get("technical_findings", {}).items()
-                    if k in ("most_stable_strategy", "flagged_for_overfitting",
-                             "transaction_cost_bps_applied")
-                },
+        context_block: dict[str, Any] = {
+            "query": query,
+            "draft_consensus": draft_consensus,
+            "gemini_objections": gemini_objections,
+            "grok_objections": grok_objections,
+            "significant_strategies": significant,
+            "specialist_summaries": {
+                "equity": equity_report.get("summary", ""),
+                "fixed_income": fi_report.get("summary", ""),
+                "risk": risk_report.get("summary", ""),
+                "quant": quant_report.get("summary", ""),
             },
+            "quant_technical": {
+                k: v
+                for k, v in quant_report.get("technical_findings", {}).items()
+                if k in ("most_stable_strategy", "flagged_for_overfitting",
+                         "transaction_cost_bps_applied")
+            },
+        }
+        if live_context:
+            context_block["page_context"] = live_context
+        # June 5 2026 — prior_recommendation injection enables Section C
+        # of the mandatory transparency structure (the shift narrative).
+        # The CIO reads prior signal text + current page_context signal
+        # values and writes the delta itself; we don't precompute it.
+        # When prior_recommendation is None (first run / cache cleared)
+        # we omit the key entirely so the system prompt's CONDITIONAL
+        # instruction correctly omits Section C from the response.
+        # Pull only the fields the CIO needs for the comparison —
+        # data_hash / model / raw_json internals stay out of the prompt.
+        if prior_recommendation:
+            prior_payload: dict[str, Any] = {}
+            for field in (
+                "regime", "signal", "recommendation",
+                "confidence", "key_risk", "dissenting_view",
+                "computed_at",
+            ):
+                if field in prior_recommendation:
+                    prior_payload[field] = prior_recommendation[field]
+            if prior_payload:
+                context_block["prior_recommendation"] = prior_payload
+        context = json.dumps(
+            context_block,
             indent=2,
             default=str,
         )
@@ -677,8 +789,36 @@ class CIO:
             "For a STRATEGY question — use the numbered template "
             "below.\n\n"
         ) if query and query.strip() else ""
+        # When the question came from a council-facing page, the DATA block
+        # carries a page_context with the live numbers the user is looking
+        # at. Tell the CIO to ground its answer in those numbers.
+        page_context_line = (
+            "The user is asking from a council-facing page. The DATA block "
+            "includes a `page_context` object with the LIVE cached numbers "
+            "shown on that page (the current regime read and blend, the "
+            "play-by-play track record, or the forward projection). Ground "
+            "your answer in those specific figures — quote them — rather "
+            "than answering in the abstract.\n\n"
+        ) if live_context else ""
+        # June 5 2026 — Section C trigger. The CIO instruction must name
+        # the prior_recommendation field so the model knows the comparison
+        # input is available. When the field is absent (no prior) the
+        # instruction still parses cleanly and Section C is correctly
+        # omitted per the system prompt's CONDITIONAL clause.
+        section_c_line = (
+            "A `prior_recommendation` field is present in the DATA block. "
+            "Open the response with the three mandatory transparency "
+            "sections (A. Signal snapshot, B. Weight justification, "
+            "C. Shift narrative) per the system prompt. For Section C, "
+            "compare the prior `signal` / `regime` / `recommendation` to "
+            "the current values in `page_context` — name the specific "
+            "signal value that shifted (old → new), how the blend moved, "
+            "and what the weight change means. Do NOT invent prior "
+            "values; if a signal isn't in either side of the comparison, "
+            "say so.\n\n"
+        ) if prior_recommendation else ""
         user_message = (
-            f"{query_line}"
+            f"{query_line}{page_context_line}{section_c_line}"
             "You have reviewed four specialist reports and received TWO independent "
             "challenges — Gemini (blind spots) and Grok (stress test). "
             "When the question is STRATEGY-flavoured, produce the "

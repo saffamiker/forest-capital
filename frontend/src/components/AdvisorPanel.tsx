@@ -31,28 +31,15 @@ import {
 import { useAdvisorStore } from '../stores/advisorStore'
 import { useUI } from '../context/UIContext'
 import type { DeliverableType, AdvisorAnalysis, VerifiedCitation } from '../types/advisor'
+import { useChartTheme } from '../lib/useChartTheme'
 
 
 // May 24 2026 — context-aware floating button visibility per user spec.
 // The advisor button is hidden on routes where an inline AI surface
-// already covers the use case:
-//
-//   /report-writer  — the editor's "Ask the Writer" panel is the
-//                     inline AI for this page.
-//   /peer-review    — both tabs (Peer Review Assistant + Thesis
-//                     Defense Prep) already host harness-gated AI
-//                     flows. A floating advisor would be a
-//                     redundant third AI affordance on the page.
-//
-// Every other page (Dashboard, Analytics, Statistical Evidence,
-// Regime Analysis, QA Audit, Council, Reports) keeps the floating
-// button so the team always has a one-click route to ad-hoc
-// academic guidance from anywhere in the app.
-const HIDDEN_ROUTES: ReadonlySet<string> = new Set([
-  '/report-writer',
-  '/reports/writer',  // legacy alias for the report writer route
-  '/peer-review',
-])
+// already covers the use case. After PR #338 retired the legacy
+// /peer-review and /reports/writer routes, this set is empty -- every
+// remaining page in the app benefits from the floating advisor.
+const HIDDEN_ROUTES: ReadonlySet<string> = new Set()
 
 const GOLD = '#f59e0b'
 
@@ -72,7 +59,6 @@ interface AdvisorPanelProps {
 }
 
 const DELIVERABLE_OPTIONS: Array<{ value: DeliverableType; label: string; grade: string }> = [
-  { value: 'midpoint',     label: 'Midpoint Paper',      grade: '10%' },
   { value: 'appendix',     label: 'Analytical Appendix', grade: '35%' },
   { value: 'brief',        label: 'Executive Brief',     grade: '20%' },
   { value: 'presentation', label: 'Final Presentation',  grade: '35%' },
@@ -80,7 +66,7 @@ const DELIVERABLE_OPTIONS: Array<{ value: DeliverableType; label: string; grade:
 
 
 export default function AdvisorPanel({
-  initialDeliverable = 'midpoint',
+  initialDeliverable = 'brief',
   strategyResults,
   open: controlledOpen,
   onClose,
@@ -392,6 +378,7 @@ function Section({ title, items, accent }: { title: string; items: string[]; acc
 const FALLBACK_EXCERPT = 'Excerpt unavailable — click to verify directly'
 
 function CitationItem({ citation }: { citation: VerifiedCitation }) {
+  const chartTheme = useChartTheme()
   const [hovered, setHovered] = useState(false)
   const hasExcerpt = typeof citation.excerpt === 'string' && citation.excerpt.length > 0
   const tooltipText = hasExcerpt ? (citation.excerpt as string) : FALLBACK_EXCERPT
@@ -444,7 +431,8 @@ function CitationItem({ citation }: { citation: VerifiedCitation }) {
           data-testid="advisor-citation-tooltip"
           className="absolute left-2 right-2 bottom-full mb-1 z-50 rounded shadow-lg p-2.5"
           style={{
-            backgroundColor: '#1a2438',
+            backgroundColor: chartTheme.tooltipContentStyle.backgroundColor as string,
+            color: chartTheme.textPrimary,
             border: '1px solid rgba(245,158,11,0.4)',
             // Subtle gold left accent ties the tooltip back to the
             // advisor's brand colour and signals "advisor surfaced this".

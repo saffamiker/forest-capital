@@ -1,397 +1,51 @@
 /**
  * frontend/src/pages/Reports.tsx
  *
- * Sprint 6 — Reports screen. Two deliverable sections: Bob's written
- * documents (analytical appendix, executive brief, midpoint paper) and
- * Molly's presentation artifacts (storyboard, deck, Q&A).
+ * Reports & Deliverables screen. The page is composed of standalone
+ * panels rather than a manifest-driven card grid:
  *
- * Each card represents a generator endpoint defined server-side at
- * /api/reports/manifest. The manifest is the source of truth for
- * which deliverables exist and what status each is in. Changing the
- * card list never requires a frontend redeploy — just edit the
- * manifest response in backend/main.py.
+ *   - Submission Readiness   (ReportReadinessBanner)
+ *   - Generate Documents      (DocumentGenerationPanel)
+ *       The ONLY generation surface. Runs the two-pass story plan
+ *       architecture for brief / deck / appendix with locked numeric
+ *       anchors and the post-generation audit.
+ *   - Team Activity           (TeamActivityPanel)
  *
- * Status semantics:
- *   available — endpoint is wired and ready. Card has an active
- *               Generate button that triggers the download.
- *   planned   — endpoint will exist by July 1 but the generator isn't
- *               wired yet. Button is disabled with a tooltip explaining
- *               the deadline.
+ * The previous "Bob's Deliverables" / "Molly's Deliverables" card
+ * panel was a shadow pipeline: each card called a different endpoint
+ * from the canonical top panel (legacy template generators, the
+ * storyboard PPTX path with no story plan, a Q&A doc that did not
+ * read from story_plans.anticipated_questions). It was removed so
+ * the page has exactly one generation path and no submission-time
+ * confusion about which Generate button to click.
+ *
+ * The /reports/storyboard editor route remains -- Molly can open it
+ * directly when she wants to edit a storyboard.
  */
-import { useEffect, useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
-import axios from 'axios'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
-  FileText, Presentation, Download, Loader2, Calendar, AlertCircle,
-  CheckCircle, Clock, ArrowRight, GraduationCap, Edit3, Info, FileArchive,
+  AlertCircle, Info, FileArchive,
 } from 'lucide-react'
-import AdvisorPanel from '../components/AdvisorPanel'
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
+import DataReferenceSheetPanel from '../components/DataReferenceSheetPanel'
+import SubmissionReadinessReview from '../components/SubmissionReadinessReview'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
+import KeyMetricsPanel from '../components/KeyMetricsPanel'
+import LightRefreshButton from '../components/LightRefreshButton'
+import LiveDataHashBanner from '../components/LiveDataHashBanner'
+import PreSubmissionCheckPanel from '../components/PreSubmissionCheckPanel'
 import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
+import SubmissionFreezeBanner from '../components/SubmissionFreezeBanner'
 import SubmissionGuidePanel from '../components/SubmissionGuides'
 import TeamGate from '../components/TeamGate'
 import FloatingSectionNav from '../components/FloatingSectionNav'
-import type { DeliverableType } from '../types/advisor'
-import type { SectionDocType } from '../types/documents'
-
-interface ReportCard {
-  id: string
-  title: string
-  description: string
-  endpoint: string
-  method: 'GET' | 'POST'
-  format: 'docx' | 'pptx' | 'html' | 'json'
-  status: 'available' | 'planned'
-  deadline: string
-}
-
-interface ManifestResponse {
-  owner_bob: ReportCard[]
-  owner_molly: ReportCard[]
-}
-
-// Map deliverable id → icon. Keeps the card list above readable.
-const ICON_FOR_ID: Record<string, typeof FileText> = {
-  midpoint_template:    FileText,
-  executive_brief:      FileText,
-  analytical_appendix:  FileText,
-  storyboard_draft:     Presentation,
-  presentation_deck:    Presentation,
-  qa_preparation:       FileText,
-}
-
-// Map deliverable id → Academic Advisor deliverable type. Both presentation
-// artifacts (deck, Q&A, storyboard) share the same advisor context — the
-// advisor doesn't need separate prompts for each Molly artifact, it just
-// needs to know we're prepping for the final presentation.
-const ADVISOR_TYPE_FOR_ID: Record<string, DeliverableType> = {
-  midpoint_template:    'midpoint',
-  executive_brief:      'brief',
-  analytical_appendix:  'appendix',
-  storyboard_draft:     'presentation',
-  presentation_deck:    'presentation',
-  qa_preparation:       'presentation',
-}
-
-// Map Bob's three deliverable IDs to the section-doc type the SectionEditor
-// expects. Other IDs (Molly's) don't open in the section editor — they
-// either route to the Storyboard Editor or trigger a direct download.
-const SECTION_DOC_TYPE_FOR_ID: Record<string, SectionDocType | undefined> = {
-  midpoint_template:    'midpoint_paper',
-  executive_brief:      'executive_brief',
-  analytical_appendix:  'analytical_appendix',
-}
-
-// The StoryboardEditor writes the active document_id here so deck / Q&A
-// generators on this page can target the right document. When unset (no
-// storyboard yet) we route the user to the editor first.
-const STORYBOARD_ID_KEY = 'fc_active_storyboard_id'
-
-async function downloadFromGenerator(outputType: 'deck' | 'qa'): Promise<void> {
-  const docId = localStorage.getItem(STORYBOARD_ID_KEY)
-  if (!docId) {
-    throw new Error(
-      'No storyboard saved yet. Open the Storyboard Editor first to create one.',
-    )
-  }
-  const res = await axios({
-    url: `/api/reports/generate-from-storyboard/${docId}`,
-    method: 'POST',
-    responseType: 'blob',
-    data: { output_type: outputType },
-  })
-  const dispo = String(res.headers['content-disposition'] ?? '')
-  const filenameMatch = /filename="?([^";]+)"?/i.exec(dispo)
-  const fmt = outputType === 'deck' ? 'pptx' : 'docx'
-  const filename = filenameMatch?.[1] ?? `forest-capital-${outputType}.${fmt}`
-  const contentType = String(res.headers['content-type'] ?? 'application/octet-stream')
-  const blob = new Blob([res.data], { type: contentType })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
-
-
-async function downloadDocxResponse(card: ReportCard): Promise<void> {
-  // axios responseType: 'blob' is required for the browser to download
-  // binary content rather than try to parse as JSON and corrupt it.
-  // The Content-Disposition header from the server carries the filename;
-  // we extract it so the user's download folder is named meaningfully.
-  const res = await axios({
-    url: card.endpoint,
-    method: card.method,
-    responseType: 'blob',
-  })
-  // axios headers can be string | number | boolean | string[] | AxiosHeaders.
-  // The .docx server responses we care about always set these as strings,
-  // but TS demands we narrow before passing to RegExp.exec / Blob({ type }).
-  const dispo = String(res.headers['content-disposition'] ?? '')
-  const filenameMatch = /filename="?([^";]+)"?/i.exec(dispo)
-  const filename = filenameMatch?.[1] ?? `${card.id}.${card.format}`
-
-  const contentType = String(res.headers['content-type'] ?? 'application/octet-stream')
-  const blob = new Blob([res.data], { type: contentType })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
-
-function DeliverableCard({ card, onGenerate, isGenerating, onAdvisor, onOpenSectionEditor }: {
-  card: ReportCard
-  onGenerate: (c: ReportCard) => void
-  isGenerating: boolean
-  // Opens the Academic Advisor pre-pinned to this card's deliverable type.
-  // The button below the Generate button surfaces grade-aware guidance
-  // before the team commits to a draft.
-  onAdvisor: (c: ReportCard) => void
-  // Bob's section editor — only wired for the three doc types that
-  // have a SECTION_DOC_TYPE_FOR_ID entry. Molly's cards pass undefined
-  // and the button doesn't render.
-  onOpenSectionEditor?: (c: ReportCard) => void
-}) {
-  const Icon = ICON_FOR_ID[card.id] ?? FileText
-  const isAvailable = card.status === 'available'
-  // Storyboard draft opens the editor rather than triggering a download —
-  // the JSON payload is meant to be edited, not saved to disk.
-  const opensEditor = card.id === 'storyboard_draft'
-
-  return (
-    <div className="card p-4 flex flex-col gap-3">
-      <div className="flex items-start gap-3">
-        <div
-          className="w-9 h-9 rounded flex items-center justify-center shrink-0"
-          style={{
-            background: isAvailable ? '#3b82f620' : '#64748b20',
-            border: `1px solid ${isAvailable ? '#3b82f640' : '#64748b40'}`,
-          }}
-        >
-          <Icon
-            className="w-4 h-4"
-            style={{ color: isAvailable ? '#3b82f6' : '#64748b' }}
-          />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h3 className="text-white font-semibold text-sm">{card.title}</h3>
-          <p className="text-muted text-xs mt-1 leading-relaxed">{card.description}</p>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2 text-2xs flex-wrap">
-        <span className="px-1.5 py-0.5 rounded border border-border text-muted uppercase tracking-wide">
-          {card.format}
-        </span>
-        <span className="flex items-center gap-1 text-muted">
-          <Calendar className="w-3 h-3" />
-          {card.deadline}
-        </span>
-        {isAvailable ? (
-          <span className="flex items-center gap-1 text-success">
-            <CheckCircle className="w-3 h-3" />
-            Available
-          </span>
-        ) : (
-          <span className="flex items-center gap-1 text-muted">
-            <Clock className="w-3 h-3" />
-            Planned
-          </span>
-        )}
-      </div>
-
-      <button
-        type="button"
-        onClick={() => isAvailable && onGenerate(card)}
-        disabled={!isAvailable || isGenerating}
-        className={`w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded text-xs font-medium transition-colors ${
-          isAvailable
-            ? 'bg-electric/10 border border-electric/30 text-electric hover:bg-electric/20'
-            : 'bg-navy-800 border border-border text-muted cursor-not-allowed'
-        }`}
-        title={isAvailable ? `Generate ${card.format.toUpperCase()}` : 'Planned for next sprint'}
-      >
-        {isGenerating
-          ? <><Loader2 className="w-3 h-3 animate-spin" /> Generating…</>
-          : isAvailable
-            ? (opensEditor
-                ? <><ArrowRight className="w-3 h-3" /> Open Editor</>
-                : <><Download className="w-3 h-3" /> Generate {card.format.toUpperCase()}</>)
-            : <>Planned</>}
-      </button>
-
-      {/* Edit in Section Editor — only for Bob's three section-structured
-          deliverables. Opens the in-browser editor where Bob can edit each
-          section against the immutable AI draft. */}
-      {onOpenSectionEditor && isAvailable && (
-        <button
-          type="button"
-          onClick={() => onOpenSectionEditor(card)}
-          data-testid={`edit-button-${card.id}`}
-          className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs border border-border text-slate-300 hover:bg-navy-700 transition-colors"
-          title="Open this draft in the section editor"
-        >
-          <Edit3 className="w-3 h-3" />
-          Edit in Section Editor
-        </button>
-      )}
-
-      {/* Get Advisor Feedback — gold accent, always available regardless of
-          card status. The team should be able to consult the advisor on a
-          deliverable even when its generator isn't wired yet. */}
-      <button
-        type="button"
-        onClick={() => onAdvisor(card)}
-        data-testid={`advisor-button-${card.id}`}
-        className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs transition-colors"
-        style={{
-          backgroundColor: 'rgba(245,158,11,0.08)',
-          border: '1px solid rgba(245,158,11,0.3)',
-          color: '#f59e0b',
-        }}
-        title="Open Academic Advisor with this deliverable preselected"
-      >
-        <GraduationCap className="w-3 h-3" />
-        Get Advisor Feedback
-      </button>
-    </div>
-  )
-}
 
 export default function Reports() {
-  const navigate = useNavigate()
-  const [manifest, setManifest] = useState<ManifestResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [generatingId, setGeneratingId] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  // Active deliverable for the advisor panel — null when the panel is
-  // closed, set to a DeliverableType when a card's "Get Advisor Feedback"
-  // button is clicked. We use the controlled-open form of AdvisorPanel
-  // here so the panel opens to the right card's context rather than the
-  // default midpoint deliverable that the floating button would pick.
-  const [advisorDeliverable, setAdvisorDeliverable] = useState<DeliverableType | null>(null)
+  const [error] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    // UAT 2026-05-24 — Reports tab showed a permanent spinner with
-    // no network activity. Hardened with a 10s safety net that forces
-    // loading=false + surfaces an explicit error if the request never
-    // resolves. A spinner must never outlive an actually-in-flight
-    // network call. The diagnostic console.info / console.warn lines
-    // that originally rode along were removed once the safety-net +
-    // clearTimeout path proved out — they were investigation aids,
-    // not production telemetry, and the safety net's setError surface
-    // is what the user sees if the GET stalls.
-    const safetyTimer = setTimeout(() => {
-      if (!cancelled) {
-        setError(
-          'Reports manifest did not load within 10 seconds. '
-          + 'Refresh the page; if it persists, check the Network '
-          + 'tab for the /api/reports/manifest request.',
-        )
-        setLoading(false)
-      }
-    }, 10_000)
-
-    void axios.get<ManifestResponse>('/api/reports/manifest')
-      .then((res) => {
-        if (cancelled) return
-        setManifest(res.data)
-      })
-      .catch((err) => {
-        if (cancelled) return
-        const msg = axios.isAxiosError(err)
-          ? (err.response?.data?.detail ?? err.message)
-          : 'Failed to load reports manifest'
-        setError(String(msg))
-      })
-      .finally(() => {
-        if (cancelled) return
-        clearTimeout(safetyTimer)
-        setLoading(false)
-      })
-    return () => {
-      cancelled = true
-      clearTimeout(safetyTimer)
-    }
-  }, [])
-
-  const handleAdvisor = (card: ReportCard) => {
-    const dt = ADVISOR_TYPE_FOR_ID[card.id] ?? 'presentation'
-    setAdvisorDeliverable(dt)
-  }
-
-  const handleOpenSectionEditor = async (card: ReportCard) => {
-    const docType = SECTION_DOC_TYPE_FOR_ID[card.id]
-    if (!docType) return
-    setGeneratingId(card.id)
-    setError(null)
-    try {
-      // Create a new section-structured draft for this deliverable.
-      // The backend returns the document_id and the AI-drafted content;
-      // we navigate to the SectionEditor which loads it via GET.
-      const res = await axios.post<{
-        document_id: string | null
-        persistence: 'saved' | 'unavailable'
-      }>('/api/documents/section-doc/draft', { doc_type: docType })
-      if (res.data.document_id) {
-        navigate(`/reports/document/${res.data.document_id}`)
-      } else {
-        setError(
-          'Section editor requires database persistence. ' +
-          'Run `alembic upgrade head` on the server first.',
-        )
-      }
-    } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail ?? err.message)
-        : 'Failed to open section editor'
-      setError(String(msg))
-    } finally {
-      setGeneratingId(null)
-    }
-  }
-
-  const handleGenerate = async (card: ReportCard) => {
-    // Storyboard draft opens the editor, not a download. The editor
-    // calls /api/documents/storyboard/draft on first mount.
-    if (card.id === 'storyboard_draft') {
-      navigate('/reports/storyboard')
-      return
-    }
-
-    setGeneratingId(card.id)
-    setError(null)
-    try {
-      // Deck and Q&A cards call generate-from-storyboard with a specific
-      // output_type. They depend on a saved storyboard — if there isn't
-      // one yet, the server returns 404 and we surface the error so the
-      // user goes to the editor first.
-      if (card.id === 'presentation_deck' || card.id === 'qa_preparation') {
-        await downloadFromGenerator(card.id === 'presentation_deck' ? 'deck' : 'qa')
-      } else {
-        await downloadDocxResponse(card)
-      }
-    } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail ?? err.message)
-        : 'Generation failed'
-      setError(String(msg))
-    } finally {
-      setGeneratingId(null)
-    }
-  }
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-screen-xl mx-auto">
@@ -448,16 +102,12 @@ export default function Reports() {
         </div>
       )}
 
-      {loading && (
-        <div
-          className="card p-8 text-center text-muted text-sm flex
-                     items-center justify-center gap-2"
-          data-testid="reports-loading-state"
-        >
-          <Loader2 className="w-4 h-4 animate-spin" />
-          <span>Loading deliverables…</span>
-        </div>
-      )}
+      {/* Layer 4 -- submission freeze banner. Only renders when the
+          freeze is ACTIVE; the steady-state read returns null and
+          the banner stays out of the DOM. Sits above the readiness
+          banner because a frozen platform is a higher-priority piece
+          of context than the everyday blocker count. */}
+      <SubmissionFreezeBanner />
 
       {/* Workstream C — Report readiness banner. Reads
           /api/v1/report/readiness and renders the verdict at the top
@@ -471,53 +121,71 @@ export default function Reports() {
         <ReportReadinessBanner />
       </div>
 
+      {/* June 25 2026 -- Live platform data hash banner. Surfaces
+          the current strategy_hash + flags any current drafts that
+          were generated against a stale hash. Hides entirely when
+          the live hash isn't loaded yet so the page doesn't flash
+          an indeterminate state. */}
+      <LiveDataHashBanner />
+
+      {/* Layer 3b (June 21 2026) -- Pre-submission verification check.
+          One-click button that fires POST /api/v1/export/verify-all
+          and renders an inline result tile (green ready / amber
+          needs-attention / red blocked) so the team can confirm cache
+          + draft alignment before submitting. Sits above the
+          generation cards so the verification verdict is on screen
+          when Bob and Molly reach for the export buttons. */}
+      <div
+        data-section-id="pre-submission-check"
+        data-section-label="Pre-Submission Check">
+        <PreSubmissionCheckPanel />
+      </div>
+
       {/* Generate Documents — one-click first-draft .docx / .pptx of the
           three graded deliverables, assembled server-side from real
-          platform data. Sits above Team Activity per the spec. */}
+          platform data via the two-pass story plan architecture. The
+          ONLY generation surface on this page; the legacy manifest-
+          driven card grid was removed because each card called a
+          different endpoint from the canonical pipeline. */}
       <div
         data-section-id="document-generation"
         data-section-label="Generate Documents">
         <DocumentGenerationPanel />
       </div>
 
-      {/* Report Writer — verified-data midpoint paper flow with [BOB]
-          callout resolution, AI iteration toolbar, academic review
-          against the FNA670 rubric, and two-tier download gating.
-          The /reports/writer page hosts the full eleven-step workflow. */}
-      <TeamGate permission="team_member"
-        tooltip="The report writer is available to the project team">
-        <section
-          data-tour="report-writer-entry"
-          data-section-id="report-writer"
-          data-section-label="Report Writer"
-          className="card p-4 border-l-4 border-l-electric-blue">
-          <div className="flex items-start gap-3">
-            <FileText className="w-5 h-5 text-electric-blue flex-shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <h3 className="text-white font-semibold text-sm mb-1">
-                Report Writer — Midpoint Check Paper
-              </h3>
-              <p className="text-text-secondary text-xs mb-3">
-                The eleven-step verified-data flow: stage findings,
-                source citations, validate thesis, generate draft,
-                resolve every [BOB] callout, run final check, run the
-                academic review against the FNA670 rubric, and
-                download the submission-ready .docx.
-              </p>
-              <Link
-                to="/reports/writer"
-                className={
-                  'inline-flex items-center gap-2 px-3 py-1.5 ' +
-                  'bg-electric-blue hover:bg-electric-blue/80 ' +
-                  'text-white text-xs font-medium rounded'
-                }>
-                Open Report Writer
-                <ArrowRight className="w-3 h-3" />
-              </Link>
-            </div>
-          </div>
-        </section>
-      </TeamGate>
+      {/* Key Metrics -- Cache Verified (June 21 2026). Reads
+          /api/v1/strategy-cache/key-metrics on expand. Sits between
+          the generation cards and the team activity feed so Bob can
+          confirm any figure in his draft against the cache without
+          leaving the page. Collapsed by default. */}
+      <KeyMetricsPanel />
+
+      {/* Light Refresh (June 25 2026) -- self-service analytics
+          refresh for team members. Runs backtester + academic
+          analytics + cost sensitivity for the current data hash;
+          does NOT touch story plans, drafts, or document content.
+          Surfaces a 'new data detected' warning when the
+          post-refresh hash differs from what Key Metrics showed. */}
+      <LightRefreshButton />
+
+      {/* Data Reference Sheet (June 22 2026) -- the full
+          cross-reference of every value in the submission against
+          the strategy cache. Reads /api/v1/export/data-reference-
+          sheet on expand. Includes per-strategy metrics and Carhart
+          factor loadings (10 strategies x 5 columns each). Locked
+          constants flagged separately from live cache reads so Bob
+          knows which values could theoretically update. Download CSV
+          button exports the full table with the strategy hash baked
+          into the filename for offline cross-reference. */}
+      <DataReferenceSheetPanel />
+
+      {/* Submission Readiness Review (June 23 2026) -- the capstone
+          pre-submission go/no-go panel. Bundles a data cross-
+          reference + full cross-document academic review behind a
+          single button + pre-flight modal. Distinct from the QA
+          Hub's Cross-Document Review (iterative drafting tool):
+          this surface is for the FINAL check before June 30. */}
+      <SubmissionReadinessReview />
 
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.
@@ -546,89 +214,6 @@ export default function Reports() {
           agent sessions.
         </span>
       </div>
-
-      {/* Controlled advisor panel — opened from a card's "Get Advisor Feedback"
-          button with the card's deliverable type preselected. The global
-          floating advisor (mounted in MainLayout) remains visible alongside
-          this; opening either one is equivalent from the user's perspective.
-          We use the controlled API here so the panel knows which deliverable
-          to pin to, which the floating button can't infer. */}
-      {advisorDeliverable && (
-        <AdvisorPanel
-          initialDeliverable={advisorDeliverable}
-          open
-          onClose={() => setAdvisorDeliverable(null)}
-        />
-      )}
-
-      {!loading && manifest && (
-        <>
-          <section
-            data-section-id="bob-deliverables"
-            data-section-label="Bob's Deliverables">
-            <div className="flex items-baseline gap-3 mb-3">
-              <h2 className="text-white font-semibold text-sm">
-                Bob's Deliverables
-              </h2>
-              <span className="text-2xs text-muted uppercase tracking-wide">
-                Written report · APA 7th edition
-              </span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {manifest.owner_bob.map((card) => {
-                // Only Bob's section-structured deliverables get the
-                // editor entry point. Cards whose ID isn't in
-                // SECTION_DOC_TYPE_FOR_ID omit the prop entirely —
-                // exactOptionalPropertyTypes disallows passing undefined
-                // explicitly when the type is `((c) => void) | undefined`.
-                const supportsSectionEditor = !!SECTION_DOC_TYPE_FOR_ID[card.id]
-                return supportsSectionEditor ? (
-                  <DeliverableCard
-                    key={card.id}
-                    card={card}
-                    onGenerate={handleGenerate}
-                    isGenerating={generatingId === card.id}
-                    onAdvisor={handleAdvisor}
-                    onOpenSectionEditor={(c) => void handleOpenSectionEditor(c)}
-                  />
-                ) : (
-                  <DeliverableCard
-                    key={card.id}
-                    card={card}
-                    onGenerate={handleGenerate}
-                    isGenerating={generatingId === card.id}
-                    onAdvisor={handleAdvisor}
-                  />
-                )
-              })}
-            </div>
-          </section>
-
-          <section
-            data-section-id="molly-deliverables"
-            data-section-label="Molly's Deliverables">
-            <div className="flex items-baseline gap-3 mb-3">
-              <h2 className="text-white font-semibold text-sm">
-                Molly's Deliverables
-              </h2>
-              <span className="text-2xs text-muted uppercase tracking-wide">
-                Presentation · July 1 demo
-              </span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {manifest.owner_molly.map((card) => (
-                <DeliverableCard
-                  key={card.id}
-                  card={card}
-                  onGenerate={handleGenerate}
-                  isGenerating={generatingId === card.id}
-                  onAdvisor={handleAdvisor}
-                />
-              ))}
-            </div>
-          </section>
-        </>
-      )}
     </div>
   )
 }

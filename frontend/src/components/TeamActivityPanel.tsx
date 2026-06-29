@@ -35,7 +35,7 @@ const DEFAULT_KINDS: ActivityKind[] = [
 const ALL_KINDS: ActivityKind[] = [...DEFAULT_KINDS, 'page_view']
 
 const KIND_META: Record<ActivityKind, { label: string; icon: typeof GitCommit; color: string }> = {
-  commit:           { label: 'Commit',          icon: GitCommit,     color: '#6366f1' },
+  commit:           { label: 'Development Entry', icon: GitCommit,   color: '#6366f1' },
   council:          { label: 'Council',         icon: Users,         color: '#3b82f6' },
   academic_review:  { label: 'Academic Review', icon: GraduationCap, color: '#f59e0b' },
   qa:               { label: 'QA Audit',        icon: ShieldCheck,   color: '#be123c' },
@@ -248,14 +248,25 @@ function SummaryPanel({ summary }: { summary: ActivitySummary }) {
       {/* Commits + agents + last review */}
       <div className="space-y-3">
         <div className="card p-4">
-          <div className="text-2xs text-muted uppercase tracking-wide">Commits this week</div>
+          <div className="text-2xs text-muted uppercase tracking-wide">Development Entries this week</div>
           <div className="font-mono text-electric text-2xl mt-1">
             {summary.commits.this_week}
           </div>
           <div className="text-2xs text-muted mt-0.5">
-            {summary.commits.total} total on the branch
+            {summary.commits.total} total recorded
           </div>
         </div>
+        {summary.platform_releases != null && (
+          <div className="card p-4">
+            <div className="text-2xs text-muted uppercase tracking-wide">Platform Releases</div>
+            <div className="font-mono text-electric text-2xl mt-1">
+              {summary.platform_releases}
+            </div>
+            <div className="text-2xs text-muted mt-0.5">
+              merged to the live platform
+            </div>
+          </div>
+        )}
         <div className="card p-4">
           <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
             Most active agents
@@ -486,11 +497,20 @@ function TimelineRow({ ev }: { ev: ActivityEvent }) {
 
 function RowBody({ ev }: { ev: ActivityEvent }) {
   if (ev.kind === 'commit') {
+    const technical = (ev.message ?? '').split('\n')[0]
+    // Plain-English summary is the primary label; the technical git message
+    // is shown muted beneath it for developer context (Issue 2).
+    const primary = ev.plain_summary || technical
     return (
       <div>
         <div className="text-sm text-white leading-snug">
-          {(ev.message ?? '').split('\n')[0]}
+          {primary}
         </div>
+        {ev.plain_summary && technical && (
+          <div className="text-2xs text-muted/80 font-mono mt-0.5 leading-snug">
+            {technical}
+          </div>
+        )}
         <div className="text-2xs text-muted mt-0.5 flex items-center gap-2 flex-wrap">
           {ev.github_url ? (
             <a href={ev.github_url} target="_blank" rel="noopener noreferrer"

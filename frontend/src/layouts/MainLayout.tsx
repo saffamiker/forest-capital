@@ -2,19 +2,18 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3,
-  Activity, FileText, LineChart, Menu, X, LogOut, ClipboardCheck,
-  TrendingUp,
+  Activity, FileText, LineChart, Menu, X, LogOut,
+  TrendingUp, Sun, Moon,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
 import { useSession } from '../context/SessionContext'
+import { useTheme } from '../context/ThemeContext'
 import { useActivityTracking } from '../lib/useActivityTracking'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import { useUI } from '../context/UIContext'
 import type { UIMode } from '../context/UIContext'
 import { useQAStore } from '../stores/qaStore'
-import { useReportWriterStore } from '../stores/reportWriterStore'
-import { Loader2, CheckCircle, XCircle } from 'lucide-react'
 import QAStatusBadge from '../components/QAStatusBadge'
 import LearnModeToggle from '../components/LearnModeToggle'
 import AdvisorPanel from '../components/AdvisorPanel'
@@ -57,11 +56,6 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/council',     label: 'Council',     icon: Users },
       { to: '/performance-record', label: 'Performance Record', icon: TrendingUp },
       { to: '/qa',          label: 'QA Audit',    icon: ShieldCheck },
-      // ── May 23 2026 — item 7. Peer Review surfaces two flows:
-      // (A) upload another team's midpoint paper for a structured
-      // review script, and (B) generate a mock-panel Q&A prep
-      // sheet against the team's own current draft.
-      { to: '/peer-review', label: 'Peer Review', icon: ClipboardCheck },
     ],
   },
   {
@@ -209,6 +203,42 @@ function ModeSelector({ vertical = false, onSelect }: {
 }
 
 /**
+ * Light / dark theme toggle — desktop-only (the mobile drawer doesn't
+ * need it; demos run on the desktop the projector is plugged into).
+ * Visible and one-click per the July 1 demo spec.
+ *
+ * Icon convention: in DARK mode show the Sun ('switch to light' is the
+ * affordance); in LIGHT mode show the Moon ('switch to dark'). Tooltip
+ * names the action that will happen on click.
+ *
+ * The button itself uses CSS variables (--text-primary / hover state via
+ * bg-navy-700/30) so it flips appearance with the theme without needing
+ * a dark: companion class — the toggle is self-themed.
+ */
+function ThemeToggle() {
+  const { theme, toggleTheme } = useTheme()
+  const isDark = theme === 'dark'
+  return (
+    <button
+      type="button"
+      onClick={toggleTheme}
+      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+      aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+      className="flex items-center justify-center min-h-[36px] min-w-[36px]
+                 rounded text-sm text-[color:var(--text-primary)]
+                 hover:bg-navy-700/30 dark:hover:bg-navy-700/30
+                 transition-colors shrink-0"
+    >
+      {isDark ? (
+        <Sun className="w-4 h-4" aria-hidden="true" />
+      ) : (
+        <Moon className="w-4 h-4" aria-hidden="true" />
+      )}
+    </button>
+  )
+}
+
+/**
  * The mobile / tablet navigation drawer — a left slide-in panel shown
  * below the lg breakpoint in place of the horizontal nav. Holds the
  * grouped nav items, the mode switcher, and the account controls.
@@ -306,6 +336,24 @@ function MobileNavDrawer({ open, onClose }: {
           <ModeSelector vertical onSelect={onClose} />
         </div>
 
+        {/* Theme toggle — June 6 2026. The desktop nav cluster
+            (hidden lg:flex) holds the toggle for desktop; the mobile
+            drawer needs its own copy so a tester or a presenter on a
+            phone / tablet can flip the theme without first opening
+            the platform on a laptop. The ThemeToggle component is
+            self-themed (no provider gating) so the same component
+            renders correctly here as in the desktop cluster. */}
+        <div className="shrink-0 border-t border-border px-4 py-3">
+          <div className="text-2xs font-semibold uppercase tracking-widest
+                          text-muted mb-1.5">
+            Theme
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-muted">Light / dark</span>
+            <ThemeToggle />
+          </div>
+        </div>
+
         {/* Account — email + sign out. */}
         <div className="shrink-0 border-t border-border px-4 py-3
                         flex items-center justify-between gap-2">
@@ -396,7 +444,6 @@ export default function MainLayout() {
             >
               <Icon className="w-3.5 h-3.5" />
               {label}
-              {to === '/reports' ? <ReportWriterBadge /> : null}
             </NavLink>
           ))}
         </nav>
@@ -419,11 +466,15 @@ export default function MainLayout() {
               the drawer. (ModeSelector self-hides below lg.) */}
           <ModeSelector />
 
-          {/* Commentary sub-toggle and QA badge — desktop only, to keep
-              the mobile nav bar uncluttered. */}
+          {/* Commentary sub-toggle, QA badge, and theme toggle — desktop
+              only, to keep the mobile nav bar uncluttered. The theme
+              toggle is visible and one-click per the July 1 demo spec
+              (dark themes don't project well; the presenter needs to
+              switch quickly). */}
           <div className="hidden lg:flex items-center gap-3">
             <LearnModeToggle />
             <QAStatusBadge />
+            <ThemeToggle />
           </div>
 
           {/* QA running indicator — a QA audit (methodology or
@@ -578,45 +629,3 @@ export default function MainLayout() {
 }
 
 
-/**
- * Tiny inline badge sitting next to the Reports nav item. Renders
- * the report-writer pipeline status (running / complete / failed)
- * so Bob can navigate away from /reports/writer during a long run
- * and still see at a glance whether the draft is ready.
- *
- * Drawn from the reportWriterStore (Zustand) which the
- * /reports/writer page sets on every state transition. Idle state
- * renders nothing.
- */
-function ReportWriterBadge() {
-  const { badge, badgeDetail } = useReportWriterStore()
-  if (badge === 'idle') return null
-  if (badge === 'running') {
-    return (
-      <span
-        data-testid="report-writer-badge-running"
-        title={badgeDetail || 'Report writer pipeline running'}
-        className="ml-1 inline-flex">
-        <Loader2 className="w-3 h-3 animate-spin text-electric-blue" />
-      </span>
-    )
-  }
-  if (badge === 'complete') {
-    return (
-      <span
-        data-testid="report-writer-badge-complete"
-        title={badgeDetail || 'Report writer draft ready'}
-        className="ml-1 inline-flex">
-        <CheckCircle className="w-3 h-3 text-green-400" />
-      </span>
-    )
-  }
-  return (
-    <span
-      data-testid="report-writer-badge-failed"
-      title={badgeDetail || 'Report writer pipeline failed'}
-      className="ml-1 inline-flex">
-      <XCircle className="w-3 h-3 text-red-400" />
-    </span>
-  )
-}

@@ -331,12 +331,18 @@ class GeneratorEvaluatorHarness:
         (_PASSTHROUGH_SCORE) with no feedback, so a flawed evaluator
         never blocks a review session.
 
-        PR-LLM-2 (May 28 2026) — Robust JSON parsing with retry on
-        truncation:
+        PR-LLM-2 (May 28 2026), updated June 3 2026 — Robust JSON
+        parsing with retry on truncation:
 
-          1. First attempt: call_claude with max_tokens=600. Strip
+          1. First attempt: call_claude with max_tokens=1200. Strip
              markdown fences, then json.loads. On success, return
-             the score.
+             the score. (June 3 bump from 600. The typical evaluator
+             JSON — scores + overall + passed + a 200-500-token
+             "specific, actionable" feedback string — lands at
+             500-800 tokens; 600 was right at the edge and triggered
+             the parse-retry on most calls with substantive feedback.
+             1200 sits comfortably above typical output and well
+             below the retry cap.)
 
           2. If parse fails (typically "Unterminated string" because
              the response was truncated past the closing '}'): retry
@@ -391,7 +397,7 @@ class GeneratorEvaluatorHarness:
             return score, feedback
 
         try:
-            result = _attempt(max_tokens=600)
+            result = _attempt(max_tokens=1200)
             if result is not None:
                 # Cache successful parses ONLY — the passthrough score
                 # for a parse failure is not a real verdict and should

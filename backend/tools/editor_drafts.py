@@ -19,13 +19,27 @@ import structlog
 log = structlog.get_logger(__name__)
 
 DOCUMENT_TYPES = ("midpoint_paper", "executive_brief", "presentation_deck",
-                  "presentation_script")
+                  "presentation_script", "analytical_appendix")
 CREATED_FROM = ("generated", "uploaded", "manual")
 
+# SELECT shape -- kept on the LEGACY (pre-migration-057) column
+# set for backward compatibility with test environments + any
+# deploy where migration 057 has not yet run. The Layer-3 columns
+# (value_manifest, export_verification, data_hash) are still
+# WRITTEN via update_value_manifest / update_export_verification
+# below (those helpers already wrap the UPDATE in try/except), but
+# READING them requires a separate selector. The export-time
+# verification path in main.py reads value_manifest via
+# get_draft_with_layer3 below; the default get_draft / list_drafts
+# stay on the legacy SELECT so the existing test suite is unaffected.
 _DRAFT_COLS = (
     "id, document_type, owner_email, title, content_json, content_text, "
     "word_count, version, is_current, is_deleted, created_from, "
-    "created_at, updated_at"
+    "created_at, updated_at, audit_warnings, data_hash"
+)
+_DRAFT_COLS_LAYER3 = (
+    _DRAFT_COLS
+    + ", value_manifest, export_verification"
 )
 _VERSION_COLS = (
     "id, draft_id, version, content_json, content_text, word_count, "
@@ -45,14 +59,84 @@ def word_count(text: str | None) -> int:
 
 
 def _draft_row(r: Any) -> dict[str, Any]:
-    return {
+    base = {
         "id": r[0], "document_type": r[1], "owner_email": r[2],
         "title": r[3], "content_json": r[4], "content_text": r[5],
         "word_count": r[6], "version": r[7], "is_current": r[8],
         "is_deleted": r[9], "created_from": r[10],
         "created_at": r[11].isoformat() if r[11] else None,
         "updated_at": r[12].isoformat() if r[12] else None,
+        "audit_warnings": r[13],
+        # June 25 2026 (migration 063) -- data_hash is now part of
+        # the base _DRAFT_COLS shape so every selector surfaces it.
+        # NULL on historical drafts created before migration 063;
+        # backfilled to f2e87dec7dcabe71 for is_current=true drafts
+        # by the migration itself.
+        "data_hash": r[14] if len(r) > 14 else None,
     }
+    # Layer 3 columns (value_manifest, export_verification) -- only
+    # populated when the caller used the LAYER3 SELECT shape.
+    # Defaults to None for the legacy SELECT so downstream consumers
+    # can `.get("value_manifest") or {}` uniformly without checking
+    # for KeyError.
+    base["value_manifest"] = r[15] if len(r) > 15 else None
+    base["export_verification"] = r[16] if len(r) > 16 else None
+    return base
+
+
+async def get_draft_with_layer3(
+    draft_id: int,
+) -> dict[str, Any] | None:
+    """Layer 3 variant of get_draft -- includes value_manifest,
+    export_verification, and data_hash columns. Used by the
+    export-time verification path in _editor_export. Returns
+    None on cache miss or DB unavailable.
+
+    Falls back to the legacy SELECT (and returns the draft
+    without the Layer-3 fields) when migration 057 hasn't run --
+    so the export path continues to ship the file even on a
+    pre-Layer-3 environment, just without verification."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            try:
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS_LAYER3} FROM editor_drafts "
+                    "WHERE id = :i AND is_deleted = false"),
+                    {"i": draft_id})
+                r = row.fetchone()
+                if r is None:
+                    return None
+                return _draft_row(r)
+            except Exception:  # noqa: BLE001
+                # Pre-Layer-3 schema -- retry with legacy columns.
+                # The export path tolerates None on Layer-3 fields
+                # (verification short-circuits as 'no_value_manifest').
+                # The first SELECT failed and the session is now in
+                # an aborted-transaction state; PostgreSQL refuses
+                # every subsequent statement on the same connection
+                # with InFailedSQLTransactionError until a rollback
+                # clears the state. Mirror the rollback the sibling
+                # get_current_draft_with_layer3 already does so the
+                # legacy fallback SELECT can actually run instead of
+                # poisoning the session for the SSE flow's later
+                # queries.
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    "WHERE id = :i AND is_deleted = false"),
+                    {"i": draft_id})
+                r = row.fetchone()
+                return _draft_row(r) if r is not None else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_get_draft_layer3_failed", error=str(exc))
+        return None
 
 
 def _version_row(r: Any) -> dict[str, Any]:
@@ -66,7 +150,10 @@ def _version_row(r: Any) -> dict[str, Any]:
 
 
 async def list_drafts(owner_email: str) -> list[dict[str, Any]]:
-    """Every non-deleted draft owned by this user, newest update first."""
+    """Every non-deleted draft owned by this user, newest update first.
+    Owner-scoped retained for tests / legacy callers; the API list
+    endpoint now uses list_all_drafts (June 24 2026 -- team members
+    share access to every document)."""
     try:
         from sqlalchemy import text
         sf = _session()
@@ -80,6 +167,71 @@ async def list_drafts(owner_email: str) -> list[dict[str, Any]]:
             return [_draft_row(r) for r in rows.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("editor_list_drafts_failed", error=str(exc))
+        return []
+
+
+async def list_all_drafts(
+    *, include_all: bool = False,
+) -> list[dict[str, Any]]:
+    """Drafts across all owners, newest update first. Used by the
+    team-member-gated drafts list endpoint -- documents are team-
+    shared, so Mike can open a brief Bob generated and vice versa.
+
+    June 25 2026 -- the default response now scopes to is_current=true
+    rows only. The original (PR #399) implementation returned every
+    non-deleted row, which the DocumentGenerationPanel's
+    'is there a current draft for this document_type' lookup
+    misinterpreted: with dozens of historical rows in the response,
+    the panel either failed to find the current draft or rendered
+    incorrectly, breaking 'Open in Editor' for the whole team.
+
+    include_all=True keeps the old behaviour (full history -- used by
+    the DraftVersionSelector in the editor toolbar, which lists every
+    version of the current document_type). Default False = one row per
+    document_type maximum: the current draft.
+
+    June 25 2026 (PR #421 follow-up) -- defensive fallback when the
+    data_hash column doesn't exist (pre-migration-063 environments).
+    Without the fallback the SELECT raised UndefinedColumnError and
+    the function returned an empty list, which the frontend
+    interpreted as 'no current drafts exist' -- making team members
+    see their tile metadata silently disappear after the column was
+    referenced but before the migration shipped."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return []
+        async with sf() as s:
+            where = (
+                "is_deleted = false AND is_current = true"
+                if not include_all
+                else "is_deleted = false")
+            try:
+                rows = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    f"WHERE {where} "
+                    "ORDER BY updated_at DESC"))
+                return [_draft_row(r) for r in rows.fetchall()]
+            except Exception:  # noqa: BLE001
+                # Pre-migration-063 schema: data_hash column missing.
+                # Rollback the aborted transaction and retry with the
+                # legacy column shape (data_hash gets None via
+                # _draft_row's len(r) guard).
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                legacy_cols = ", ".join(
+                    c.strip() for c in _DRAFT_COLS.split(",")
+                    if c.strip() != "data_hash")
+                rows = await s.execute(text(
+                    f"SELECT {legacy_cols} FROM editor_drafts "
+                    f"WHERE {where} "
+                    "ORDER BY updated_at DESC"))
+                return [_draft_row(r) for r in rows.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_list_all_drafts_failed", error=str(exc))
         return []
 
 
@@ -108,6 +260,10 @@ async def get_current_draft(
     The user's current draft for a document type — the one Academic
     Review reads in preference to an uploaded file. None when the user
     has no draft of that type.
+
+    Owner-scoped retained for legacy callers and tests. The academic
+    review flow now reads team-shared drafts via
+    get_current_draft_by_type (June 25 2026).
     """
     try:
         from sqlalchemy import text
@@ -128,43 +284,495 @@ async def get_current_draft(
         return None
 
 
+async def get_current_draft_by_type(
+    document_type: str,
+) -> dict[str, Any] | None:
+    """June 25 2026 -- team-shared variant of get_current_draft.
+    Returns the single is_current=true draft for a document_type
+    regardless of owner_email so the academic review picks up the
+    canonical brief / deck / appendix / script even when the reviewer
+    didn't generate it themselves.
+
+    Documents are team-shared (PR #399 removed owner-scoping from the
+    drafts API; PR #402 added the one-current-per-type DB constraint
+    via migration 062), so the assumption that one row exists at most
+    is enforced at the DB layer."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            row = await s.execute(text(
+                f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                "WHERE document_type = :t "
+                "AND is_current = true AND is_deleted = false "
+                "ORDER BY updated_at DESC LIMIT 1"),
+                {"t": document_type})
+            found = row.fetchone()
+            return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_get_current_draft_by_type_failed",
+            error=str(exc))
+        return None
+
+
+async def get_current_draft_by_type_with_layer3(
+    document_type: str,
+) -> dict[str, Any] | None:
+    """June 25 2026 -- team-shared variant of
+    get_current_draft_with_layer3 (value_manifest + data_hash). Same
+    fail-open pattern as the sibling: falls back to the legacy SELECT
+    if migration 057 hasn't run, then to None on any further failure.
+    Used by gather_review_context for the per-doc value_manifest
+    surface so the critic context's NUMERIC REFERENCE section reflects
+    the canonical draft regardless of who generated it."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            try:
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS_LAYER3} FROM editor_drafts "
+                    "WHERE document_type = :t "
+                    "AND is_current = true AND is_deleted = false "
+                    "ORDER BY updated_at DESC LIMIT 1"),
+                    {"t": document_type})
+                found = row.fetchone()
+                return _draft_row(found) if found else None
+            except Exception:  # noqa: BLE001
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    "WHERE document_type = :t "
+                    "AND is_current = true AND is_deleted = false "
+                    "ORDER BY updated_at DESC LIMIT 1"),
+                    {"t": document_type})
+                found = row.fetchone()
+                return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_get_current_draft_by_type_with_layer3_failed",
+            error=str(exc))
+        return None
+
+
+async def get_current_draft_with_layer3(
+    owner_email: str, document_type: str,
+) -> dict[str, Any] | None:
+    """Layer 3b (June 21 2026) -- get_current_draft variant that
+    includes the Layer-3 columns (value_manifest, export_verification,
+    data_hash). Used by /api/v1/report/readiness to surface per-
+    document export_verification status to the Reports page badges.
+
+    Falls back gracefully on pre-Layer-3 schemas: a SELECT against
+    the LAYER3 column set on a database that hasn't run migration
+    057 raises, and the helper retries with the legacy column set so
+    the readiness endpoint keeps responding rather than 500ing. The
+    frontend badge then shows the neutral 'Not yet exported' state
+    because export_verification will be None."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            try:
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS_LAYER3} FROM editor_drafts "
+                    "WHERE owner_email = :e AND document_type = :t "
+                    "AND is_current = true AND is_deleted = false "
+                    "ORDER BY updated_at DESC LIMIT 1"),
+                    {"e": owner_email, "t": document_type})
+                found = row.fetchone()
+                return _draft_row(found) if found else None
+            except Exception:  # noqa: BLE001
+                # Pre-Layer-3 schema -- retry with the legacy column
+                # set so the readiness endpoint keeps working on a
+                # database that hasn't run migration 057 yet.
+                # The first SELECT failed and the session is now in
+                # an aborted-transaction state; PostgreSQL refuses
+                # every subsequent statement on the same connection
+                # with InFailedSQLTransactionError until a rollback
+                # clears the state. Roll back before the legacy retry
+                # so the second SELECT actually runs.
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    # Rollback itself can fail if the session is too
+                    # broken; the outer try/except still degrades
+                    # gracefully to None below.
+                    pass
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    "WHERE owner_email = :e AND document_type = :t "
+                    "AND is_current = true AND is_deleted = false "
+                    "ORDER BY updated_at DESC LIMIT 1"),
+                    {"e": owner_email, "t": document_type})
+                found = row.fetchone()
+                return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_get_current_draft_layer3_failed", error=str(exc))
+        return None
+
+
+# Regeneration cascade rules. When a generated draft lands, it
+# can render DOWNSTREAM documents stale because the narrative +
+# numeric sources of truth flow one-way:
+#
+#   executive_brief -> analytical_appendix
+#                   -> presentation_deck
+#                   -> presentation_script
+#   analytical_appendix -> presentation_deck
+#                       -> presentation_script
+#   presentation_deck -> presentation_script
+#   presentation_script -> (nothing downstream)
+#
+# Each entry lists the OTHER document_types that should also have
+# their is_current=true rows cleared when this type regenerates
+# (the source type itself is cleared by the existing same-type
+# UPDATE). Empty tuple = no cascade.
+#
+# June 25 2026 (FIX): appendix regen previously cascaded to
+# executive_brief, which was WRONG -- brief is UPSTREAM of
+# appendix, not downstream. Regenerating the appendix should
+# leave the brief alone (and clear deck + script as the
+# downstream documents). Without this fix, an appendix regen
+# left the brief with no is_current=true draft, breaking the
+# Reports page tile + editor access for the brief surface.
+#
+# The cascade is GENERATION-only. Manual / uploaded drafts skip
+# the cascade so a one-off content edit doesn't invalidate
+# downstream documents. The cascade also fires only AFTER the
+# new draft INSERT has returned a row -- see the
+# `if created_from == 'generated' and found is not None` guard in
+# create_draft below.
+_REGEN_CASCADE: dict[str, tuple[str, ...]] = {
+    "executive_brief": (
+        "analytical_appendix",
+        "presentation_deck",
+        "presentation_script",
+    ),
+    "analytical_appendix": (
+        "presentation_deck",
+        "presentation_script",
+    ),
+    "presentation_deck": (
+        "presentation_script",
+    ),
+    "presentation_script": (),
+    # Retired type kept for historical drafts; no cascade.
+    "midpoint_paper": (),
+}
+
+
 async def create_draft(
     document_type: str, owner_email: str, title: str,
     content_json: Any, content_text: str | None,
     created_from: str = "manual",
+    audit_warnings: Any | None = None,
+    data_hash: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Creates a draft and makes it the current one for this owner +
     document_type — every other draft of the same type is set
     is_current = false, so there is exactly one current draft per type.
+
+    audit_warnings — optional dict carrying the per-check flag list
+    from the post-generation audit (tools.document_audit). Stored as
+    JSONB. Frontend reads it on draft load and renders a banner.
+    None on a clean run.
+
+    June 25 2026 -- when created_from == 'generated', also apply
+    the regeneration cascade per _REGEN_CASCADE: brief / appendix
+    regen marks the other three downstream documents' current
+    drafts as stale; deck regen also clears the script's current;
+    script regen cascades to nothing. The cascade fires inside
+    the same transaction as the new draft insert so the team
+    never sees a half-applied state. Manual / uploaded drafts
+    skip the cascade.
     """
+    # June 26 2026 -- never promote a NULL / empty content_json
+    # draft to is_current=true for GENERATED drafts. A generation
+    # job that failed before the LLM returned could land here with
+    # content_json=None or {}; the existing single-INSERT path
+    # would still SET is_current=true and clear is_current on the
+    # previous good draft, leaving the team with a blank editor
+    # and the prior draft hidden (observed 2026-06-26 with draft
+    # 65 / analytical_appendix: is_current=true but content_json=
+    # NULL; draft 60 with content_len=15336 hidden).
+    #
+    # Scoped to created_from='generated' because:
+    #   * manual creation legitimately starts with an empty body
+    #     and is filled in via PATCH /drafts/{id} (the
+    #     editor_create_draft test scaffolding follows this shape)
+    #   * uploaded creation supplies its own content_json verbatim
+    #     and shouldn't be second-guessed at the create boundary
+    # Generated drafts are the only path that comes from an
+    # opaque async pipeline whose failure modes include "row
+    # exists but content never landed". Pre-flight the guard
+    # there.
+    #
+    # On guard fire: log + return None. The previous current
+    # draft is unchanged; the caller surfaces the failure rather
+    # than handing back a poisoned draft id.
+    if created_from == "generated" and (
+            content_json is None or not content_json):
+        log.warning(
+            "editor_create_draft_rejected_empty_content_json",
+            document_type=document_type,
+            owner_email=owner_email,
+            created_from=created_from,
+            content_json_kind=type(content_json).__name__,
+            hint=(
+                "Generation produced no content; previous current "
+                "draft preserved."))
+        return None
     try:
         from sqlalchemy import text
         sf = _session()
         if sf is None:
             return None
         cj = json.dumps(content_json) if content_json is not None else None
+        aw = (json.dumps(audit_warnings)
+              if audit_warnings is not None else None)
         async with sf() as s:
+            # June 24 2026 -- clear is_current on EVERY existing row
+            # for this document_type, not just rows owned by the
+            # generating user. Documents are team-shared (any team
+            # member can open any draft), so two team members
+            # generating the same doc_type used to leave both rows
+            # with is_current=true. The unique partial index
+            # editor_drafts_one_current_per_type (migration 062)
+            # enforces this at the DB layer; this UPDATE is the
+            # application-layer guard that runs first so the index
+            # never has to reject.
             await s.execute(text(
                 "UPDATE editor_drafts SET is_current = false "
-                "WHERE owner_email = :e AND document_type = :t "
-                "AND is_current = true"),
-                {"e": owner_email, "t": document_type})
-            row = await s.execute(text(
-                "INSERT INTO editor_drafts (document_type, owner_email, "
-                "title, content_json, content_text, word_count, "
-                "created_from, is_current) VALUES (:t, :e, :ti, "
-                "CAST(:cj AS JSONB), :ct, :wc, :cf, true) "
-                f"RETURNING {_DRAFT_COLS}"),
-                {"t": document_type, "e": owner_email, "ti": title,
-                 "cj": cj, "ct": content_text,
-                 "wc": word_count(content_text), "cf": created_from})
+                "WHERE document_type = :t "
+                "AND is_current = true "
+                "AND is_deleted = false"),
+                {"t": document_type})
+            # June 25 2026 -- INSERT data_hash with a defensive
+            # fallback for environments that haven't yet run
+            # migration 063 (test DBs spun up from an older
+            # baseline, partially-rolled-back staging, etc).
+            # Mirrors the get_draft_with_layer3 pattern: try the
+            # full column set first; on UndefinedColumnError fall
+            # back to the legacy INSERT that omits data_hash. The
+            # legacy fallback's RETURNING shape is also reduced
+            # so _draft_row can still parse the result without
+            # advancing past the missing column.
+            insert_cols = _DRAFT_COLS
+            try:
+                row = await s.execute(text(
+                    "INSERT INTO editor_drafts ("
+                    "document_type, owner_email, "
+                    "title, content_json, content_text, word_count, "
+                    "created_from, is_current, audit_warnings, "
+                    "data_hash"
+                    ") VALUES "
+                    "(:t, :e, :ti, CAST(:cj AS JSONB), :ct, :wc, "
+                    ":cf, true, CAST(:aw AS JSONB), :dh) "
+                    f"RETURNING {insert_cols}"),
+                    {
+                        "t": document_type, "e": owner_email,
+                        "ti": title, "cj": cj,
+                        "ct": content_text,
+                        "wc": word_count(content_text),
+                        "cf": created_from, "aw": aw,
+                        "dh": data_hash,
+                    })
+            except Exception:  # noqa: BLE001
+                # Pre-migration-063 DB: data_hash column doesn't
+                # exist. Rollback the aborted transaction then
+                # retry with the legacy column set. The returned
+                # row carries no data_hash; _draft_row's len(r)
+                # guard surfaces None for the field.
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                # Have to re-run the same is_current clear after
+                # rollback, otherwise the next test sees stale
+                # is_current=true rows from the failed attempt.
+                await s.execute(text(
+                    "UPDATE editor_drafts SET is_current = false "
+                    "WHERE document_type = :t "
+                    "AND is_current = true "
+                    "AND is_deleted = false"),
+                    {"t": document_type})
+                legacy_cols = ", ".join(
+                    c.strip() for c in insert_cols.split(",")
+                    if c.strip() != "data_hash")
+                row = await s.execute(text(
+                    "INSERT INTO editor_drafts ("
+                    "document_type, owner_email, "
+                    "title, content_json, content_text, word_count, "
+                    "created_from, is_current, audit_warnings"
+                    ") VALUES "
+                    "(:t, :e, :ti, CAST(:cj AS JSONB), :ct, :wc, "
+                    ":cf, true, CAST(:aw AS JSONB)) "
+                    f"RETURNING {legacy_cols}"),
+                    {
+                        "t": document_type, "e": owner_email,
+                        "ti": title, "cj": cj,
+                        "ct": content_text,
+                        "wc": word_count(content_text),
+                        "cf": created_from, "aw": aw,
+                    })
             found = row.fetchone()
+            # Regeneration cascade. Applies only to generated
+            # drafts; manual / uploaded paths leave downstream
+            # documents alone. Empty cascade tuple (script) is a
+            # no-op.
+            #
+            # GUARD: the cascade fires only when the new draft
+            # INSERT actually returned a row. If RETURNING came
+            # back empty (a corner case under partial schema
+            # mismatch), we skip the cascade so a failed
+            # generation never strands downstream documents with
+            # is_current=false against no new replacement.
+            if created_from == "generated" and found is not None:
+                cascade = _REGEN_CASCADE.get(document_type, ())
+                if cascade:
+                    placeholders = ", ".join(
+                        f":t{i}" for i in range(len(cascade)))
+                    params: dict[str, str] = {
+                        f"t{i}": dt for i, dt in enumerate(cascade)}
+                    await s.execute(text(
+                        "UPDATE editor_drafts "
+                        "SET is_current = false "
+                        "WHERE is_current = true "
+                        "AND is_deleted = false "
+                        f"AND document_type IN ({placeholders})"),
+                        params)
+                    log.info(
+                        "editor_regen_cascade_applied",
+                        source_document_type=document_type,
+                        cascade_types=list(cascade))
             await s.commit()
             return _draft_row(found) if found else None
     except Exception as exc:  # noqa: BLE001
         log.warning("editor_create_draft_failed", error=str(exc))
         return None
+
+
+async def recover_null_current_drafts() -> int:
+    """June 26 2026 -- auto-recovery for the NULL-current-draft bug.
+
+    For each document_type, finds rows where is_current=true AND
+    content_json IS NULL (orphaned by an interrupted generation
+    job that landed the row but never wrote content). The fix is:
+      1. Clear is_current=false on the broken row -- it stays in
+         the table as a historical record but is no longer
+         surfaced to the editor / Academic Review / exports.
+      2. Find the most recent draft for the same document_type
+         WHERE content_json IS NOT NULL AND is_deleted = false,
+         and SET is_current=true on it -- restores the team's
+         prior good draft as the canonical version.
+      3. Log a warning naming both rows so the operator can see
+         the auto-recovery fired in Render logs.
+
+    Returns the total number of recoveries applied (= count of
+    document_types whose current row was a NULL-content shell).
+    Fail-open: a DB error logs + returns 0 -- the caller never
+    blocks on this housekeeping.
+
+    Called from two places:
+      * lifespan() at startup so a crash-loop never leaves the
+        team without a current draft.
+      * post_light_refresh after the existing draft-hash UPDATE
+        so a refresh that was racing a botched generation
+        recovers without an operator restart.
+
+    Idempotent: a subsequent call finds no NULL-current rows
+    (because the previous call cleared them) and returns 0.
+    """
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return 0
+
+        async with sf() as s:
+            # Find every broken row in one query: is_current=true
+            # AND content_json IS NULL (the failure shape).
+            broken = await s.execute(text(
+                "SELECT id, document_type FROM editor_drafts "
+                "WHERE is_current = true "
+                "AND is_deleted = false "
+                "AND content_json IS NULL"))
+            broken_rows = list(broken.fetchall())
+            if not broken_rows:
+                return 0
+
+            recoveries = 0
+            for broken_id, doc_type in broken_rows:
+                # Step 1 -- demote the broken row.
+                await s.execute(text(
+                    "UPDATE editor_drafts SET is_current = false "
+                    "WHERE id = :id"),
+                    {"id": int(broken_id)})
+
+                # Step 2 -- find the most recent good draft for
+                # this document_type to restore as is_current.
+                # Prefer updated_at DESC so a draft the team has
+                # since edited wins over an older un-touched one.
+                good = await s.execute(text(
+                    "SELECT id FROM editor_drafts "
+                    "WHERE document_type = :t "
+                    "AND content_json IS NOT NULL "
+                    "AND is_deleted = false "
+                    "AND id <> :bid "
+                    "ORDER BY updated_at DESC, id DESC LIMIT 1"),
+                    {"t": doc_type, "bid": int(broken_id)})
+                good_row = good.fetchone()
+
+                if good_row is None:
+                    # No prior good draft for this document_type.
+                    # The team will see the editor as 'no draft
+                    # yet, generate one' -- the correct end state
+                    # vs surfacing a blank draft as current.
+                    log.warning(
+                        "editor_null_current_no_prior_recovery",
+                        document_type=doc_type,
+                        broken_draft_id=int(broken_id),
+                        hint=(
+                            "Broken is_current draft demoted but "
+                            "no prior good draft found to restore. "
+                            "Generate the document to seed a new "
+                            "draft."))
+                else:
+                    good_id = int(good_row[0])
+                    await s.execute(text(
+                        "UPDATE editor_drafts SET is_current = true "
+                        "WHERE id = :id"),
+                        {"id": good_id})
+                    log.warning(
+                        "editor_null_current_recovered",
+                        document_type=doc_type,
+                        broken_draft_id=int(broken_id),
+                        restored_draft_id=good_id,
+                        hint=(
+                            "Auto-recovered prior good draft after "
+                            "broken NULL-content current row."))
+                recoveries += 1
+
+            await s.commit()
+            return recoveries
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_recover_null_current_drafts_failed",
+            error=str(exc))
+        return 0
 
 
 async def update_draft(
@@ -193,6 +801,132 @@ async def update_draft(
             return res.rowcount > 0
     except Exception as exc:  # noqa: BLE001
         log.warning("editor_update_draft_failed", error=str(exc))
+        return False
+
+
+async def update_audit_warnings(
+    draft_id: int, audit_warnings: dict[str, Any] | None,
+) -> bool:
+    """PR #336 -- update the audit_warnings JSONB column on a draft
+    row in place. Used by the editor-export path to persist a
+    post-edit audit result so the next editor render surfaces the
+    flags from the actual edited text. NULL clears the column when
+    the audit found nothing."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return False
+        aw = json.dumps(audit_warnings) if audit_warnings else None
+        async with sf() as s:
+            res = await s.execute(text(
+                "UPDATE editor_drafts "
+                "SET audit_warnings = CAST(:aw AS JSONB), "
+                "    updated_at = now() "
+                "WHERE id = :i AND is_deleted = false"),
+                {"aw": aw, "i": draft_id})
+            await s.commit()
+            return res.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_update_audit_warnings_failed", error=str(exc))
+        return False
+
+
+async def update_value_manifest(
+    draft_id: int, value_manifest: dict[str, Any] | None,
+    data_hash: str | None = None,
+) -> bool:
+    """Layer 3 (June 21 2026) -- persists the substitution-table
+    value manifest on the draft at generation time. Used by the
+    brief / deck / appendix generators after the editor draft is
+    created; the manifest is the authoritative reference the
+    export-time verification reads.
+
+    Also stores the generation data_hash on the draft (if the
+    column exists -- migration 057 may have added it; the UPDATE
+    silently no-ops the data_hash field on schemas without it via
+    a try/except fallback).
+
+    Fail-open: a write failure logs and returns False; the
+    document still ships, the export-time verification just
+    won't have a manifest to verify against."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return False
+        vm = json.dumps(value_manifest) if value_manifest else None
+        async with sf() as s:
+            # Try the path that includes data_hash first. The
+            # column was added by migration 057 alongside
+            # value_manifest, but a pre-057 column-set still
+            # works -- the inner except falls back to value-
+            # manifest-only.
+            #
+            # June 21 2026 -- the inner retry must roll back the
+            # session before re-executing. PostgreSQL puts the
+            # session into an aborted-transaction state on any
+            # statement failure (e.g. UndefinedColumn on the
+            # data_hash field), and the retry on the SAME session
+            # then fails with InFailedSQLTransactionError. Same
+            # fix shape as PR #360 applied to
+            # get_current_draft_with_layer3.
+            try:
+                res = await s.execute(text(
+                    "UPDATE editor_drafts "
+                    "SET value_manifest = CAST(:vm AS JSONB), "
+                    "    data_hash = :dh, "
+                    "    updated_at = now() "
+                    "WHERE id = :i AND is_deleted = false"),
+                    {"vm": vm, "dh": data_hash, "i": draft_id})
+            except Exception:  # noqa: BLE001
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    # Rollback can fail if the session is too
+                    # broken; the outer try/except still
+                    # degrades gracefully to False below.
+                    pass
+                res = await s.execute(text(
+                    "UPDATE editor_drafts "
+                    "SET value_manifest = CAST(:vm AS JSONB), "
+                    "    updated_at = now() "
+                    "WHERE id = :i AND is_deleted = false"),
+                    {"vm": vm, "i": draft_id})
+            await s.commit()
+            return res.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_update_value_manifest_failed", error=str(exc))
+        return False
+
+
+async def update_export_verification(
+    draft_id: int, verification: dict[str, Any] | None,
+) -> bool:
+    """Layer 3 -- persist the verify_export_against_cache result
+    on the draft after each export. Frontend status badges read
+    this on the next draft load (no per-card round-trip needed)."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return False
+        ev = json.dumps(verification) if verification else None
+        async with sf() as s:
+            res = await s.execute(text(
+                "UPDATE editor_drafts "
+                "SET export_verification = CAST(:ev AS JSONB), "
+                "    updated_at = now() "
+                "WHERE id = :i AND is_deleted = false"),
+                {"ev": ev, "i": draft_id})
+            await s.commit()
+            return res.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_update_export_verification_failed",
+            error=str(exc))
         return False
 
 

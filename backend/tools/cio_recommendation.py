@@ -61,6 +61,13 @@ def compute_context(
 
     posterior = (current or {}).get("hmm_probabilities") or {}
     regime = (current or {}).get("hmm_regime")
+    # PR #282 added monthly_hmm_regime + hmm_models_agree to
+    # detect_current_regime(). Thread them through compute_context so
+    # the recommendation prose generator and downstream agent context
+    # builders all reference the same structured fields rather than
+    # digging into the raw `current` dict.
+    monthly_regime = (current or {}).get("monthly_hmm_regime")
+    hmm_models_agree = (current or {}).get("hmm_models_agree", True)
     built = compute_regime_blends(strategy_results, hmm_result)
     if built.get("error"):
         return {"error": built["error"]}
@@ -79,6 +86,8 @@ def compute_context(
 
     return {
         "regime": regime,
+        "monthly_regime": monthly_regime,
+        "hmm_models_agree": hmm_models_agree,
         "posterior": {k: round(float(v), 4)
                       for k, v in posterior.items()
                       if v is not None},
@@ -166,13 +175,23 @@ def generate_recommendation(context: dict, macro_context: str = "") -> dict:
         "four mandatory limitations verbatim.")
     try:
         import json
+        # max_tokens=4000 (June 19 2026, raised from 600). The four-
+        # component response is signal + recommendation + dissenting_view
+        # + key_risk (each one short paragraph) + four mandatory
+        # limitations (verbatim ~100 tokens each) + confidence + blend
+        # weights. At 600 tokens the model occasionally truncated inside
+        # the signal field, leaving the JSON unclosed -- the raw_preview
+        # log from the Render side showed the cut happening mid-string
+        # in the first field. 4000 is the same ceiling the deck per-
+        # slide call uses (post-#100); well under Sonnet's per-call
+        # cap and the project credit budget for a once-per-data_hash
+        # call. The global default MAX_OUTPUT_TOKENS=1024 is for
+        # generic helpers; this call site overrides it because the
+        # mandatory four limitations alone are ~400 tokens.
         raw = call_claude(SONNET_MODEL,
                           LANDING_PAGE_RECOMMENDATION_SYSTEM_PROMPT, user,
-                          max_tokens=600, trigger="cio_recommendation")
-        text = (raw or "").strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-        data = json.loads(text[text.find("{"): text.rfind("}") + 1])
+                          max_tokens=4000, trigger="cio_recommendation")
+        data = _parse_recommendation_json(raw)
         # The four mandatory limitations are non-negotiable: enforce them
         # even if the model omitted or altered one.
         data["limitations"] = list(MANDATORY_LIMITATIONS)
@@ -196,6 +215,78 @@ def generate_recommendation(context: dict, macro_context: str = "") -> dict:
     except Exception as exc:  # noqa: BLE001
         log.warning("cio_recommendation_llm_failed", error=str(exc))
         return _deterministic_recommendation(context)
+
+
+def _parse_recommendation_json(raw: str | None) -> dict:
+    """Extract the JSON object from a CIO LLM response and parse it.
+
+    Hardens against four observed failure modes:
+      * markdown fences around the body (` ```json {...} ``` `),
+      * preamble text before the opening brace ("Here is the JSON: {..."),
+      * trailing prose after the closing brace ("...} Note: ..."),
+      * truncated responses where the closing brace + closing fence
+        never arrive (an unclosed string in `signal` runs the model
+        past max_tokens before the JSON can close).
+
+    The fence strip is now regex-based -- matches `` ```json ``,
+    `` ``` ``, optional whitespace and optional `json` tag, both as
+    LEADING and TRAILING anchors. Distinct from text.strip('`') which
+    over-strips backticks anywhere a leading/trailing run lives;
+    the regex anchors guarantee we ONLY peel the markdown fence
+    delimiters and never touch backticks inside the body. After the
+    fence strip the existing find('{') / rfind('}') extraction runs
+    as before.
+
+    A raw-preview WARNING fires on parse failure so the Render-side
+    delimiter error ("Expecting ',' delimiter: line 9 column 4
+    (char 1222)") is no longer cryptic -- the truncated raw response
+    shows up in Render logs alongside the exception.
+
+    Raises ValueError when the response has no JSON object braces, and
+    the underlying json.JSONDecodeError when the trimmed body fails to
+    parse. The caller's outer except clause converts either into the
+    deterministic fail-open recommendation, so persistence still records
+    a row but with _model = 'deterministic_fallback' (which is what
+    blocks the warm's landed flag from claiming a real LLM write).
+    """
+    import json
+    import re
+    text = (raw or "").strip()
+    # Regex-anchored fence strip. The optional `json` tag is matched
+    # case-insensitively. Anchoring at ^ and $ means a stray ``` inside
+    # the body (e.g. a model that mentions code in the signal prose)
+    # is never touched -- only the surrounding fence is peeled.
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```$', '', text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        log.warning(
+            "cio_recommendation_no_json_object",
+            raw_preview=(raw or "")[:500])
+        # Distinct error message for truncated responses (fence stripped
+        # but no closing brace ever arrived) so the operator can tell
+        # "model refused to answer" from "model ran out of tokens
+        # mid-response". The two are diagnostically different.
+        if "```" not in (raw or "") and text.startswith("{"):
+            raise ValueError(
+                "Truncated LLM response: no closing brace found "
+                "(consider raising max_tokens)")
+        raise ValueError("No JSON object found in LLM response")
+    cleaned = text[start:end + 1]
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        log.warning(
+            "cio_recommendation_json_parse_failed",
+            raw_preview=(raw or "")[:500])
+        raise
+    if not isinstance(parsed, dict):
+        log.warning(
+            "cio_recommendation_json_not_object",
+            raw_preview=(raw or "")[:500])
+        raise ValueError("LLM response JSON is not an object")
+    return parsed
 
 
 # ── persistence: data_hash cache (serve-from-DB, recompute on change) ────────
@@ -263,6 +354,603 @@ async def get_latest_recommendation() -> dict | None:
         return None
 
 
+async def get_latest_non_fallback_recommendation() -> dict | None:
+    """The most recent recommendation written by a REAL LLM model -- skips
+    rows where `model = 'deterministic_fallback'`. The executive brief's
+    Final Recommendations section uses this as a graceful fallback when
+    the live regime build is degraded (a transient HMM fit failure, a
+    cold strategy cache, or a CIO call that returned the deterministic
+    fallback). The brief then writes the recommendation off the last
+    known real regime + blend, and discloses the staleness in the
+    prose. Fail-open to None. June 18 2026."""
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text("SELECT raw_json, data_hash, regime, model, "
+                     "computed_at FROM cio_recommendations "
+                     "WHERE model IS NOT NULL "
+                     "  AND model <> 'deterministic_fallback' "
+                     "ORDER BY computed_at DESC LIMIT 1"))
+            r = row.fetchone()
+            if not r:
+                return None
+            payload = dict(r[0]) if r[0] else {}
+            payload["data_hash"] = r[1]
+            payload["regime"] = r[2]
+            payload["model"] = r[3]
+            payload["computed_at"] = str(r[4])
+            return payload
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "cio_recommendation_latest_non_fallback_read_error",
+            error=str(exc))
+        return None
+
+
+async def get_prior_recommendation(current_data_hash: str) -> dict | None:
+    """The most recent recommendation written under a DIFFERENT data_hash
+    than the current one — i.e. the previous distinct council output the
+    pipeline produced before today's data state.
+
+    Used by the CIO's _synthesise step to enable Section C (the "shift
+    narrative") of the mandatory transparency structure. When a prior
+    exists, the synthesis prompt receives it as `prior_recommendation`
+    in the DATA block and the CIO compares prior vs current — what
+    regime signal shifted, how the blend moved, what the weight change
+    means. When NONE exists (first run after a cache clear, or genuinely
+    first ever) the helper returns None and Section C is correctly
+    omitted from the response per the system prompt's `CONDITIONAL`
+    instruction.
+
+    The data_hash column carries either a bare base hash (older rows)
+    or a composite `{base}_{regime}_{bucket}` (newer rows — see the
+    comment block above near _composite_key). For the "prior" lookup
+    we want any row whose key differs from the current key — that
+    captures both a base-hash change (the underlying data moved) AND a
+    regime/confidence-bucket change without a base shift. Both count
+    as a prior distinct recommendation for narrative purposes.
+
+    Fail-open to None on a DB error, a missing table, or a missing
+    current_data_hash. June 5 2026."""
+    if not _DB_AVAILABLE or not current_data_hash:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text("SELECT raw_json, data_hash, regime, model, "
+                     "computed_at FROM cio_recommendations "
+                     "WHERE data_hash != :h "
+                     "ORDER BY computed_at DESC LIMIT 1"),
+                {"h": current_data_hash})
+            r = row.fetchone()
+            if not r:
+                return None
+            payload = dict(r[0]) if r[0] else {}
+            payload["data_hash"] = r[1]
+            payload["regime"] = r[2]
+            payload["model"] = r[3]
+            payload["computed_at"] = str(r[4])
+            return payload
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_prior_read_error", error=str(exc))
+        return None
+
+
+# ── regime-aware cache key (recommendation prose) ──────────────────────────
+#
+# The narrative prose (signal / recommendation / dissenting view) is keyed on
+# the COMPOSITE {data_hash}_{regime}_{confidence_bucket} so a regime flip or
+# a confidence move that crosses a 10pp bucket boundary regenerates the
+# prose, while day-to-day posterior noise within a bucket stays a cache hit.
+# Stored in the same `data_hash` VARCHAR column — no schema change. Bare-
+# data_hash rows from earlier writes remain valid and are served as the
+# fallback by get_endpoint_recommendation when no composite-key row exists.
+
+
+def _confidence_bucket(confidence: float | None) -> int | None:
+    """Round confidence (0..1) to the nearest 10 percentage points,
+    round-half-up. Returns None when confidence is missing."""
+    if confidence is None:
+        return None
+    try:
+        pct = max(0.0, min(1.0, float(confidence))) * 100.0
+    except (TypeError, ValueError):
+        return None
+    # +5 then integer-divide by 10 gives round-half-up (positives only).
+    return int((pct + 5) // 10) * 10
+
+
+def regime_cache_key(
+    data_hash: str, regime: str | None, confidence: float | None,
+) -> str:
+    """Composite cache key for the recommendation prose:
+    {data_hash}_{regime}_{bucket}. Falls back to the bare data_hash when
+    regime or confidence is missing — the existing read path (latest by
+    computed_at) still works for those rows, and a later warm with full
+    regime/confidence info writes a proper composite-keyed row."""
+    if not data_hash:
+        return ""
+    bucket = _confidence_bucket(confidence)
+    if not regime or bucket is None:
+        return data_hash
+    return f"{data_hash}_{regime}_{bucket}"
+
+
+def _parse_cache_key(key: str | None) -> tuple[str | None, str | None, int | None]:
+    """Inverse of regime_cache_key. Bare-hash keys (no underscores in the
+    SHA prefix) yield (hash, None, None). Composite keys yield all three.
+    Robust to extra underscores in the regime token (rejoins the middle)."""
+    if not key:
+        return None, None, None
+    parts = key.split("_")
+    if len(parts) < 3:
+        return key, None, None
+    # bucket = last segment (digits); regime = everything between hash and bucket.
+    try:
+        bucket = int(parts[-1])
+    except ValueError:
+        return key, None, None
+    return parts[0], "_".join(parts[1:-1]) or None, bucket
+
+
+def _miss_reason(
+    target_key: str, latest_key: str | None,
+    data_hash: str, regime: str | None, confidence: float | None,
+) -> str:
+    """Classify a cache miss by comparing the requested composite key
+    against the latest cached key. Used in the cio_recommendation_cache_miss
+    log so the trigger is observable in production."""
+    if not latest_key:
+        return "no_cached_recommendation"
+    latest_hash, latest_regime, latest_bucket = _parse_cache_key(latest_key)
+    if latest_hash != data_hash:
+        return "data_hash_change"
+    if (latest_regime or None) != (regime or None):
+        return "regime_shift"
+    if latest_bucket != _confidence_bucket(confidence):
+        return "confidence_shift"
+    return "unknown"
+
+
+# In-process guard: a flapping regime / bucket boundary near 85% should
+# not fire a fresh LLM call on every endpoint read. The first miss schedules
+# a regenerate; subsequent misses for the same composite key are no-ops
+# until that task finishes.
+_inflight_keys: set[str] = set()
+# Hold strong references so a fire-and-forget task is not GC'd mid-run.
+_bg_tasks: set = set()
+
+
+async def _regenerate_under_key(key: str) -> None:
+    """Run the full live-context + generation flow and persist under the
+    supplied composite key. Fail-open. The inflight key is cleared in the
+    finally block so a later miss can retry."""
+    try:
+        built = await _build_live_context()
+        if built.get("error"):
+            log.warning("cio_recommendation_regenerate_context_unavailable",
+                        key=key, error=built["error"])
+            return
+        rec = generate_recommendation(built["context"], built["macro"])
+        if rec.get("error"):
+            log.warning("cio_recommendation_regenerate_generate_failed",
+                        key=key, error=rec.get("error"))
+            return
+        # June 22 2026 -- merge blend_weights from the live context
+        # into rec BEFORE persistence. The rec dict produced by
+        # _deterministic_recommendation / generate_recommendation
+        # historically carried only the four-component narrative
+        # (signal / recommendation / dissenting_view / key_risk)
+        # plus confidence and limitations. blend_weights lived in
+        # the context dict and was used by the prose generator
+        # but never persisted, so the read path
+        # (get_latest_recommendation -> dict(raw_json)) returned
+        # cio_row without blend_weights and every downstream
+        # consumer (data reference sheet, document substitution
+        # for BLEND_*_WT / CURRENT_*_PCT tokens) fell through to
+        # em-dash. The live tile compensated via an overlay from
+        # get_cached_forward_projection; the read path now has
+        # the same data first-class.
+        rec = {**rec, "blend_weights":
+               built["context"].get("blend_weights") or {}}
+        await _persist(key, rec, built["context"].get("regime"))
+        log.info("cio_recommendation_regenerated", key=key,
+                 model=rec.get("_model"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_regenerate_failed",
+                    key=key, error=str(exc))
+    finally:
+        _inflight_keys.discard(key)
+
+
+def schedule_regime_aware_refresh(
+    data_hash: str, regime: str | None, confidence: float | None, *,
+    reason: str,
+) -> None:
+    """Schedule a background regenerate of the recommendation prose under
+    the live regime-aware key. Logs the miss reason
+    (regime_shift / confidence_shift / data_hash_change / unknown) so what
+    triggered the regenerate is observable. No-op if a regenerate for the
+    same key is already in flight."""
+    key = regime_cache_key(data_hash, regime, confidence)
+    if not key or key in _inflight_keys:
+        return
+    log.info(
+        "cio_recommendation_cache_miss",
+        reason=reason,
+        data_hash=data_hash[:8] if data_hash else "",
+        regime=regime,
+        bucket=_confidence_bucket(confidence),
+        key=key,
+    )
+    _inflight_keys.add(key)
+    try:
+        import asyncio
+        task = asyncio.create_task(_regenerate_under_key(key))
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_regenerate_schedule_failed",
+                    key=key, error=str(exc))
+        _inflight_keys.discard(key)
+
+
+async def get_endpoint_recommendation() -> dict | None:
+    """Read path used by /api/v1/recommendation.
+
+    Resolves the LIVE regime + confidence-bucket from detect_current_regime()
+    and the current data_hash, then prefers a cached row stored under the
+    composite key. On a cache miss, returns the most recent cached row
+    (whatever its key) and schedules a background regenerate under the live
+    key — so the tile stays fast and the next read serves the fresh prose.
+    Fail-open to get_latest_recommendation() at every step."""
+    try:
+        import asyncio
+        from tools.regime_detector import detect_current_regime
+    except Exception:  # noqa: BLE001
+        return await get_latest_recommendation()
+    try:
+        live = await asyncio.to_thread(detect_current_regime)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_live_regime_unavailable",
+                    error=str(exc))
+        return await get_latest_recommendation()
+    regime = (live or {}).get("hmm_regime")
+    probs = (live or {}).get("hmm_probabilities") or {}
+    confidence = probs.get(regime) if regime else None
+    monthly_regime = (live or {}).get("monthly_hmm_regime")
+    hmm_models_agree = (live or {}).get("hmm_models_agree", True)
+    data_hash = await _current_data_hash()
+    if not data_hash:
+        return _attach_divergence(
+            await get_latest_recommendation(),
+            regime, confidence, monthly_regime, hmm_models_agree)
+    target_key = regime_cache_key(data_hash, regime, confidence)
+    # Try the composite-key cache (falls through to None on bare-hash keys
+    # too, since the bare data_hash IS the composite when regime is None).
+    rec = await get_cached_for_hash(target_key)
+    if rec is not None:
+        return _attach_divergence(
+            rec, regime, confidence, monthly_regime, hmm_models_agree)
+    latest = await get_latest_recommendation()
+    # Schedule background regenerate (only when we have enough to compose
+    # a real composite key — otherwise the legacy bare-hash row is correct
+    # by definition).
+    if regime and confidence is not None:
+        reason = _miss_reason(
+            target_key, (latest or {}).get("data_hash"),
+            data_hash, regime, confidence)
+        schedule_regime_aware_refresh(
+            data_hash, regime, confidence, reason=reason)
+    return _attach_divergence(
+        latest, regime, confidence, monthly_regime, hmm_models_agree)
+
+
+async def compute_implied_asset_allocation(
+    blend_weights: dict[str, float] | None,
+) -> dict[str, float] | None:
+    """Translate the live regime-conditional blend (per-strategy weights)
+    into asset-class percentages. The per-strategy avg_equity_weight /
+    avg_bond_weight live in strategy_results_cache; we multiply each
+    strategy's weight in the blend by its asset-class composition and
+    sum to portfolio totals.
+
+    Returns {equity_pct, bond_pct, cash_pct} as fractions of 1.0, OR
+    None when the strategy cache is empty / the blend is missing /
+    every blend weight is zero. Fail-open across the board: a cold
+    cache returns None and the caller renders the existing CIO card
+    without the new line.
+
+    PURE READ: this helper does NOT recompute or refit anything. It
+    pulls already-cached primitives only -- strategy_results_cache
+    and the blend_weights dict the caller supplies (usually from the
+    CIO recommendation's own blend_weights field, persisted at the
+    last warm). Bridge #81.
+    """
+    if not blend_weights:
+        return None
+    try:
+        from tools.cache import get_latest_strategy_cache
+    except Exception as exc:  # noqa: BLE001
+        log.warning("implied_asset_allocation_imports_failed",
+                    error=str(exc))
+        return None
+    try:
+        strategies = await get_latest_strategy_cache() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("implied_asset_allocation_cache_read_failed",
+                    error=str(exc))
+        return None
+    if not strategies:
+        return None
+
+    total_eq = 0.0
+    total_bd = 0.0
+    total_ig = 0.0
+    total_hy = 0.0
+    # ig_hy_evidence_count -- number of contributing strategies that
+    # carry the explicit IG/HY split fields (avg_ig_weight /
+    # avg_hy_weight). When zero, no strategy in the live blend has
+    # the new fields and we fall back to omitting ig_bond_pct /
+    # hy_bond_pct from the result so the consumer falls through to
+    # the combined-bonds rendering. When non-zero we surface the
+    # split even if one or two strategies in the blend lack it
+    # (treating absent as 0 IG / 0 HY for those rows -- they only
+    # contribute via the combined bond_pct).
+    ig_hy_evidence_count = 0
+    total_w = 0.0
+    for strategy, weight in blend_weights.items():
+        try:
+            w = float(weight or 0)
+        except (TypeError, ValueError):
+            continue
+        if w <= 0:
+            continue
+        s = strategies.get(strategy) or {}
+        try:
+            eq = float(s.get("avg_equity_weight") or 0)
+            bd = float(s.get("avg_bond_weight") or 0)
+        except (TypeError, ValueError):
+            continue
+        ig_raw = s.get("avg_ig_weight")
+        hy_raw = s.get("avg_hy_weight")
+        if ig_raw is not None and hy_raw is not None:
+            try:
+                ig = float(ig_raw)
+                hy = float(hy_raw)
+                total_ig += w * ig
+                total_hy += w * hy
+                ig_hy_evidence_count += 1
+            except (TypeError, ValueError):
+                pass
+        total_eq += w * eq
+        total_bd += w * bd
+        total_w += w
+
+    if total_w <= 0:
+        return None
+
+    # Cash residual = whatever the strategies' weighted-average exposures
+    # do not cover. A fully-invested blend (eq + bd ≈ 1) leaves cash ≈ 0;
+    # a partial blend (cash drag from one of the strategies) surfaces
+    # explicitly so the audience can SEE the un-invested fraction
+    # instead of mentally subtracting.
+    cash = max(0.0, 1.0 - total_eq - total_bd)
+    result: dict[str, float] = {
+        "equity_pct": round(total_eq, 4),
+        "bond_pct": round(total_bd, 4),
+        "cash_pct": round(cash, 4),
+    }
+    # IG/HY split (June 2026). Surfaced only when at least one strategy
+    # in the live blend carries the new fields; otherwise the consumer
+    # renders the combined-bonds row alone. Once the backfill script
+    # has run AND the strategy cache holds the new keys on every row,
+    # ig_hy_evidence_count == len(non-zero blend members) and the
+    # detail rendering kicks in everywhere.
+    if ig_hy_evidence_count > 0:
+        result["ig_bond_pct"] = round(total_ig, 4)
+        result["hy_bond_pct"] = round(total_hy, 4)
+    return result
+
+
+async def compute_regime_blends_implied(
+    regime_blends: dict[str, dict[str, float]] | None,
+    current_implied: dict[str, float] | None,
+) -> dict[str, dict[str, Any]] | None:
+    """For each regime in `regime_blends`, multiply its per-strategy
+    weights by per-strategy avg_equity_weight / avg_bond_weight from
+    strategy_results_cache and return the asset-class split + the
+    delta (in percentage points) against `current_implied`.
+
+    Returns:
+        {
+          "BULL": {
+            "weights":  {strategy: weight},    # the input pass-through
+            "equity_pct": 0.68, "bond_pct": 0.32, "cash_pct": 0.00,
+            "equity_delta_pp": 35.6,           # percentage points
+            "bond_delta_pp": -35.6,
+          },
+          "BEAR": {...},
+          "TRANSITION": {...},
+        }
+
+    Fail-open: returns None on cold cache, empty regime_blends, or any
+    internal error. Same pure-read contract as
+    compute_implied_asset_allocation. Bridge (June 8 2026).
+    """
+    if not regime_blends:
+        return None
+    try:
+        from tools.cache import get_latest_strategy_cache
+    except Exception as exc:  # noqa: BLE001
+        log.warning("regime_blends_implied_imports_failed", error=str(exc))
+        return None
+    try:
+        strategies = await get_latest_strategy_cache() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("regime_blends_implied_cache_read_failed",
+                    error=str(exc))
+        return None
+    if not strategies:
+        return None
+
+    cur_eq = (current_implied or {}).get("equity_pct")
+    cur_bd = (current_implied or {}).get("bond_pct")
+    cur_ig = (current_implied or {}).get("ig_bond_pct")
+    cur_hy = (current_implied or {}).get("hy_bond_pct")
+    out: dict[str, dict[str, Any]] = {}
+    for regime, weights in regime_blends.items():
+        if not isinstance(weights, dict) or not weights:
+            continue
+        total_eq = 0.0
+        total_bd = 0.0
+        total_ig = 0.0
+        total_hy = 0.0
+        ig_hy_evidence_count = 0
+        total_w = 0.0
+        for strategy, w_raw in weights.items():
+            try:
+                w = float(w_raw or 0)
+            except (TypeError, ValueError):
+                continue
+            if w <= 0:
+                continue
+            s = strategies.get(strategy) or {}
+            try:
+                eq = float(s.get("avg_equity_weight") or 0)
+                bd = float(s.get("avg_bond_weight") or 0)
+            except (TypeError, ValueError):
+                continue
+            ig_raw = s.get("avg_ig_weight")
+            hy_raw = s.get("avg_hy_weight")
+            if ig_raw is not None and hy_raw is not None:
+                try:
+                    total_ig += w * float(ig_raw)
+                    total_hy += w * float(hy_raw)
+                    ig_hy_evidence_count += 1
+                except (TypeError, ValueError):
+                    pass
+            total_eq += w * eq
+            total_bd += w * bd
+            total_w += w
+        if total_w <= 0:
+            continue
+        cash = max(0.0, 1.0 - total_eq - total_bd)
+        entry: dict[str, Any] = {
+            "weights": dict(weights),
+            "equity_pct": round(total_eq, 4),
+            "bond_pct": round(total_bd, 4),
+            "cash_pct": round(cash, 4),
+        }
+        # Delta in PERCENTAGE POINTS (not fractions). Surfaced for
+        # every dimension whose current_implied has a value.
+        if isinstance(cur_eq, (int, float)) and isinstance(cur_bd, (int, float)):
+            entry["equity_delta_pp"] = round(
+                (total_eq - float(cur_eq)) * 100, 1)
+            entry["bond_delta_pp"] = round(
+                (total_bd - float(cur_bd)) * 100, 1)
+        # IG/HY split + delta (June 2026). Same evidence-count rule as
+        # compute_implied_asset_allocation: only surface when at least
+        # one contributing strategy carries the new fields.
+        if ig_hy_evidence_count > 0:
+            entry["ig_bond_pct"] = round(total_ig, 4)
+            entry["hy_bond_pct"] = round(total_hy, 4)
+            if isinstance(cur_ig, (int, float)) and isinstance(
+                    cur_hy, (int, float)):
+                entry["ig_bond_delta_pp"] = round(
+                    (total_ig - float(cur_ig)) * 100, 1)
+                entry["hy_bond_delta_pp"] = round(
+                    (total_hy - float(cur_hy)) * 100, 1)
+        out[regime] = entry
+    return out or None
+
+
+def compute_blend_change_trigger(
+    regime: str | None,
+    monthly_regime: str | None,
+    hmm_models_agree: bool,
+) -> str:
+    """Synthesise the one-sentence "what would shift the blend" guidance
+    that goes under the CIO card's allocation line.
+
+    The CIO card asks: "what would cause us to rebalance?" The answer is
+    "the regime read shifts" -- but expanding that into something the
+    audience can act on means naming the watch points (the threshold
+    constants from config.py) and any current divergence between the
+    daily and monthly HMM fits.
+
+    Single readable sentence, NOT a data dump. Fail-open: when the
+    current regime is unknown the helper still returns a generic
+    sentence so the card is never blank. Bridge #81.
+    """
+    from config import VIX_HIGH_THRESHOLD, BEAR_MARKET_THRESHOLD
+
+    vix = int(VIX_HIGH_THRESHOLD)
+    trend_pct = int(abs(BEAR_MARKET_THRESHOLD) * 100)
+
+    if regime and not hmm_models_agree and monthly_regime:
+        # The two HMMs already disagree -- the next blend shift is
+        # whichever model concedes first. Lead with that.
+        return (
+            f"Daily HMM reads {regime} while the monthly HMM still reads "
+            f"{monthly_regime}; the blend tilts further when the two "
+            f"converge, or sooner if VIX sustains above {vix} or the "
+            f"trailing equity trend falls below {-trend_pct}%."
+        )
+    if regime == "BEAR":
+        return (
+            f"Blend de-risks further on a deeper bear signal (VIX sustained "
+            f"above {vix} or HY credit spreads widening), and re-risks "
+            f"when the HMM flips back to BULL or TRANSITION."
+        )
+    if regime == "BULL":
+        return (
+            f"Blend stays risk-on while the HMM reads BULL; a regime flip "
+            f"to BEAR or sustained VIX above {vix} would tilt the blend "
+            f"toward MIN_VARIANCE and VOL_TARGETING."
+        )
+    if regime == "TRANSITION":
+        return (
+            f"Blend stays neutral while the HMM reads TRANSITION; a flip "
+            f"to BULL re-risks toward growth strategies, and a flip to "
+            f"BEAR tilts toward MIN_VARIANCE and VOL_TARGETING."
+        )
+    return (
+        f"Blend shifts on the next HMM regime flip; the watch signals are "
+        f"VIX above {vix}, a trailing equity trend below {-trend_pct}%, "
+        f"or a sustained yield-curve inversion."
+    )
+
+
+def _attach_divergence(
+    rec: dict | None,
+    daily_regime: str | None,
+    confidence: float | None,
+    monthly_regime: str | None,
+    hmm_models_agree: bool,
+) -> dict | None:
+    """Overlay divergence_disclosure on the recommendation dict when the
+    daily HMM (live label) and the monthly HMM (blend weights) disagree.
+    Live-state field, NOT baked into the cached prose — the disclosure
+    reflects the moment of the read, not the moment the prose was written.
+    Fail-open: if any input is missing, leave rec untouched."""
+    if rec is None:
+        return None
+    if hmm_models_agree or not daily_regime or not monthly_regime:
+        return rec
+    pct = f"{float(confidence) * 100:.1f}%" if confidence is not None else "—"
+    rec["divergence_disclosure"] = (
+        f"Note: live regime signal ({daily_regime} at {pct}) diverges from "
+        f"the blend regime ({monthly_regime}). Blend weights reflect the "
+        f"monthly model; the live label reflects the daily model."
+    )
+    return rec
+
+
 async def _persist(data_hash: str, rec: dict, regime: str | None) -> None:
     if not _DB_AVAILABLE or not data_hash:
         return
@@ -271,6 +959,22 @@ async def _persist(data_hash: str, rec: dict, regime: str | None) -> None:
     from sqlalchemy import text
     try:
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            # Recovery upsert (June 18 2026). The earlier
+            # ON CONFLICT (data_hash) DO NOTHING shape was idempotent --
+            # but if a transient LLM failure wrote a deterministic_fallback
+            # row first, every subsequent successful warm for the same
+            # data_hash was silently discarded, and the digest kept
+            # reading the fallback row until the underlying data_hash
+            # changed (next monthly market data tick).
+            #
+            # DO UPDATE with a guarded WHERE flips this: a real LLM row
+            # (any model that is NOT 'deterministic_fallback') overwrites
+            # a previously stored fallback for the same hash. The reverse
+            # case -- a real row already exists and a later warm falls
+            # back -- is blocked by the WHERE: we never replace a real
+            # recommendation with a fallback. computed_at bumps to now()
+            # on recovery so any read ordered by computed_at sees the
+            # corrected row immediately.
             await session.execute(
                 text(
                     "INSERT INTO cio_recommendations "
@@ -279,7 +983,19 @@ async def _persist(data_hash: str, rec: dict, regime: str | None) -> None:
                     "VALUES (:h, :sig, CAST(:conf AS JSONB), :dis, "
                     " CAST(:lim AS JSONB), :reg, :model, "
                     " CAST(:raw AS JSONB)) "
-                    "ON CONFLICT (data_hash) DO NOTHING"),
+                    "ON CONFLICT (data_hash) DO UPDATE SET "
+                    "  signal = EXCLUDED.signal, "
+                    "  confidence = EXCLUDED.confidence, "
+                    "  dissenting_view = EXCLUDED.dissenting_view, "
+                    "  limitations = EXCLUDED.limitations, "
+                    "  regime = EXCLUDED.regime, "
+                    "  model = EXCLUDED.model, "
+                    "  raw_json = EXCLUDED.raw_json, "
+                    "  computed_at = now() "
+                    "WHERE cio_recommendations.model "
+                    "      = 'deterministic_fallback' "
+                    "  AND EXCLUDED.model "
+                    "      IS DISTINCT FROM 'deterministic_fallback'"),
                 {
                     "h": data_hash,
                     "sig": rec.get("signal"),
@@ -333,30 +1049,44 @@ async def _build_live_context() -> dict:
 
 
 async def refresh_cio_recommendation(*, force: bool = False) -> dict:
-    """The hash-pipeline entry point. Serve the cached recommendation
-    when the current data_hash already has one; otherwise build the live
-    context, fire the single LLM call, persist under the data_hash, and
-    return it. force=True recomputes even on a cache hit (not used by the
-    pipeline; available for an operator backfill). Fail-open."""
+    """The hash-pipeline entry point. Builds the live context, composes the
+    regime-aware cache key (data_hash + regime + confidence bucket), and
+    serves the cached recommendation when that exact composite key already
+    has a row. Otherwise fires the single LLM call and persists under the
+    composite key. force=True recomputes even on a cache hit (operator
+    backfill). Fail-open. _build_live_context is cheap (HMM fit + regime
+    detect both use in-process caches), so always building first is a fair
+    trade for picking up regime/bucket changes in the warm path."""
     data_hash = await _current_data_hash()
-    if not force:
-        cached = await get_cached_for_hash(data_hash)
-        if cached:
-            cached["cache"] = "hit"
-            return cached
-
     built = await _build_live_context()
     if built.get("error"):
         log.warning("cio_recommendation_context_unavailable",
                     error=built["error"])
         return built
+    regime = built["context"].get("regime")
+    confidence = built["context"].get("probability")
+    key = regime_cache_key(data_hash, regime, confidence)
+    if not force:
+        cached = await get_cached_for_hash(key)
+        if cached:
+            cached["cache"] = "hit"
+            return cached
     rec = generate_recommendation(built["context"], built["macro"])
     if rec.get("error"):
         return rec
-    await _persist(data_hash, rec, built["context"].get("regime"))
+    # June 22 2026 -- merge blend_weights into rec before persist.
+    # See _regenerate_under_key for the why; both callsites must
+    # do this so a hot-path miss AND a background regen land the
+    # same shape.
+    rec = {**rec, "blend_weights":
+           built["context"].get("blend_weights") or {}}
+    await _persist(key, rec, regime)
     rec["cache"] = "miss"
-    rec["data_hash"] = data_hash
+    rec["data_hash"] = key
     log.info("cio_recommendation_computed",
              data_hash=data_hash[:8] if data_hash else "",
+             regime=regime,
+             bucket=_confidence_bucket(confidence),
+             key=key,
              model=rec.get("_model"))
     return rec

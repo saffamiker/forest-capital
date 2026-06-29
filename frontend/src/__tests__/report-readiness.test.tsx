@@ -242,35 +242,91 @@ describe('ReportBlockingModal', () => {
     fireEvent.click(screen.getByTestId('report-blocking-modal-dismiss'))
     expect(onClose).toHaveBeenCalled()
   })
+
+  it('renders each cold cache by name when coldCaches is supplied',
+    () => {
+      // The 422 detail for caches_not_warm carries a cold_caches list.
+      // The modal must surface each entry by name so the user knows
+      // exactly which warm to trigger (a generic "warm the caches"
+      // instruction was previously the only signal).
+      render(<ReportBlockingModal open={true} onClose={() => undefined}
+        blockers={[]}
+        coldCaches={[
+          'performance_chart',
+          'oos_cost_sensitivity',
+          'oos_summary',
+        ]} />)
+      const wrapper = screen.getByTestId('report-blocking-cold-caches')
+      expect(wrapper).toBeInTheDocument()
+      expect(wrapper.textContent).toMatch(
+        /Brief generation requires the following caches/i)
+      // Each cache rendered as a list item with a stable testid.
+      expect(screen.getByTestId('report-cold-cache-0').textContent)
+        .toContain('performance_chart')
+      expect(screen.getByTestId('report-cold-cache-1').textContent)
+        .toContain('oos_cost_sensitivity')
+      expect(screen.getByTestId('report-cold-cache-2').textContent)
+        .toContain('oos_summary')
+      // The actionable instruction is present.
+      expect(wrapper.textContent).toMatch(/Trigger a warm and retry/i)
+    })
+
+  it('hides the cold-caches block when coldCaches is empty or absent',
+    () => {
+      const { rerender } = render(
+        <ReportBlockingModal open={true} onClose={() => undefined}
+          blockers={['some blocker']} />)
+      expect(screen.queryByTestId('report-blocking-cold-caches'))
+        .not.toBeInTheDocument()
+      // Empty array also hides.
+      rerender(<ReportBlockingModal open={true} onClose={() => undefined}
+        blockers={['some blocker']} coldCaches={[]} />)
+      expect(screen.queryByTestId('report-blocking-cold-caches'))
+        .not.toBeInTheDocument()
+    })
 })
 
 
 describe('DocumentGenerationPanel — readiness gate', () => {
   // The panel renders three cards with the same gating behaviour.
-  // These tests target the Generate button on the midpoint card —
-  // scoped to that specific card so the section heading "Generate
-  // Documents" and the trailing paragraph don't confuse the
-  // selector.
+  // PR #338 retired the midpoint card; the tests now target the
+  // Executive Brief card, which is the canonical generation surface.
 
-  function midpointCard(): HTMLElement {
-    return screen.getByText('Midpoint Submission Paper')
+  function briefCardEl(): HTMLElement {
+    return screen.getByText('Executive Brief')
       .closest('.card') as HTMLElement
   }
 
-  it('clicking Generate while blocked opens the modal without firing POST',
+  it('clicking Generate while audit-blocked WARNS but proceeds (no modal)',
     async () => {
+      // June 25 2026 -- audit findings warn but never block per the
+      // platform's fail-open architecture. The amber warning banner
+      // surfaces the unacknowledged count; the regen still fires.
+      // Only caches_not_warm hard-blocks at the client gate.
       useReportReadinessStore.setState({
         readiness: BLOCKED, loading: false, fetchedAt: new Date(),
       })
       mockedAxios.get = vi.fn().mockResolvedValue({ data: BLOCKED })
+      mockedAxios.post = vi.fn().mockResolvedValue({
+        data: { job_id: 'job-1', status: 'pending' },
+      })
       renderWithAuth(<DocumentGenerationPanel />)
+      // The warning banner surfaces with the audit count + the
+      // Go to QA Audit link.
+      expect(await screen.findByTestId(
+        'audit-findings-warning-banner'))
+        .toBeInTheDocument()
       const generateBtn = await waitFor(() =>
-        within(midpointCard())
+        within(briefCardEl())
           .getByRole('button', { name: /^Generate$/ }))
       fireEvent.click(generateBtn)
-      expect(await screen.findByTestId('report-blocking-modal'))
-        .toBeInTheDocument()
-      expect(mockedAxios.post).not.toHaveBeenCalled()
+      // POST fires; modal does NOT.
+      await waitFor(() => {
+        expect(mockedAxios.post).toHaveBeenCalledWith(
+          '/api/v1/export/executive-brief')
+      })
+      expect(screen.queryByTestId('report-blocking-modal'))
+        .toBeNull()
     })
 
   it('clicking Generate while ready fires the POST and no modal',
@@ -281,24 +337,30 @@ describe('DocumentGenerationPanel — readiness gate', () => {
       mockedAxios.get = vi.fn().mockResolvedValue({ data: READY })
       renderWithAuth(<DocumentGenerationPanel />)
       const generateBtn = await waitFor(() =>
-        within(midpointCard())
+        within(briefCardEl())
           .getByRole('button', { name: /^Generate$/ }))
       fireEvent.click(generateBtn)
       await waitFor(() => {
         expect(mockedAxios.post).toHaveBeenCalledWith(
-          '/api/v1/export/midpoint-paper',
+          '/api/v1/export/executive-brief',
         )
       })
       expect(screen.queryByTestId('report-blocking-modal')).toBeNull()
     })
 
-  it('a server 422 with report_not_ready opens the modal from the response',
+  it('a legacy 422 with report_not_ready does NOT open the modal',
     async () => {
+      // June 25 2026 -- audit-only blockers no longer hard-block
+      // generation. The backend (_require_report_ready) was
+      // changed to warn-not-block; a stale deploy returning the
+      // legacy 422 with error='report_not_ready' should now be
+      // ignored by the client gate (the warning banner above the
+      // cards already surfaces the audit state from the readiness
+      // store). The modal is preserved only for the
+      // caches_not_warm code path.
       useReportReadinessStore.setState({
         readiness: READY, loading: false, fetchedAt: new Date(),
       })
-      // The panel uses axios.isAxiosError to detect — return true for
-      // the rejected object so the 422 branch runs.
       mockedAxios.isAxiosError = ((value: unknown): boolean => (
         value !== null && typeof value === 'object'
         && (value as { isAxiosError?: boolean }).isAxiosError === true
@@ -321,14 +383,16 @@ describe('DocumentGenerationPanel — readiness gate', () => {
 
       renderWithAuth(<DocumentGenerationPanel />)
       const generateBtn = await waitFor(() =>
-        within(midpointCard())
+        within(briefCardEl())
           .getByRole('button', { name: /^Generate$/ }))
       fireEvent.click(generateBtn)
 
-      expect(await screen.findByTestId('report-blocking-modal'))
-        .toBeInTheDocument()
-      expect(screen.getByTestId('report-blocker-0').textContent)
-        .toContain('SERVERBLOCKERTOKEN')
-      expect(screen.getByText(/SERVERMESSAGETOKEN/)).toBeInTheDocument()
+      // Wait for the POST to fire + the 422 to propagate.
+      await waitFor(() => {
+        expect(mockedAxios.post).toHaveBeenCalled()
+      })
+      // The blocking modal must NOT open for the audit-only 422.
+      expect(screen.queryByTestId('report-blocking-modal'))
+        .toBeNull()
     })
 })

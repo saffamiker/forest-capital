@@ -455,6 +455,26 @@ async def get_team_activity(
 
     merged.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
     page = merged[offset:offset + limit]
+
+    # Attach a plain-English summary to each commit row on this page — the
+    # primary, non-technical label the Team Activity report shows above the
+    # muted git message. Cached by SHA (one Haiku call per page of uncached
+    # rows); fail-open so a summarisation error never affects the timeline.
+    try:
+        commit_evs = [e for e in page
+                      if e.get("kind") == "commit" and e.get("sha")]
+        if commit_evs:
+            from tools.commit_summaries import summarize_commits
+            summaries = await summarize_commits(
+                [{"sha": e["sha"], "message": e.get("message", "")}
+                 for e in commit_evs])
+            for e in commit_evs:
+                s = summaries.get(e["sha"])
+                if s:
+                    e["plain_summary"] = s
+    except Exception as exc:  # noqa: BLE001
+        log.warning("team_activity_plain_summary_failed", error=str(exc))
+
     return {"events": page, "total_returned": len(page),
             "limit": limit, "offset": offset}
 
@@ -658,6 +678,81 @@ async def _read_page_views(session, text, session_type, date_from, date_to,
 
 # ── Reads — summary ───────────────────────────────────────────────────────────
 
+# The true merged-PR ("Platform Release") count comes from the GitHub API,
+# not the partially-synced commit_activity table. Cached in-process for an
+# hour so the Team Activity summary does not call GitHub on every load (and
+# stays within the search-API rate limit). A stale-but-non-None cached value
+# is preferred over None on a transient API failure.
+#
+# June 27 2026 -- the cache now ALSO tracks the last FAILURE timestamp
+# so a broken token (401) doesn't get hammered + re-logged on every
+# get_activity_summary() call (Academic Review assembles team-activity
+# context every run; each run was firing a fresh 401 + warning log).
+# The negative-cache TTL is shorter than the positive one so the
+# operator's token refresh on Render takes effect within a few
+# minutes rather than waiting out the full 1-hour positive window.
+_pr_count_cache: dict[str, Any] = {
+    "count": None,        # last successful count
+    "ts": 0.0,            # last success timestamp
+    "failed_at": 0.0,     # last failure timestamp (0 = never failed)
+}
+_PR_COUNT_TTL_SECONDS = 3600.0        # positive cache: 1 hour
+_PR_COUNT_FAILURE_TTL_SECONDS = 300.0  # negative cache: 5 minutes
+
+
+async def get_merged_pr_count() -> int | None:
+    """Total merged PRs against main, via the GitHub API.
+
+    Cached for an hour on success. On failure (missing token, 401,
+    network error, rate limit, ...) the result is negative-cached for
+    5 minutes so a broken token doesn't spam api.github.com with
+    requests + log lines on every Academic Review run. Returns the
+    last good value when one exists; otherwise None.
+    """
+    import time
+    now = time.time()
+    cached = _pr_count_cache["count"]
+    # Positive cache hit -- short-circuit.
+    if (cached is not None
+            and now - _pr_count_cache["ts"]
+                < _PR_COUNT_TTL_SECONDS):
+        return cached
+    # Negative cache hit -- short-circuit WITHOUT a fresh API call.
+    # The last failure was recent enough that another attempt would
+    # almost certainly fail the same way (the token is still
+    # invalid / the rate limit hasn't reset). Returning the last
+    # good value (or None) without re-hitting the API keeps the
+    # log clean.
+    if (now - _pr_count_cache["failed_at"]
+            < _PR_COUNT_FAILURE_TTL_SECONDS):
+        return cached
+    try:
+        from config import GITHUB_REPO, GITHUB_TOKEN
+        from tools.github_sync import fetch_merged_pr_count
+        count = await fetch_merged_pr_count(GITHUB_REPO, GITHUB_TOKEN)
+        if count is not None:
+            _pr_count_cache["count"] = count
+            _pr_count_cache["ts"] = now
+            _pr_count_cache["failed_at"] = 0.0  # reset negative cache
+            return count
+        # Failure path -- record the timestamp so the negative cache
+        # suppresses further calls for the TTL. fetch_merged_pr_count
+        # has already logged the cause; we don't double-log here.
+        _pr_count_cache["failed_at"] = now
+    except Exception as exc:  # noqa: BLE001
+        _pr_count_cache["failed_at"] = now
+        log.warning("merged_pr_count_unavailable", error=str(exc))
+    return cached  # last good value (or None if never fetched)
+
+
+def _reset_pr_count_cache() -> None:
+    """Test-only -- clear both positive + negative caches so each
+    spec starts from a clean slate."""
+    _pr_count_cache["count"] = None
+    _pr_count_cache["ts"] = 0.0
+    _pr_count_cache["failed_at"] = 0.0
+
+
 async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
     """
     Per-member interaction and commit counts, the most-consulted agents,
@@ -671,6 +766,7 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
         "most_active_agents": [], "last_academic_review": None,
         "total_interactions": 0, "analytical_sessions_only": analytical_only,
         "test_coverage": {"steps_attested": 0, "testers": 0},
+        "platform_releases": None,
     }
     if not _DB_AVAILABLE:
         return empty
@@ -793,6 +889,9 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
             # without the migration-014 test_results table cannot poison
             # the rest of the summary.
             "test_coverage": await _test_coverage(),
+            # The true merged-release count, live from the GitHub API
+            # (hour-cached) — the local commit table is only partially synced.
+            "platform_releases": await get_merged_pr_count(),
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("activity_summary_failed", error=str(exc))

@@ -94,6 +94,22 @@ that mark prose as machine-written:
   perhaps...", "It may be the case that..."
 - Redundant intensifiers: "very", "quite", "rather", "somewhat", "fairly"
 
+PROHIBITED SECTIONS (executive_brief + analytical_appendix only):
+- NEVER emit a "Next Steps" section, "Future Work" section, \
+  "Recommendations for Further Research" section, or any \
+  forward-looking action-item block. These belong in a project \
+  proposal, not in the submitted academic deliverable. The FNA \
+  670 rubric is closed -- emit only the rubric-required \
+  sections (Brief: Section 1-6; Appendix: Section A-H).
+- If the task prompt asks for prose that could read as "next \
+  steps", redirect to the academic implication ("the result \
+  motivates X analysis" -> "the result demonstrates X" + cite \
+  the supporting figure). Do not list todo items for the \
+  reader.
+- Discussion / Limitations sections may acknowledge gaps in \
+  the present analysis but MUST NOT phrase those gaps as a \
+  to-do list for future work.
+
 VOICE AND REGISTER:
 - Active voice preferred. Use passive only when the subject is \
   genuinely unknown or irrelevant.
@@ -245,32 +261,67 @@ APA FORMATTING:
 - Statistics: italicise t, F, p, r, M, SD (written in prose, not code)
 
 ABSOLUTE PROHIBITIONS:
-- Never cite a source unless it is in the provided references list OR you \
-have verified it via the web_search tool (see EXTERNAL CITATIONS below)
+- Never cite a source not present in the registry (see CITATIONS \
+below). Web search is disabled for this writer; the registry is \
+the only permitted citation source.
 - Never report a statistic not in the provided input data
 - Never claim statistical significance beyond what is_significant shows
 - Never use first person
 - Never omit the 'AI DRAFT. REQUIRES HUMAN REVIEW' label
 
-EXTERNAL CITATIONS (web search):
-For each key finding in the paper, search for and include at least one \
-supporting academic citation. Required citation targets:
+CITATIONS (registry-only):
+Cite ONLY from the platform's curated citation registry. DO NOT web-\
+search, DO NOT invent citations, and DO NOT cite sources you cannot \
+match to a registry key. If a finding needs a citation for a source \
+that's not in the registry, omit the citation rather than searching \
+for or inventing one.
 
-1. 2022 equity-bond correlation regime break. search for recent \
-literature on bond-equity correlation breakdown post-2022.
-2. FDR correction in finance. cite Harvey, Liu and Zhu (2016), \
-"... and the Cross-Section of Expected Returns", or an equivalent.
-3. Regime-switching in asset allocation. search for literature on \
-Markov regime-switching portfolio construction.
-4. Mean-variance optimization instability. search for literature on \
-corner solutions and high-yield concentration in the efficient frontier.
-5. Carhart four-factor model. cite Carhart (1997), "On Persistence in \
-Mutual Fund Performance".
+Available citation keys -- each is a pre-verified APA-formatted entry \
+in data/references.json. Cite by the canonical (Author, Year) form \
+shown below; the post-generation audit cross-checks every (Author, \
+Year) citation against this list and flags any that doesn't match.
 
-Include a References section at the end with all citations in APA \
-format. Do not fabricate citations. use the web_search tool to verify \
-every source before citing it; if search cannot confirm a source, omit \
-the citation rather than inventing one.
+  - Ang and Bekaert (2002)               -- regime-conditional asset allocation, international diversification
+  - Ang and Bekaert (2004)               -- regimes affect asset allocation, dynamic allocation
+  - Bailey and López de Prado (2012)     -- deflated Sharpe ratio (efficient frontier formulation)
+  - Bailey and López de Prado (2014)     -- deflated Sharpe ratio (selection bias + overfitting)
+  - Benjamin et al. (2018)               -- p < 0.005 threshold proposal
+  - Benjamini and Hochberg (1995)        -- false discovery rate (FDR) correction
+  - Black and Litterman (1992)           -- Black-Litterman global allocation
+  - Brinson, Hood, and Beebower (1986)   -- performance attribution (allocation vs selection)
+  - Carhart (1997)                       -- four-factor model, momentum factor
+  - Fama and French (1993)               -- three-factor model
+  - Hamilton (1989)                      -- Hidden Markov Model regime detection foundational
+  - Hansen (2005)                        -- superior predictive ability (SPA) test
+  - Harvey and Liu (2015)                -- backtesting + multiple testing
+  - Harvey, Liu, and Zhu (2016)          -- multiple-testing problem, factor zoo
+  - Jobson and Korkie (1981)             -- Sharpe ratio significance testing
+  - López de Prado (2018)                -- CPCV, purged cross-validation, financial ML
+  - Maillard, Roncalli, and Teïletche (2010) -- risk parity, equal risk contribution
+  - Markowitz (1952)                     -- mean-variance optimization, modern portfolio theory
+  - Newey and West (1987)                -- HAC standard errors
+  - Sharpe (1994)                        -- Sharpe ratio methodology
+
+The registry is the canonical citation source for this project. \
+When your section covers a finding that maps to one of the keys \
+above, cite that key by its (Author, Year) form exactly as listed. \
+The full APA reference is rendered by the document assembler from \
+the registry's `apa` field; you do not need to format the reference \
+entry text yourself.
+
+REFERENCES PLACEMENT (June 21 2026, brief compression):
+After EACH section that cites academic papers, include a brief \
+"References" subsection at the end of THAT section listing ONLY \
+the citations used in that section, formatted in APA per the \
+registry's `apa` field. Do NOT emit a single end-of-document \
+References block that consolidates citations from every section -- \
+the per-section blocks are smaller (each section typically cites \
+2-4 papers), keep the brief within its 5-page double-spaced page \
+budget, and let a reader verify a citation without scrolling away \
+from the section it appeared in. The post-generation audit \
+concatenates per-section References blocks before checking citation \
+completeness (PR #359), so an entry in any per-section block \
+satisfies the in-text citation check.
 
 TEAM ACTIVITY DATA:
 When a team activity summary is supplied in the input, you have access to
@@ -351,6 +402,30 @@ in the final document.
 {SCOPE_ENFORCEMENT}"""
 
 _AI_DRAFT_BANNER = "AI DRAFT — REQUIRES HUMAN REVIEW\n\n"
+
+
+# Em dash sanitizer -- the _SYSTEM_PROMPT explicitly prohibits em
+# dashes (the single strongest AI tell in academic prose). Even
+# with the prompt instruction, model output occasionally slips an
+# em dash through. This regex-based defence-in-depth pass strips
+# the Unicode em dash + en dash + ASCII triple-hyphen substitute
+# from every narrative AFTER generation, before the substitution
+# layer runs. Replaces with '; ' (semicolon + space) per the
+# prompt's recommended substitute. Idempotent.
+import re as _re
+
+_EM_DASH_RE = _re.compile(r"\s*[—–]\s*|\s*---\s*")
+
+
+def _strip_em_dashes(text: str) -> str:
+    """Replace every em dash (U+2014), en dash (U+2013), and the
+    ASCII '---' substitute with '; '. Whitespace around the dash
+    is collapsed into the replacement so 'foo — bar' becomes
+    'foo; bar' not 'foo ; bar'. Used by the brief + appendix
+    section writers post-generation."""
+    if not text:
+        return text
+    return _EM_DASH_RE.sub("; ", text)
 
 
 # ── Strategy display-name post-processing ──────────────────────────────────
@@ -517,6 +592,28 @@ class AcademicWriter:
             "language for the Carhart four-factor regression (AN01) and the "
             "2022 regime split + transition matrix consistency check (AN04). "
             "~500 words.\n\n"
+            # June 25 2026 -- data provenance must be baked into the "
+            # methodology section by token so the substitution layer "
+            # surfaces verified canonical phrasing at export time. "
+            # Pre-2026-06-25 the methodology had to be hand-edited "
+            # post-export to add provenance; every academic review "
+            # flagged the missing provenance as MEDIUM severity. "
+            "DATA PROVENANCE -- when describing data sources, use the "
+            "following tokens EXACTLY as written. They will be "
+            "substituted with verified canonical phrasing at export "
+            "time. Do not paraphrase, rephrase, expand, or contract "
+            "them; use the tokens verbatim so substitution fires:\n"
+            "  - Equity series:       {{EQUITY_SERIES}}\n"
+            "  - IG bond series:      {{IG_SERIES}}\n"
+            "  - HY bond series:      {{HY_SERIES}}\n"
+            "  - Risk-free rate:      {{RISK_FREE_SERIES}}\n"
+            "  - Factor data:         {{FACTOR_SERIES}}\n"
+            "  - IG splice date:      {{IG_SPLICE_DATE}}\n"
+            "  - HY extension date:   {{HY_EXTENSION_DATE}}\n"
+            "  - HY tracking error:   {{HY_TRACKING_ERROR}}\n"
+            "Each token will resolve to the canonical provenance "
+            "language. Using the token instead of a paraphrase is "
+            "what makes the export auditable.\n\n"
             f"DATA:\n{context}"
         )
 

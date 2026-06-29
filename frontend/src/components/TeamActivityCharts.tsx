@@ -25,12 +25,12 @@ import {
 } from 'recharts'
 import type { ActivityEvent, ActivityKind, ActivitySummary } from '../types/activity'
 import type { ChartTheme } from '../lib/exportTheme'
-import { DARK_CHART_THEME } from '../lib/exportTheme'
+import { useChartTheme } from '../lib/useChartTheme'
 
 // Stacked activity types for chart 1 — page_view is the lightest layer.
 // Test attestations are their own distinct stack colour.
 const STACK_KINDS: { key: ActivityKind; label: string; color: string }[] = [
-  { key: 'commit',          label: 'Commits',          color: '#6366f1' },
+  { key: 'commit',          label: 'Development Entries', color: '#6366f1' },
   { key: 'council',         label: 'Council',          color: '#3b82f6' },
   { key: 'academic_review', label: 'Academic Review',  color: '#f59e0b' },
   { key: 'document_upload', label: 'Uploads',          color: '#0d9488' },
@@ -70,7 +70,9 @@ interface ChartCardProps {
   theme?: ChartTheme
 }
 
-function ChartCard({ title, subtitle, children, presentMode, theme = DARK_CHART_THEME }: ChartCardProps) {
+function ChartCard({ title, subtitle, children, presentMode, theme: themeProp }: ChartCardProps) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   const light = theme.mode === 'light'
   return (
     <div
@@ -100,8 +102,10 @@ interface Props {
 }
 
 export default function TeamActivityCharts({
-  events, summary, presentMode, theme = DARK_CHART_THEME,
+  events, summary, presentMode, theme: themeProp,
 }: Props) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   // Chart-1 stack visibility — clicking the legend toggles a type off.
   const [hidden, setHidden] = useState<Set<ActivityKind>>(new Set())
   const toggle = (k: ActivityKind) => {
@@ -236,7 +240,7 @@ export default function TeamActivityCharts({
   const chartContribution = (
       <ChartCard
         title="Platform Interaction Split"
-        subtitle="Share of substantive platform interactions — council sessions, academic review runs, and document uploads. Development contributions (commits, migrations, deployments) are tracked separately in Team Activity."
+        subtitle="Share of substantive platform interactions — council sessions, academic review runs, and document uploads. Development contributions (development entries and platform releases) are tracked separately in Team Activity."
         presentMode={presentMode}
         theme={theme}
       >

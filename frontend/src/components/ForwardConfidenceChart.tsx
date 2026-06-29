@@ -13,13 +13,15 @@
  * staleness indicator. Graceful empty state before the first warm.
  */
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
-import { Loader2 } from 'lucide-react'
+import { Loader2, MessageSquare } from 'lucide-react'
 import InfoIcon from './InfoIcon'
+import { useChartTheme } from '../lib/useChartTheme'
 
 interface Band { median: number; p05: number; p95: number }
 type SeriesBands = Record<string, Band>   // horizon -> band
@@ -49,13 +51,35 @@ const pct = (x: number | null | undefined): string =>
 
 function asOf(ts?: string | null): string {
   if (!ts) return 'latest warm'
-  const d = new Date(ts)
-  return isNaN(d.getTime()) ? ts : d.toLocaleString()
+  // Backend timestamps are UTC. Normalise to ISO and, when the string
+  // carries no timezone marker, treat it as UTC ('Z') so the browser
+  // converts to the user's local zone instead of misreading the UTC clock
+  // as local. Render with the timezone abbreviation so it is unambiguous.
+  let s = String(ts).trim().replace(' ', 'T')
+  if (!/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) s += 'Z'
+  const d = new Date(s)
+  return isNaN(d.getTime())
+    ? String(ts)
+    : d.toLocaleString(undefined, { timeZoneName: 'short' })
 }
 
 export default function ForwardConfidenceChart() {
+  const navigate = useNavigate()
+  const chartTheme = useChartTheme()
   const [data, setData] = useState<Payload | null>(null)
   const [loading, setLoading] = useState(true)
+
+  // Hand off to the council with the "prediction" scope so the
+  // deliberation injects the cached forward projection (P(outperform),
+  // transition matrix, blend). Question pre-filled and editable.
+  const askCouncil = () =>
+    navigate('/council', {
+      state: {
+        prefillQuestion:
+          'What drives the outperformance probability at 12 months?',
+        contextScope: 'prediction',
+      },
+    })
 
   useEffect(() => {
     let alive = true
@@ -130,15 +154,16 @@ export default function ForwardConfidenceChart() {
       <div className="mt-4">
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={rows} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>
-            <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
-            <XAxis dataKey="month" tick={{ fill: '#64748b', fontSize: 11 }} />
+            <CartesianGrid stroke={chartTheme.gridStroke} strokeDasharray="3 3" />
+            <XAxis dataKey="month" tick={{ fill: chartTheme.textSecondary, fontSize: 11 }} />
             <YAxis tickFormatter={(v) => `${(v * 100).toFixed(0)}%`}
-                   tick={{ fill: '#64748b', fontSize: 11 }} />
+                   tick={{ fill: chartTheme.textSecondary, fontSize: 11 }} />
             <Tooltip
-              contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c' }}
+              contentStyle={chartTheme.tooltipContentStyle}
+              labelStyle={chartTheme.tooltipLabelStyle}
               formatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
             <Legend />
-            <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1} />
+            <ReferenceLine y={0} stroke={chartTheme.textSecondary} strokeWidth={1} />
             {present.map((s) => [
               <Line key={`${s.key}_m`} type="monotone" dataKey={`${s.key}_median`}
                     name={s.label} stroke={s.color} strokeWidth={2} dot={false} />,
@@ -188,6 +213,15 @@ export default function ForwardConfidenceChart() {
           </table>
         </div>
       )}
+
+      <button
+        type="button"
+        onClick={askCouncil}
+        className="mt-4 inline-flex items-center gap-1.5 text-xs text-electric
+                   hover:underline min-h-[44px] sm:min-h-0">
+        <MessageSquare className="w-3.5 h-3.5" />
+        Ask about this
+      </button>
 
       <p className="mt-4 pt-3 border-t border-border text-2xs text-muted italic">
         <InfoIcon tooltipKey="hmm_reference" metricLabel="Hidden Markov Model" />

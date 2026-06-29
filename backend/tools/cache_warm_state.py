@@ -399,7 +399,8 @@ async def _default_warm_fn() -> dict[str, bool]:
             results_dict = await asyncio.to_thread(
                 run_all_strategies, history)
             await set_strategy_cache(
-                strategy_hash, results_dict, n_observations=n_rows)
+                strategy_hash, results_dict, n_observations=n_rows,
+                risk_free_monthly=history.get("risk_free_monthly"))
             log.info(
                 "analytics_cache_warm_backtester_complete",
                 strategy_hash=strategy_hash[:8],
@@ -433,34 +434,61 @@ async def _default_warm_fn() -> dict[str, bool]:
     try:
         from tools.cio_recommendation import refresh_cio_recommendation
         cio = await refresh_cio_recommendation()
-        cio_landed = not bool((cio or {}).get("error"))
+        # The landed flag has to distinguish a REAL LLM write from the
+        # fail-open path that persists the deterministic_fallback row
+        # (which carries no live LLM judgment). Previously the flag
+        # flipped true on any non-error refresh, so the warm reported
+        # success while the digest immediately fell to the "Live regime
+        # unavailable" path -- a contradiction in the operator's view.
+        # The two-clause check below requires (a) no refresh-level
+        # error and (b) the persisted model is the real Sonnet output,
+        # not the fallback sentinel. See cio_recommendation._DETERMINISTIC
+        # for the canonical string.
+        cio_landed = (
+            not bool((cio or {}).get("error"))
+            and (cio or {}).get("_model") != "deterministic_fallback"
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("cio_recommendation_warm_failed", error=str(exc))
 
-    # ── Performance Record cumulative chart ───────────────────────────
-    # The post-2022 cumulative series (regime-conditional blend /
-    # benchmark / classic 60/40) is precomputed once per data_hash here
-    # and served from cache by GET /api/v1/play-by-play, so no OOS
-    # recompute ever runs on a page read. Fail-open and isolated.
-    chart_landed = False
-    try:
-        from tools.play_by_play import refresh_performance_chart
-        chart_landed = await refresh_performance_chart(latest_hash or "")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("performance_chart_warm_failed", error=str(exc))
+    # ── Three independent post-CIO refreshes run in parallel ─────────
+    # Performance Record cumulative chart, forward Monte Carlo
+    # projection, and OOS transaction-cost sensitivity each write a
+    # distinct precomputed_analytics row keyed by data_hash. They do
+    # NOT read from each other and they do NOT mutate any shared
+    # in-memory state. asyncio.gather wins ~5-10s of wall-clock since
+    # each refresh is dominated by an HMM fit and a Monte Carlo sim
+    # that release the GIL while running in their executor threads.
+    #
+    # Fail-open contract preserved: return_exceptions=True so a single
+    # refresh exception does NOT crash the gather; the per-refresh
+    # log.warning still fires below for each exception. The other two
+    # refreshes complete normally.
+    #
+    # June 6 2026 perf fix per bridge #71 / cache-warm audit #68.
+    from tools.play_by_play import refresh_performance_chart
+    from tools.regime_meta_forward import refresh_forward_projection
+    from tools.regime_meta_validation import refresh_oos_cost_sensitivity
 
-    # ── Layer 4 forward Monte Carlo confidence bands ──────────────────
-    # The forward projection (blend / benchmark / classic 60/40, each
-    # with a 90% band) is precomputed once per data_hash and served from
-    # cache by GET /api/v1/forward-projection, so the 10,000-path
-    # simulation never runs on a page read. Seed is derived from the
-    # data_hash inside refresh, so it regenerates with new data. Fail-open.
-    forward_landed = False
-    try:
-        from tools.regime_meta_forward import refresh_forward_projection
-        forward_landed = await refresh_forward_projection(latest_hash or "")
-    except Exception as exc:  # noqa: BLE001
-        log.warning("forward_projection_warm_failed", error=str(exc))
+    chart_result, forward_result, cost_result = await asyncio.gather(
+        refresh_performance_chart(latest_hash or ""),
+        refresh_forward_projection(latest_hash or ""),
+        refresh_oos_cost_sensitivity(latest_hash or ""),
+        return_exceptions=True,
+    )
+
+    def _resolve(name: str, value: object) -> bool:
+        """Fail-open per-refresh: an exception result is logged and
+        the landed flag is False; a truthy normal result returns the
+        boolean coercion of the value."""
+        if isinstance(value, BaseException):
+            log.warning(f"{name}_warm_failed", error=str(value))
+            return False
+        return bool(value)
+
+    chart_landed = _resolve("performance_chart", chart_result)
+    forward_landed = _resolve("forward_projection", forward_result)
+    cost_landed = _resolve("oos_cost_sensitivity", cost_result)
 
     return {
         "academic_analytics":  bool(aa),
@@ -468,6 +496,7 @@ async def _default_warm_fn() -> dict[str, bool]:
         "cio_recommendation":  cio_landed,
         "performance_chart":   chart_landed,
         "forward_projection":  forward_landed,
+        "oos_cost_sensitivity": cost_landed,
     }
 
 

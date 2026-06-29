@@ -204,7 +204,36 @@ function DataStudyPeriodSection() {
         status for FF factors is expected while the current month has not yet
         been posted).
       </p>
+      {/* Health panel link — surfaces the invariant framework + Layer 4
+          display-fixture verdict + last-7 warm history on a dedicated
+          /admin/health page. Any authenticated user can read it. */}
+      <RuntimeHealthLink />
     </div>
+  )
+}
+
+
+// Discoverability link from Settings → Data and Study Period. The /admin/
+// health page is the runtime-validation surface: invariant framework
+// verdict, Layer 4 display-fixture status, and the last-7 warm history.
+function RuntimeHealthLink() {
+  const navigate = useNavigate()
+  return (
+    <button
+      type="button"
+      onClick={() => navigate('/admin/health')}
+      data-tour="admin-health-runtime-link"
+      className="w-full text-left text-xs px-3 py-2 rounded border border-border
+                 bg-navy-800 hover:bg-navy-700 text-white flex items-center
+                 justify-between gap-3">
+      <span>
+        <span className="text-white">Runtime health panel →</span>
+        <span className="text-muted ml-2 text-2xs">
+          Invariant framework, Layer 4 display fixtures, warm history
+        </span>
+      </span>
+      <span className="text-electric text-2xs font-mono">/admin/health</span>
+    </button>
   )
 }
 

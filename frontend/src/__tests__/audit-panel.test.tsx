@@ -30,6 +30,9 @@ interface RowFinding {
   resolved_by?: string | null
   resolved_at?: string | null
   auto_acknowledged?: boolean
+  // Bridge #75 -- migration 055 adds the locked disclosure column.
+  // Mirrors the AuditFinding interface in components/AuditPanel.tsx.
+  locked_disclosure_text?: string | null
 }
 
 function warnFinding(over: Partial<RowFinding> = {}): RowFinding {
@@ -65,9 +68,15 @@ describe('AuditPanel — WARN acknowledge workflow', () => {
         { target: { value: 'Accepted as a documented limitation.' } })
       fireEvent.click(
         screen.getByRole('button', { name: 'Save acknowledgement' }))
+      // Bridge #75 -- the resolve POST now also carries an optional
+      // disclosure_text (null when the team did not lock a separate
+      // disclosure for the report).
       await waitFor(() => expect(mockedAxios.post).toHaveBeenCalledWith(
         '/api/v1/audit/findings/5/resolve',
-        { resolution_note: 'Accepted as a documented limitation.' }))
+        {
+          resolution_note: 'Accepted as a documented limitation.',
+          disclosure_text: null,
+        }))
       // The green "Acknowledged" badge appears after a successful save.
       expect(await screen.findAllByText('Acknowledged'))
         .not.toHaveLength(0)
@@ -180,7 +189,7 @@ describe('AuditPanel — Edit Disclosure (Workstream E)', () => {
         screen.getByRole('button', { name: 'Save acknowledgement' }))
       await waitFor(() => expect(mockedAxios.post).toHaveBeenCalledWith(
         '/api/v1/audit/findings/5/resolve',
-        { resolution_note: refined }))
+        { resolution_note: refined, disclosure_text: null }))
     })
 
   it('Cancel from Edit dismisses without firing a POST', () => {
@@ -345,4 +354,65 @@ describe('AuditPanel — Revoke Disclosure (Workstream F)', () => {
       // The Revoke control is gone — there is nothing left to revoke.
       expect(screen.queryByTestId('audit-revoke-disclosure-5')).toBeNull()
     })
+})
+
+
+describe('AuditPanel — locked disclosure (bridge #75)', () => {
+  it('exposes a disclosure-for-report textarea when editing', async () => {
+    render(<FindingRow f={warnFinding({ id: 5 })} />)
+    fireEvent.click(screen.getByText(/Turnover direction/))
+    fireEvent.click(screen.getByRole('button', { name: 'Acknowledge' }))
+    expect(screen.getByTestId('audit-disclosure-input-5'))
+      .toBeInTheDocument()
+  })
+
+  it('POSTs the disclosure text alongside the resolution note', async () => {
+    mockedAxios.post = vi.fn().mockResolvedValue({
+      data: { id: 5, resolved: true,
+              resolution_note: 'Internal review.',
+              resolved_by: 'reviewer@queens.edu',
+              resolved_at: '2026-06-06T18:00:00Z',
+              locked_disclosure_text: 'Disclosed verbatim in the brief.' }})
+    render(<FindingRow f={warnFinding({ id: 5 })} />)
+    fireEvent.click(screen.getByText(/Turnover direction/))
+    fireEvent.click(screen.getByRole('button', { name: 'Acknowledge' }))
+    fireEvent.change(
+      screen.getByPlaceholderText(/Describe how you have addressed/),
+      { target: { value: 'Internal review.' }})
+    fireEvent.change(screen.getByTestId('audit-disclosure-input-5'),
+      { target: { value: 'Disclosed verbatim in the brief.' }})
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save acknowledgement' }))
+    await waitFor(() => expect(mockedAxios.post).toHaveBeenCalledWith(
+      '/api/v1/audit/findings/5/resolve',
+      {
+        resolution_note: 'Internal review.',
+        disclosure_text: 'Disclosed verbatim in the brief.',
+      }))
+  })
+
+  it('renders the locked disclosure copy box on a finding that has one', () => {
+    render(<FindingRow f={warnFinding({
+      id: 5, resolved: true,
+      resolution_note: 'Internal review.',
+      locked_disclosure_text: 'Bootstrap CI brackets the discrepancy.',
+    })} />)
+    fireEvent.click(screen.getByText(/Turnover direction/))
+    const box = screen.getByTestId('audit-locked-disclosure-5')
+    expect(box).toBeInTheDocument()
+    expect(box.textContent).toContain('Bootstrap CI brackets the discrepancy.')
+    expect(screen.getByTestId('audit-copy-disclosure-5'))
+      .toBeInTheDocument()
+  })
+
+  it('omits the copy box when no disclosure was locked', () => {
+    render(<FindingRow f={warnFinding({
+      id: 5, resolved: true,
+      resolution_note: 'Internal review only.',
+      // locked_disclosure_text intentionally absent.
+    })} />)
+    fireEvent.click(screen.getByText(/Turnover direction/))
+    expect(screen.queryByTestId('audit-locked-disclosure-5'))
+      .not.toBeInTheDocument()
+  })
 })

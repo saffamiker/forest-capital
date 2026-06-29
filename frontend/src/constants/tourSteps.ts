@@ -106,10 +106,10 @@ export const TOUR_STEPS: TourStep[] = [
       'Six analytical components built specifically to support the '
       + "project's academic deliverables. Every table exports to CSV for "
       + 'the Analytical Appendix.',
-      'This page is the quantitative backbone of your midpoint paper and '
-      + 'executive brief. Faculty will expect everything here — asset class '
-      + 'statistics, correlation analysis, factor loadings, and regime '
-      + 'performance — to be present and interpreted.',
+      'This page is the quantitative backbone of your executive brief. '
+      + 'Faculty will expect everything here — asset class statistics, '
+      + 'correlation analysis, factor loadings, and regime performance '
+      + '— to be present and interpreted.',
     ],
   },
   {
@@ -245,10 +245,15 @@ export const TOUR_STEPS: TourStep[] = [
       + 'Work through your draft here — every edit, every resolved marker, '
       + 'every version save is tracked and part of your submission record. '
       + 'Nothing you do is lost, and nothing is untracked.',
-      'The AI wrote the first draft. The grader reads what you do next.',
+      'When a document is generated, four deterministic checks run '
+      + 'automatically — numeric mismatches against the strategy cache, '
+      + 'label-direction errors, cross-section inconsistencies, and missing '
+      + 'citations. Issues surface as a warning banner at the top of the '
+      + 'editor before you finalise so you fix them, not the grader. The '
+      + 'AI wrote the first draft. The grader reads what you do next.',
     ],
     relevantFor:
-      'Bob and Molly — the midpoint paper and the presentation deck both '
+      'Bob and Molly — the executive brief and the presentation deck both '
       + 'open in the editor; refine them here, not in Word.',
   },
   {
@@ -257,18 +262,15 @@ export const TOUR_STEPS: TourStep[] = [
     route: '/settings',
     title: 'Academic Documents — Agent Context',
     body: [
-      'Upload your project requirements, rubric, midpoint draft, and '
-      + 'presentation materials here. These documents are injected into '
-      + 'every AI agent session automatically.',
-      'The council cannot evaluate your work against the grading criteria '
-      + 'until these are uploaded. The midpoint draft is especially '
-      + 'important — once uploaded, the Academic Review shifts from '
-      + 'evaluating methodology in the abstract to giving direct feedback '
-      + 'on your actual submission.',
+      'Upload your project requirements, rubric, and presentation '
+      + 'materials here. These documents are injected into every AI '
+      + 'agent session automatically.',
+      'The council cannot evaluate your work against the grading '
+      + 'criteria until these are uploaded.',
     ],
     relevantFor:
-      'Bob — upload your midpoint draft here once written. The council '
-      + 'cannot evaluate your submission until it is uploaded.',
+      'Bob — upload your project requirements and rubric here. The '
+      + 'council cannot evaluate your submission until they are uploaded.',
   },
   {
     target: '[data-tour="testing-mode"]',
@@ -285,6 +287,30 @@ export const TOUR_STEPS: TourStep[] = [
     relevantFor:
       'All team members — enable this before any QA or testing activity '
       + 'so your test clicks do not appear in the analytical activity log.',
+  },
+  {
+    id: 'runtime-health',
+    target: '[data-tour="admin-health-runtime-link"]',
+    placement: 'top',
+    route: '/settings',
+    title: 'Runtime Health Panel',
+    body: [
+      'The /admin/health page is the platform\'s runtime-validation '
+      + 'surface — any authenticated user can read it. Three sections: '
+      + 'the top-line invariant verdict (PASS / WARN / FAIL) running '
+      + 'every system invariant against the live state; Layer 4 data-'
+      + 'quality fixtures verifying every analytical figure on the '
+      + 'platform is internally consistent; and a warm history of the '
+      + 'last seven runs so you can see whether the verdict has been '
+      + 'stable or drifting.',
+      'Open it before every submission and before every demo. A PASS '
+      + 'on every layer is your evidence to the McColl panel that the '
+      + 'analytical surface is live, internally consistent, and '
+      + 'reproducible.',
+    ],
+    relevantFor:
+      'All team members — open this before every submission and before '
+      + 'every demo so the analytical surface is verified live.',
   },
   {
     id: 'finish',

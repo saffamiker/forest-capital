@@ -16,10 +16,19 @@ import {
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
+import NumericOverrideWarningBanner from
+  '../components/editor/NumericOverrideWarningBanner'
 import CanvasSlideEditor from '../components/editor/CanvasSlideEditor'
 import ChartPicker from '../components/editor/ChartPicker'
+import {
+  ChartConfigPanelInner, TableConfigPanelInner,
+} from '../components/editor/ChartConfigPanel'
 import EditorNavigator from '../components/editor/EditorNavigator'
+import DataHashChip from '../components/editor/DataHashChip'
+import DraftVersionSelector from '../components/editor/DraftVersionSelector'
 import EditorTasksCallout from '../components/editor/EditorTasksCallout'
+import ExportWarningModal from '../components/ExportWarningModal'
+import AuditWarningsBanner from '../components/editor/AuditWarningsBanner'
 import PresentationPreview from '../components/editor/PresentationPreview'
 import RehearsalOverlay from '../components/editor/RehearsalOverlay'
 import type { NavSection } from '../components/editor/EditorNavigator'
@@ -39,6 +48,9 @@ const WORD_TARGETS: Record<string, number> = {
   executive_brief: 2000,
   presentation_deck: 0,
   presentation_script: 0,
+  // The Appendix is dense (eight short intro paragraphs + tables) —
+  // the editor surface only holds the prose, not the cached tables.
+  analytical_appendix: 1200,
 }
 
 // A spoken presentation is delivered at ~150 words per minute.
@@ -50,6 +62,7 @@ const EXPORT_ENDPOINT: Record<string, string> = {
   midpoint_paper: '/api/v1/export/midpoint-paper',
   executive_brief: '/api/v1/export/executive-brief',
   presentation_deck: '/api/v1/export/presentation-deck',
+  analytical_appendix: '/api/v1/export/analytical-appendix',
 }
 
 // Walks a TipTap doc into (heading, body-text) sections for the navigator.
@@ -101,6 +114,58 @@ function scriptSections(doc: TipTapDoc | null): {
   return out
 }
 
+
+// June 26 2026 -- ConfigureForElement resolves the targeted
+// canvas element from the deck + dispatches to the chart or
+// table panel variant. Returns a 'not found' fallback when the
+// element id no longer exists (deleted while the panel was
+// open) so the parent can fall back to the assistant cleanly.
+function ConfigureForElement({
+  deck, elementId, onChangeChart, onChangeTable, onClose,
+}: {
+  deck:           CanvasDeck | null
+  elementId:      string
+  onChangeChart:  (c: object) => void
+  onChangeTable:  (c: object) => void
+  onClose:        () => void
+}): JSX.Element {
+  const el = useMemo(() => {
+    if (!deck) return null
+    for (const s of deck.slides) {
+      for (const e of s.elements) {
+        if (e.id === elementId) return e
+      }
+    }
+    return null
+  }, [deck, elementId])
+
+  if (!el) {
+    return (
+      <div className="p-3 text-xs text-muted">
+        Element not found. Close this panel + try again.
+      </div>
+    )
+  }
+  if (el.type === 'chart') {
+    return (
+      <ChartConfigPanelInner element={el}
+        onChange={onChangeChart} onClose={onClose} />
+    )
+  }
+  if (el.type === 'table') {
+    return (
+      <TableConfigPanelInner element={el}
+        onChange={onChangeTable} onClose={onClose} />
+    )
+  }
+  return (
+    <div className="p-3 text-xs text-muted">
+      This element type has no Configure panel.
+    </div>
+  )
+}
+
+
 export default function DocumentEditor() {
   const { draftId } = useParams<{ draftId: string }>()
   const navigate = useNavigate()
@@ -115,7 +180,30 @@ export default function DocumentEditor() {
   const [contentJson, setContentJson] = useState<TipTapDoc | CanvasDeck | null>(null)
   const [contentText, setContentText] = useState('')
   const [saveState, setSaveState] = useState<SaveState>('idle')
+  // June 26 2026 -- per-slide script regeneration state. The
+  // slide_number currently being regenerated (null = idle); a
+  // spinner replaces the regen icon on that row in the
+  // navigator + every other regen icon disables to prevent
+  // double-fire. Local to this component since the regen flow
+  // is scoped to a single editor instance.
+  const [
+    regeneratingSlideNumber, setRegeneratingSlideNumber,
+  ] = useState<number | null>(null)
   const [lastSaved, setLastSaved] = useState<string>('not yet')
+  // June 28 2026 -- touchpoint 5 hard-lock guardrail. Warnings
+  // returned by the PATCH save endpoint for any untoken-backed
+  // numerics introduced via direct editor typing. Save itself
+  // is non-blocking; this state drives the dismissible banner.
+  interface NumericOverrideWarning {
+    offending_value: string
+    sentence:        string
+    suggested_token: string | null
+    severity:        'token_available' | 'unsupported'
+  }
+  const [numericWarnings, setNumericWarnings]
+    = useState<NumericOverrideWarning[]>([])
+  const dismissNumericWarnings = useCallback(
+    () => setNumericWarnings([]), [])
   // Viewport gating — desktop renders the side-aside panels; mobile
   // (below the lg breakpoint) renders the same panels as full-screen
   // overlay drawers. We track isDesktop as JS state so the two
@@ -153,7 +241,13 @@ export default function DocumentEditor() {
   // The editor's right panel: the Writing Assistant, or the chart
   // picker drawer while a chart is being added to a slide.
   const [rightPanelMode, setRightPanelMode] =
-    useState<'assistant' | 'chartpicker'>('assistant')
+    useState<'assistant' | 'chartpicker' | 'config'>('assistant')
+  // June 26 2026 -- when rightPanelMode='config', this is the
+  // element id whose chart_config / table_config the Configure
+  // panel is editing. Setting null while in config mode falls
+  // back to the assistant panel.
+  const [configElementId, setConfigElementId] =
+    useState<string | null>(null)
   const [generatingScript, setGeneratingScript] = useState(false)
   // A quoted passage pushed into the Writing Assistant by the "Ask AI"
   // selection action; the nonce re-triggers the panel's prefill effect.
@@ -253,7 +347,23 @@ export default function DocumentEditor() {
     if (!dirtyRef.current || !draft) return
     setSaveState('saving')
     try {
-      await axios.patch(`/api/v1/documents/drafts/${id}`, {
+      // June 28 2026 -- touchpoint 5 hard-lock guardrail. The
+      // PATCH response carries `numeric_warnings` (non-blocking)
+      // for any untoken-backed numeric the backend scanner
+      // flagged in the saved content. We surface them via the
+      // NumericOverrideWarningBanner. Save itself always
+      // succeeds regardless of warning count -- the manual
+      // editor save path is intentionally non-blocking.
+      const res = await axios.patch<{
+        saved: boolean
+        draft_id: number
+        numeric_warnings?: Array<{
+          offending_value:  string
+          sentence:         string
+          suggested_token:  string | null
+          severity:         'token_available' | 'unsupported'
+        }>
+      }>(`/api/v1/documents/drafts/${id}`, {
         content_json: contentJson,
         content_text: contentText,
         word_count: countWords(contentText),
@@ -262,6 +372,10 @@ export default function DocumentEditor() {
       setSaveState('saved')
       setLastSaved(new Date().toLocaleTimeString(undefined,
         { hour: '2-digit', minute: '2-digit' }))
+      const incoming = res.data?.numeric_warnings ?? []
+      if (incoming.length > 0) {
+        setNumericWarnings(incoming)
+      }
     } catch {
       setSaveState('error')
     }
@@ -285,6 +399,24 @@ export default function DocumentEditor() {
     dirtyRef.current = true
     setSaveState('idle')
   }
+
+  // June 26 2026 -- patches the chart_config / table_config on a
+  // single canvas element by id and triggers an auto-save tick via
+  // onDeckChange. Used by the Configure panel; transparent to the
+  // existing canvas drag / resize / edit flows.
+  const patchElementConfig = useCallback(
+    (elementId: string, key: 'chart_config' | 'table_config',
+     config: object): void => {
+      const deck = contentJson as CanvasDeck | null
+      if (!deck) return
+      onDeckChange({
+        slides: deck.slides.map((s) => ({
+          ...s,
+          elements: s.elements.map((e) =>
+            e.id === elementId ? { ...e, [key]: config } : e),
+        })),
+      })
+    }, [contentJson])
 
   // Adds a chart element (from the chart picker) to the active slide,
   // then returns the right panel to the Writing Assistant.
@@ -330,7 +462,18 @@ export default function DocumentEditor() {
 
   // In-editor export — flushes pending edits, then POSTs the draft id to
   // the matching export endpoint and downloads the rendered file.
-  const exportDocument = useCallback(async () => {
+  // June 25 2026 -- export warning state. The Export button now
+  // runs pre-flight checks (hash mismatch + missing review) and
+  // surfaces a soft block modal when either condition fires.
+  // "Export Anyway" routes through doExport without re-running
+  // the checks; Cancel closes the modal without exporting.
+  const [exportWarning, setExportWarning] = useState<{
+    open:          boolean
+    hashMismatch:  boolean
+    missingReview: boolean
+  }>({ open: false, hashMismatch: false, missingReview: false })
+
+  const doExport = useCallback(async () => {
     if (!draft) return
     setExporting(true)
     try {
@@ -355,6 +498,44 @@ export default function DocumentEditor() {
       setExporting(false)
     }
   }, [draft, id, save])
+
+  const exportDocument = useCallback(async () => {
+    if (!draft) return
+    // Pre-flight checks. Both fail-open: a network failure on
+    // either fetch falls through to the export without warning
+    // rather than blocking on a transient infra issue.
+    let hashMismatch = false
+    let missingReview = false
+    try {
+      const verifyRes = await axios.get<{
+        current_data_hash?: string
+      }>('/api/v1/audit/runs/latest')
+      const liveHash = verifyRes.data?.current_data_hash
+      if (liveHash
+          && draft.data_hash
+          && draft.data_hash !== liveHash) {
+        hashMismatch = true
+      }
+    } catch {
+      /* fall through */
+    }
+    try {
+      const r = await axios.get<{ has_review?: boolean }>(
+        `/api/v1/documents/drafts/${id}/academic-review-status`)
+      if (r.data?.has_review === false) {
+        missingReview = true
+      }
+    } catch {
+      /* fall through */
+    }
+    if (hashMismatch || missingReview) {
+      setExportWarning({
+        open: true, hashMismatch, missingReview,
+      })
+      return
+    }
+    await doExport()
+  }, [draft, id, doExport])
 
   // Script export — the master script, or one speaker's slides only.
   const exportScript = useCallback(async (speaker?: string) => {
@@ -383,6 +564,43 @@ export default function DocumentEditor() {
       setExporting(false)
     }
   }, [id, save])
+
+  // June 26 2026 -- per-slide script regeneration. Synchronous
+  // POST scoped to one slide; backend returns the spliced
+  // content_json with the regenerated slide block in place. We
+  // patch local state directly so the editor shows the new
+  // prose without a full reload. While in flight, the navigator
+  // shows a spinner on the regenerating row and disables every
+  // other regen icon to prevent double-fire.
+  const handleRegenSlide = useCallback(
+    async (slideNumber: number): Promise<void> => {
+      if (!id || regeneratingSlideNumber !== null) return
+      setRegeneratingSlideNumber(slideNumber)
+      setError(null)
+      try {
+        const res = await axios.post<{
+          draft_id:     number
+          slide_number: number
+          content_json: TipTapDoc
+        }>('/api/v1/documents/script/regenerate-slide', {
+          draft_id: id, slide_number: slideNumber,
+        })
+        // Patch in place so the editor + navigator reflect the
+        // regenerated slide without a full reload. The backend
+        // already persisted the spliced content via update_draft;
+        // the autosave path won't re-write on the next tick
+        // because contentJson equals the freshly-fetched value.
+        setContentJson(res.data.content_json)
+      } catch (err) {
+        const msg = axios.isAxiosError(err)
+          ? (err.response?.data?.detail ?? err.message)
+          : 'Per-slide regeneration failed.'
+        setError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+      } finally {
+        setRegeneratingSlideNumber(null)
+      }
+    },
+    [id, regeneratingSlideNumber])
 
   // "Ask AI" on an editor selection — opens the assistant panel and
   // pre-fills the chat input with the quoted passage.
@@ -502,12 +720,22 @@ export default function DocumentEditor() {
     if (isScript) {
       // One section per slide (H2); progress is "has delivery prose yet".
       const secs: NavSection[] = scriptSections(contentJson as TipTapDoc | null)
-        .map((s) => ({
-          heading: s.heading,
-          totalMarkers: 1,
-          markersRemaining: s.hasContent ? 0 : 1,
-          speaker: s.speaker,
-        }))
+        .map((s) => {
+          // Parse the slide_number out of the heading
+          // ('Slide N: title' or '## Slide N: ...') so the
+          // per-row regen button can POST it. Falls back to null
+          // when the heading doesn't carry a recognisable
+          // 'Slide N' prefix (e.g. an OPENING / CLOSING section).
+          const match = /^\s*(?:Slide|#+\s*Slide)\s+(\d+)/i
+            .exec(s.heading)
+          return {
+            heading: s.heading,
+            totalMarkers: 1,
+            markersRemaining: s.hasContent ? 0 : 1,
+            speaker: s.speaker,
+            slideNumber: match ? Number(match[1]) : null,
+          }
+        })
       return { sections: secs, unresolved: countMarkers(contentText) }
     }
     const secs: NavSection[] = tiptapSections(contentJson as TipTapDoc | null)
@@ -626,6 +854,13 @@ export default function DocumentEditor() {
               : saveState === 'error' ? 'Save failed'
               : saveState === 'saved' ? `Saved ${lastSaved}` : 'Unsaved changes'}
           </span>
+          {/* June 26 2026 -- DataHashChip lifted out of the
+              non-script branch so the freshness signal renders
+              for ALL doc types (brief / appendix / deck / script).
+              Previously the script header omitted it; the chip
+              renders nothing while either hash is unavailable, so
+              there's no flash on first mount. */}
+          <DataHashChip draftDataHash={draft.data_hash} />
           {isScript ? (
             <>
               {/* Rehearse — opens the combined script + slide overlay.
@@ -668,17 +903,23 @@ export default function DocumentEditor() {
               })}
             </>
           ) : (
-            <button type="button" onClick={() => void exportDocument()}
-              disabled={exporting}
-              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                         border border-electric/40 text-electric
-                         hover:bg-electric/10 disabled:opacity-50">
-              {exporting
-                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Exporting…</>
-                : <><Download className="w-3.5 h-3.5" />
-                    {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
-            </button>
+            <>
+              {/* DataHashChip lifted to the top of this header
+                  block (June 26 2026) so it renders for all doc
+                  types including script. The chip used to live
+                  in this branch only. */}
+              <button type="button" onClick={() => void exportDocument()}
+                disabled={exporting}
+                className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                           border border-electric/40 text-electric
+                           hover:bg-electric/10 disabled:opacity-50">
+                {exporting
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Exporting…</>
+                  : <><Download className="w-3.5 h-3.5" />
+                      {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
+              </button>
+            </>
           )}
           {isDeck && (
             <button type="button" onClick={() => setPreviewOpen(true)}
@@ -719,9 +960,31 @@ export default function DocumentEditor() {
         </div>
       </div>
 
+      {/* Concern 7k-vii + 7l-iii -- draft version selector. Shows
+          a dropdown when the user has multiple draft versions of
+          this document type (post-critic revisions create new
+          editor_drafts rows alongside the original). Renders
+          nothing for the single-version case. */}
+      {id && (
+        <DraftVersionSelector
+          documentType={draft.document_type}
+          currentDraftId={Number(id)} />
+      )}
+
       {/* Tasks callout — the tracking note + the checklist for this
           document type, dismissible per draft. */}
       <EditorTasksCallout documentType={draft.document_type} draftId={id} />
+
+      {/* Post-generation audit banner — surfaces flagged numeric
+          cross-reference / label-direction / cross-section
+          consistency / citation completeness issues from migration
+          051's audit. Informational; never blocks editing. */}
+      {draft.audit_warnings && draft.audit_warnings.flag_counts
+        && draft.audit_warnings.flag_counts.total > 0 && (
+        <AuditWarningsBanner
+          draftId={id}
+          audit={draft.audit_warnings} />
+      )}
 
       {/* Mobile canvas-editor banner — the Konva Stage scales but
           pixel-precise editing is not feasible on touch. The banner
@@ -767,11 +1030,23 @@ export default function DocumentEditor() {
                   + 'deck in a second tab and use Presentation Preview '
                   + 'alongside this script.'
                 : undefined}
+              onRegenSlide={isScript ? handleRegenSlide : undefined}
+              regeneratingSlideNumber={
+                isScript ? regeneratingSlideNumber : null}
             />
           </aside>
         )}
 
         <main className="flex-1 min-w-0 bg-navy-900">
+          {/* June 28 2026 -- touchpoint 5 warning banner. Renders
+              above the editor surface so the operator sees it
+              immediately after the save round-trip. Dismissible;
+              the audit-trail rows persist regardless. */}
+          <div className="px-3 pt-2">
+            <NumericOverrideWarningBanner
+              warnings={numericWarnings}
+              onDismiss={dismissNumericWarnings} />
+          </div>
           {isDeck ? (
             <CanvasSlideEditor draftId={id}
               deck={(contentJson as CanvasDeck | null) ?? { slides: [] }}
@@ -780,6 +1055,11 @@ export default function DocumentEditor() {
               onRequestChartPicker={() => {
                 setRightOpen(true)
                 setRightPanelMode('chartpicker')
+              }}
+              onRequestConfigure={(elementId: string) => {
+                setConfigElementId(elementId)
+                setRightOpen(true)
+                setRightPanelMode('config')
               }} />
           ) : (
             <RichTextEditor
@@ -789,13 +1069,27 @@ export default function DocumentEditor() {
           )}
         </main>
 
-        {/* Right Writing Assistant / chart picker — desktop aside. */}
+        {/* Right Writing Assistant / chart picker / Configure panel
+            — desktop aside. */}
         {isDesktop && rightOpen && (
           <aside className="w-[300px] shrink-0
                             border-l border-border bg-navy-900">
             {isDeck && rightPanelMode === 'chartpicker' ? (
               <ChartPicker onSelect={handleAddChart}
                 onClose={() => setRightPanelMode('assistant')} />
+            ) : isDeck && rightPanelMode === 'config'
+                  && configElementId ? (
+              <ConfigureForElement
+                deck={contentJson as CanvasDeck | null}
+                elementId={configElementId}
+                onChangeChart={(c) => patchElementConfig(
+                  configElementId, 'chart_config', c)}
+                onChangeTable={(c) => patchElementConfig(
+                  configElementId, 'table_config', c)}
+                onClose={() => {
+                  setConfigElementId(null)
+                  setRightPanelMode('assistant')
+                }} />
             ) : (
               <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
                 prefill={assistantPrefill}
@@ -853,6 +1147,9 @@ export default function DocumentEditor() {
                     + 'deck in a second tab and use Presentation Preview '
                     + 'alongside this script.'
                   : undefined}
+                onRegenSlide={isScript ? handleRegenSlide : undefined}
+                regeneratingSlideNumber={
+                  isScript ? regeneratingSlideNumber : null}
               />
             </div>
           </aside>
@@ -882,6 +1179,19 @@ export default function DocumentEditor() {
               {isDeck && rightPanelMode === 'chartpicker' ? (
                 <ChartPicker onSelect={(k) => { handleAddChart(k); setRightOpen(false) }}
                   onClose={() => setRightPanelMode('assistant')} />
+              ) : isDeck && rightPanelMode === 'config'
+                    && configElementId ? (
+                <ConfigureForElement
+                  deck={contentJson as CanvasDeck | null}
+                  elementId={configElementId}
+                  onChangeChart={(c) => patchElementConfig(
+                    configElementId, 'chart_config', c)}
+                  onChangeTable={(c) => patchElementConfig(
+                    configElementId, 'table_config', c)}
+                  onClose={() => {
+                    setConfigElementId(null)
+                    setRightPanelMode('assistant')
+                  }} />
               ) : (
                 <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
                   prefill={assistantPrefill}
@@ -905,6 +1215,37 @@ export default function DocumentEditor() {
           loading / 404 / error states. */}
       {rehearsalOpen && isScript && (
         <RehearsalOverlay onClose={() => setRehearsalOpen(false)} />
+      )}
+
+      {/* June 25 2026 -- export pre-flight warning modal. Fires
+          before exportDocument when the draft is stale (hash
+          mismatch) and/or the academic review has not been run.
+          Soft block: Cancel returns to the editor; Export Anyway
+          proceeds with doExport. */}
+      {draft && (
+        <ExportWarningModal
+          open={exportWarning.open}
+          hashMismatch={exportWarning.hashMismatch}
+          missingReview={exportWarning.missingReview}
+          documentLabel={
+            draft.document_type === 'executive_brief'
+              ? 'Brief'
+              : draft.document_type === 'analytical_appendix'
+                ? 'Appendix'
+                : draft.document_type === 'presentation_deck'
+                  ? 'Deck'
+                  : draft.document_type === 'presentation_script'
+                    ? 'Script'
+                    : 'Document'}
+          onCancel={() => setExportWarning(
+            { open: false, hashMismatch: false,
+              missingReview: false })}
+          onConfirm={() => {
+            setExportWarning(
+              { open: false, hashMismatch: false,
+                missingReview: false })
+            void doExport()
+          }} />
       )}
     </div>
   )

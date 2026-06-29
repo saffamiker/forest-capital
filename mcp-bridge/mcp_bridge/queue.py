@@ -200,6 +200,34 @@ class Queue:
                 (int(limit),)).fetchall()
             return [_row_to_dict(r) for r in rows]
 
+    def purge_pending_and_running(self) -> int:
+        """Mark every pending or running prompt as cancelled. Returns
+        the number of rows updated.
+
+        Operator-facing queue reset — use when the queue gets jammed
+        (e.g. a worker died mid-prompt leaving rows stuck in
+        'running', or a flood of pending prompts queued behind a
+        long-running one needs to be aborted). Stops the worker from
+        picking those rows up on the next poll without needing shell
+        access to the SQLite db. Completed and failed rows are
+        preserved so the audit trail is intact.
+
+        'cancelled' is a new terminal status — the state machine's
+        existing transitions (pending → running → complete | failed)
+        gain `pending | running → cancelled` as an operator-driven
+        escape hatch. status_snapshot() surfaces the count under its
+        own key, the same way it picks up any new status row by
+        querying GROUP BY status.
+
+        June 3 2026.
+        """
+        with self._connect() as c:
+            cur = c.execute(
+                "UPDATE prompts SET status='cancelled', "
+                "completed_at=COALESCE(completed_at, CURRENT_TIMESTAMP) "
+                "WHERE status IN ('pending','running')")
+            return int(cur.rowcount or 0)
+
     def status_snapshot(self) -> dict[str, Any]:
         """Aggregate health: counts by state + last completion time.
         Powers the bridge's /status endpoint and the mobile

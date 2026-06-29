@@ -598,3 +598,36 @@ class TestQADeterministicReliability:
         ):
             assert key in bag, f"{key} is no longer deterministic"
             assert bag[key]["status"] in {"PASS", "WARN", "FAIL"}
+
+
+# ── Bridge #82: IN02 is non_blocking per spec ─────────────────────────
+
+class TestIN02Classification:
+    """Bridge #82: IN02 (Academic Review complete) is the platform's
+    own attestation that an academic review row exists -- by spec the
+    arbiter score is advisory (the editor banner already surfaces the
+    score). The report-generation gate must NEVER refuse a draft for
+    an IN02 WARN, so its warn_class is 'non_blocking' (matching AN03
+    and E01). A previous pass classified it 'disclosure_required'
+    which made the gate block on a truncated review until a per-
+    document escape hatch was added; the escape hatch is no longer
+    needed because the taxonomy itself now says IN02 is non-blocking.
+    """
+
+    def test_in02_is_classified_non_blocking(self):
+        from agents.qa_agent import _SUBMISSION_CLASSIFICATIONS
+
+        assert _SUBMISSION_CLASSIFICATIONS["IN02"]["warn_class"] == (
+            "non_blocking")
+
+    def test_in01_and_in03_still_disclosure_required(self):
+        """IN02 is the only IN check made non-blocking. IN01 (audit
+        chain integrity) and IN03 (document generation clean) remain
+        disclosure_required because they verify the audit chain
+        itself, not an advisory readiness signal."""
+        from agents.qa_agent import _SUBMISSION_CLASSIFICATIONS
+
+        assert _SUBMISSION_CLASSIFICATIONS["IN01"]["warn_class"] == (
+            "disclosure_required")
+        assert _SUBMISSION_CLASSIFICATIONS["IN03"]["warn_class"] == (
+            "disclosure_required")

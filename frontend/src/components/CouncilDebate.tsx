@@ -176,11 +176,17 @@ export default function CouncilDebate() {
   }
   const [handoff, setHandoff] = useState<HandoffPackage | null>(null)
   const [handoffOpen, setHandoffOpen] = useState(true)
+  // Page scope carried from a council-facing tile's "Ask about this"
+  // hand-off. Forwarded to the backend on submit so the council injects
+  // that page's live cached data. Persists from the hand-off through the
+  // user's edits until they send.
+  const [contextScope, setContextScope] = useState<string | undefined>(undefined)
 
   useEffect(() => {
     const state = location.state as {
       prefillQuestion?: string
       handoff?: HandoffPackage
+      contextScope?: string
     } | null
     if (state?.prefillQuestion) {
       setQuery(state.prefillQuestion)
@@ -188,6 +194,9 @@ export default function CouncilDebate() {
     }
     if (state?.handoff) {
       setHandoff(state.handoff)
+    }
+    if (state?.contextScope) {
+      setContextScope(state.contextScope)
     }
     // May 24 2026 (ID 271) — dep on location.state.
     // The mount-only `[]` deps array meant that when the user was
@@ -203,7 +212,7 @@ export default function CouncilDebate() {
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()
     if (query.trim()) trackFeature('council_query_submit')
-    void runQuery(query)
+    void runQuery(query, contextScope)
   }
 
   const agentOrder = ['Equity Analyst', 'Fixed Income Analyst', 'Risk Manager', 'Quant Backtester', 'Independent Analyst (Gemini)', 'Contrarian Analyst (Grok)', 'CIO']
@@ -382,7 +391,7 @@ export default function CouncilDebate() {
               </p>
               <button
                 type="button"
-                onClick={() => void runQuery(lastQuery || query)}
+                onClick={() => void runQuery(lastQuery || query, contextScope)}
                 className="mt-2 flex items-center gap-1.5 text-xs px-3 py-1.5 rounded
                            border border-danger/30 text-danger hover:bg-danger/10 transition-colors"
               >

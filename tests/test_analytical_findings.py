@@ -195,10 +195,15 @@ def _sample_payload() -> dict:
 
 
 class TestComputeFindings:
-    def test_produces_eleven_findings(self):
+    def test_produces_twelve_findings(self):
+        """May 31 2026 — the bootstrap-CI-overlap finding was inserted
+        between FACTOR EXPOSURE and MACRO CONTEXT, taking the count
+        from 11 to 12. The surprises rollup remains the LAST finding
+        and aggregates over every prior; tests that index it use
+        findings[-1]."""
         from tools.analytical_findings import compute_findings_from_payload
         findings, _md = compute_findings_from_payload(_sample_payload())
-        assert len(findings) == 11
+        assert len(findings) == 12
 
     def test_every_finding_has_documented_shape(self):
         from tools.analytical_findings import compute_findings_from_payload
@@ -260,15 +265,76 @@ class TestComputeFindings:
         assert ("VOL_TARGETING" in evidence_text
                 or "BENCHMARK" in evidence_text)
 
-    def test_finding_11_aggregates_prior_surprises(self):
+    def test_finding_8_surfaces_vol_targeting_covid_callout(self):
+        """May 31 2026 — the F3 CAGR-annualisation bug obscured
+        VOL_TARGETING's COVID Crash capital-preservation result (the
+        2-month CAGR over-stated VT's loss as -27.84% when the actual
+        cumulative was -5.29%). Once the basis was switched to
+        cumulative_return, the result is one of the clearest
+        defensive narratives in the platform. The crisis-performance
+        finding now surfaces a dedicated callout when a defensive
+        strategy preserves capital at ≤ 50% of the benchmark's loss
+        in a window where the benchmark lost ≥ 15%."""
+        from tools.analytical_findings import compute_findings_from_payload
+        # Patch the sample's crisis payload to carry production-shaped
+        # COVID Crash figures: benchmark -19.87%, VOL_TARGETING -5.29%
+        # (verified against the live backtester output).
+        payload = _sample_payload()
+        crisis = payload["crisis"]
+        rows = crisis["rows"]
+        rows.setdefault("BENCHMARK", {})["COVID_Crash_2020"] = {
+            "cumulative_return": -0.1987, "cagr": -0.7353,
+            "max_dd": -0.1251, "sharpe": -2.5,
+            "partial": False, "n_months": 2,
+        }
+        rows.setdefault("VOL_TARGETING", {})["COVID_Crash_2020"] = {
+            "cumulative_return": -0.0529, "cagr": -0.2784,
+            "max_dd": -0.0529, "sharpe": -1.5,
+            "partial": False, "n_months": 2,
+        }
+        crisis["windows"].setdefault(
+            "COVID_Crash_2020",
+            {"start": "2020-02-01", "end": "2020-03-31"})
+
+        findings, _md = compute_findings_from_payload(payload)
+        f8 = findings[7]
+        assert f8["title"] == "CRISIS PERFORMANCE"
+        text = " ".join(f8["evidence"])
+        # The callout names the strategy, the window, and the ratio.
+        assert "VOL_TARGETING preserved capital" in text
+        assert "-5.29%" in text or "-5.30%" in text
+        assert "-19.87%" in text
+        assert "27%" in text  # 5.29 / 19.87 ≈ 0.27
+
+    def test_finding_8_implication_names_the_f3_correction(self):
+        """The implication must reference the cumulative-return basis
+        fix (May 30 2026 F3) so a reader understands why the COVID
+        capital-preservation result reads differently from earlier
+        drafts that quoted the annualised figure."""
         from tools.analytical_findings import compute_findings_from_payload
         findings, _md = compute_findings_from_payload(_sample_payload())
-        f11 = findings[10]
-        assert f11["title"] == "SURPRISES"
+        f8 = findings[7]
+        impl = f8["implication"]
+        assert "COVID" in impl
+        assert ("cumulative" in impl.lower()
+                or "CAGR-annualisation" in impl
+                or "F3" in impl)
+        assert ("regime-aware" in impl
+                or "regime-conditional" in impl
+                or "systematic" in impl.lower())
+
+    def test_surprises_rollup_aggregates_prior_findings(self):
+        from tools.analytical_findings import compute_findings_from_payload
+        findings, _md = compute_findings_from_payload(_sample_payload())
+        # Surprises is always the LAST finding — index by -1 rather
+        # than a fixed position so a future insertion doesn't break
+        # this assertion the way it broke the old `findings[10]`.
+        f_last = findings[-1]
+        assert f_last["title"] == "SURPRISES"
         prior_surprises = [f for f in findings[:-1] if f["surprise"]]
         # The Surprises finding must agree with the prior findings.
         if prior_surprises:
-            assert f11["surprise"] is True
+            assert f_last["surprise"] is True
         else:
             assert f11["surprise"] is False
 
@@ -286,17 +352,24 @@ class TestFailOpenPerFinding:
         assert f3["title"] == "TAIL RISK DIVERGENCE"
         assert "Deferred" in f3["finding"]
         assert f3["nugget_strength"] == "LOW"
-        # The other 10 still landed.
-        assert len(findings) == 11
+        # The other 11 still landed (May 31 2026 — bootstrap-CI-overlap
+        # finding bumped the total from 11 to 12).
+        assert len(findings) == 12
 
     def test_missing_macro_digest_returns_deferred(self):
+        """Index MACRO CONTEXT ALIGNMENT by title rather than position
+        so future-finding inserts (e.g. the bootstrap-CI-overlap
+        finding inserted before MACRO on May 31 2026) don't break this
+        assertion."""
         from tools.analytical_findings import compute_findings_from_payload
         payload = _sample_payload()
         payload["macro_digest"] = None
         findings, _md = compute_findings_from_payload(payload)
-        f10 = findings[9]
-        assert f10["title"] == "MACRO CONTEXT ALIGNMENT"
-        assert "Deferred" in f10["finding"]
+        macro = next(
+            (f for f in findings if f["title"] == "MACRO CONTEXT ALIGNMENT"),
+            None)
+        assert macro is not None, "MACRO CONTEXT ALIGNMENT finding missing"
+        assert "Deferred" in macro["finding"]
 
     def test_empty_strategies_returns_deferred_for_dependent_findings(self):
         from tools.analytical_findings import compute_findings_from_payload

@@ -131,17 +131,128 @@ describe('DocumentGenerationPanel — async generation', () => {
   })
 
   it('resumes an in-progress job found on page load', async () => {
+    // PR #338 retired the midpoint card; the brief card is the
+    // resume target now.
     mockedAxios.get.mockResolvedValue({
       data: { jobs: [{
-        job_id: 'j-mid', document_type: 'midpoint_paper',
+        job_id: 'j-brief-resume', document_type: 'executive_brief',
         status: 'running', draft_id: null, download_url: null, error: null,
       }] } })
     renderPanel(<DocumentGenerationPanel />)
-    const midCard = await screen.findByText('Midpoint Submission Paper')
+    const briefCardEl = await screen.findByText('Executive Brief')
     await waitFor(() => expect(
-      within(midCard.closest('.card') as HTMLElement)
+      within(briefCardEl.closest('.card') as HTMLElement)
         .getByText(/Generating your/)).toBeInTheDocument())
   })
+
+  it('renders the analytical appendix card with its POST endpoint', async () => {
+    mockedAxios.post.mockResolvedValue({
+      data: { job_id: 'j-appx', status: 'pending' } })
+    renderPanel(<DocumentGenerationPanel />)
+    const appxCard = (
+      screen.getByText('Analytical Appendix').closest('.card') as HTMLElement)
+    expect(appxCard).toBeInTheDocument()
+    fireEvent.click(within(appxCard).getByRole('button',
+      { name: /Generate/ }))
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      '/api/v1/export/analytical-appendix')
+    await waitFor(() => expect(
+      within(appxCard).getByText(/Generating your/)).toBeInTheDocument())
+  })
+
+  it('renders the deck card with the post-rebuild eleven-slide description (bridges #98 / #100)', async () => {
+    // The card description has been rewritten twice: 16-slide
+    // (pre-#86) -> six-slide (#86) -> eleven-slide (#98 / #100).
+    // The current copy must describe the eleven-slide narrative and
+    // must NOT carry either older wording.
+    renderPanel(<DocumentGenerationPanel />)
+    const deckCard = (
+      screen.getByText('Final Presentation Deck').closest('.card') as HTMLElement)
+    expect(deckCard).toBeInTheDocument()
+    expect(deckCard.textContent).toMatch(/Eleven-slide/i)
+    expect(deckCard.textContent).not.toMatch(/Six-slide/i)
+    expect(deckCard.textContent).not.toMatch(/16-slide/i)
+  })
+
+  it('shows a Regenerate button on a complete-state card (bridge #90)', async () => {
+    // Bridge #90: a completed generation should still let the team
+    // trigger a fresh run without manual draft deletion. The button
+    // sits alongside Open in Editor + Download on the complete-state
+    // card.
+    renderPanel(<DocumentGenerationPanel />)
+    trackJob({
+      job_id: 'j-deck', document_type: 'presentation_deck',
+      status: 'complete', draft_id: 33,
+      download_url: '/api/v1/jobs/j-deck/download', error: null,
+    })
+    const deckCard = (
+      await screen.findByText('Final Presentation Deck')).closest(
+        '.card') as HTMLElement
+    const button = await within(deckCard).findByTestId(
+      'regenerate-deck')
+    expect(button).toBeInTheDocument()
+    expect(button.textContent).toMatch(/Regenerate/i)
+  })
+
+  it('Deck Regenerate opens the RegenConfirmModal and POSTs after '
+    + 'confirm (June 24 2026 -- window.confirm replaced with the '
+    + 'team-replacement modal)', async () => {
+      mockedAxios.post.mockResolvedValue({
+        data: { job_id: 'j-deck-2', status: 'pending' } })
+      renderPanel(<DocumentGenerationPanel />)
+      trackJob({
+        job_id: 'j-deck', document_type: 'presentation_deck',
+        status: 'complete', draft_id: 33,
+        download_url: '/api/v1/jobs/j-deck/download', error: null,
+      })
+      const deckCard = (
+        await screen.findByText(
+          'Final Presentation Deck')).closest(
+          '.card') as HTMLElement
+      const button = await within(deckCard).findByTestId(
+        'regenerate-deck')
+      fireEvent.click(button)
+      // Modal opens (replaces the old window.confirm path).
+      const confirm = await screen.findByTestId(
+        'regen-confirm-modal-confirm')
+      fireEvent.click(confirm)
+      await waitFor(() => expect(mockedAxios.post)
+        .toHaveBeenCalledWith(
+          '/api/v1/export/presentation-deck'))
+    })
+
+  it('Brief Regenerate is a no-op when the user dismisses the '
+    + 'unified RegenConfirmModal (June 27 2026 -- modal is '
+    + 'unconditional: no pre-flight gate)', async () => {
+      // The brief regen modal fires on EVERY Regenerate click --
+      // no pre-flight check against /api/v1/story-plans/exists,
+      // no skip-when-no-downstream-plans short-circuit. The user
+      // must always actively confirm. Pinning the cancel branch
+      // guards against the modal being silently removed.
+      renderPanel(<DocumentGenerationPanel />)
+      trackJob({
+        job_id: 'j-brief-c', document_type: 'executive_brief',
+        status: 'complete', draft_id: 41,
+        download_url: '/api/v1/jobs/j-brief-c/download', error: null,
+      })
+      const card = briefCard()
+      const button = await within(card).findByTestId(
+        'regenerate-brief')
+      fireEvent.click(button)
+      // Modal opens unconditionally.
+      const cancel = await screen.findByTestId(
+        'regen-confirm-modal-cancel')
+      fireEvent.click(cancel)
+      // Cancel suppresses the POST.
+      expect(mockedAxios.post).not.toHaveBeenCalled()
+      // No story-plans pre-flight should fire.
+      const callsToStoryPlans =
+        mockedAxios.get.mock.calls.filter(
+          ([url]) =>
+            typeof url === 'string'
+            && url.includes('/api/v1/story-plans/exists'))
+      expect(callsToStoryPlans).toHaveLength(0)
+    })
 
   it('shows the error state with Try Again on a failed job', async () => {
     renderPanel(<DocumentGenerationPanel />)
@@ -158,6 +269,102 @@ describe('DocumentGenerationPanel — async generation', () => {
       .toBeInTheDocument()
   })
 })
+
+describe('DocumentGenerationPanel — Brief Workflow guide', () => {
+  it('renders an Info button on the Executive Brief, Deck, and '
+    + 'Appendix cards (June 23 2026 -- per-doc workflow guides)',
+    () => {
+      // June 23 2026 -- Deck + Appendix gained their own workflow
+      // guides. The brief stays at brief-workflow-info-button;
+      // the deck + appendix get deck-workflow-info-button and
+      // appendix-workflow-info-button respectively.
+      renderPanel(<DocumentGenerationPanel />)
+      const briefInfo = within(briefCard()).getByTestId(
+        'brief-workflow-info-button')
+      expect(briefInfo).toBeInTheDocument()
+
+      const deckCard = screen.getByText('Final Presentation Deck')
+        .closest('.card') as HTMLElement
+      // The brief info button must NOT be on the deck card.
+      expect(within(deckCard).queryByTestId(
+        'brief-workflow-info-button')).not.toBeInTheDocument()
+      // The deck has its OWN info button.
+      expect(within(deckCard).getByTestId(
+        'deck-workflow-info-button')).toBeInTheDocument()
+
+      const appendixCard = screen.getByText('Analytical Appendix')
+        .closest('.card') as HTMLElement
+      expect(within(appendixCard).getByTestId(
+        'appendix-workflow-info-button')).toBeInTheDocument()
+    })
+
+  it('clicking the Deck Info button opens the Deck workflow modal',
+    () => {
+      renderPanel(<DocumentGenerationPanel />)
+      expect(screen.queryByTestId('deck-workflow-modal'))
+        .not.toBeInTheDocument()
+      const deckCard = screen.getByText('Final Presentation Deck')
+        .closest('.card') as HTMLElement
+      fireEvent.click(within(deckCard).getByTestId(
+        'deck-workflow-info-button'))
+      expect(screen.getByTestId('deck-workflow-modal'))
+        .toBeInTheDocument()
+      expect(screen.getByText(
+        /How to Build the Final Presentation Deck/i))
+        .toBeInTheDocument()
+    })
+
+  it('clicking the Appendix Info button opens the Appendix '
+    + 'workflow modal', () => {
+      renderPanel(<DocumentGenerationPanel />)
+      expect(screen.queryByTestId('appendix-workflow-modal'))
+        .not.toBeInTheDocument()
+      const appendixCard = screen.getByText('Analytical Appendix')
+        .closest('.card') as HTMLElement
+      fireEvent.click(within(appendixCard).getByTestId(
+        'appendix-workflow-info-button'))
+      expect(screen.getByTestId('appendix-workflow-modal'))
+        .toBeInTheDocument()
+      expect(screen.getByText(
+        /How to Build the Analytical Appendix/i))
+        .toBeInTheDocument()
+    })
+
+  it('renders the persistent helper text below the brief description',
+    () => {
+      renderPanel(<DocumentGenerationPanel />)
+      expect(
+        within(briefCard()).getByTestId('brief-workflow-helper-link'),
+      ).toBeInTheDocument()
+      expect(within(briefCard()).getByText(
+        /Review the step-by-step guide/i)).toBeInTheDocument()
+    })
+
+  it('clicking the Info button opens the workflow modal', () => {
+    renderPanel(<DocumentGenerationPanel />)
+    expect(screen.queryByTestId('brief-workflow-modal'))
+      .not.toBeInTheDocument()
+    fireEvent.click(within(briefCard()).getByTestId(
+      'brief-workflow-info-button'))
+    expect(screen.getByTestId('brief-workflow-modal'))
+      .toBeInTheDocument()
+    expect(screen.getByText(/How to Build the Executive Brief/i))
+      .toBeInTheDocument()
+  })
+
+  it('Generate button still works when the modal is closed', async () => {
+    mockedAxios.post.mockResolvedValue({
+      data: { job_id: 'j-brief-guide', status: 'pending' } })
+    renderPanel(<DocumentGenerationPanel />)
+    // Modal is closed; click Generate.
+    fireEvent.click(within(briefCard()).getByRole('button',
+      { name: /^Generate$/ }))
+    await waitFor(() =>
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        '/api/v1/export/executive-brief'))
+  })
+})
+
 
 describe('GenerationToast — background completion', () => {
   it('announces a completed job away from the Reports page', () => {
