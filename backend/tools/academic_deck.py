@@ -465,19 +465,20 @@ Footnote: "Out-of-sample window: {{OOS_WINDOW_MONTHS}}+ months post-2022 \
 correlation break. Figures based on December 2025 data lock. Academic \
 submission figures."
 Chart: none -- the split-panel layout (cards + table) is the visual.
-Speaker notes: "We tested ten strategies. For this panel we simplify \
-to three categories: the static answer, the dynamic answer, and the \
-benchmark. Everything else is supporting evidence and lives in the \
-analytical appendix. The cards on the left show the in-sample Sharpe \
-across the full study period. The table on the right is the \
-out-of-sample verdict -- the dynamic blend leads on Sharpe and \
-drawdown, Classic 60/40 helps but the edge is smaller, the benchmark \
-is third on every risk-adjusted metric." Time: ~3 minutes (combines \
-what were two separate slides in the prior deck structure).
-Guardrails: Do NOT list all 10 strategies; use the three categories \
-only. Do NOT use strategy codes (MIN_VARIANCE, VOL_TARGETING). Use \
-plain English on this slide. Do NOT mix IS and OOS in the right-panel \
-table -- it is OOS only; the left-panel cards are IS only.
+Speaker notes: "We focus on three strategies for this panel: the \
+benchmark (100% equity), the static diversifier (Classic 60/40), and \
+the dynamic blend (regime-conditional). These three are the submission \
+record; the analytical appendix carries the same three strategies at \
+higher detail. The cards on the left show the in-sample Sharpe across \
+the full study period. The table on the right is the out-of-sample \
+verdict -- the dynamic blend leads on Sharpe and drawdown, Classic \
+60/40 helps but the edge is smaller, the benchmark is third on every \
+risk-adjusted metric." Time: ~3 minutes (combines what were two \
+separate slides in the prior deck structure).
+Guardrails: Use ONLY the three submission strategies (BENCHMARK, \
+CLASSIC_60_40, REGIME_SWITCHING); other strategy codes are out of \
+scope. Use plain English on this slide. Do NOT mix IS and OOS in the \
+right-panel table -- it is OOS only; the left-panel cards are IS only.
 
 Slide 4 -- Why Static Allocation Failed in 2022
 max_bullets: 3

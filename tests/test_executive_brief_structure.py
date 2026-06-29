@@ -207,13 +207,27 @@ def test_methodology_overview_is_brief():
 
 def test_key_findings_section_drops_other_strategies():
     """§3 (Key Findings) must instruct the agent to compare exactly
-    THREE strategies (benchmark, best static, dynamic blend) and drop
-    the other seven. Locked figures + 2-of-9 + FDR cited verbatim."""
+    THREE strategies (benchmark, best static, dynamic blend) and the
+    other strategies must NOT be named. Locked figures + 2-of-9 +
+    FDR cited verbatim.
+
+    June 29 2026 -- "DROP the other seven strategies" replaced by
+    the three-strategy-submission-scope framing (the brief +
+    appendix + deck + script all operate on the same restricted set
+    now; "other seven" is no longer the framing because the platform
+    no longer exposes them to document generation at all). The brief
+    Section 3 prompt now references "three submission strategies"
+    instead."""
     source = _runtime_main_source()
     assert "exactly THREE strategies" in source
     assert "2 of 9 named market events" in source
     assert "FDR" in source or "p < 0.005" in source
-    assert "DROP the other seven strategies" in source
+    # Post-three-strategy-scope framing: the prompt names the
+    # three submission strategies + omits the "drop the other
+    # seven" instruction (the central filter removes them
+    # upstream so the prompt doesn't need to defend against
+    # them appearing).
+    assert "three submission strategies" in source
 
 
 def test_key_findings_references_platform_visuals_by_name():

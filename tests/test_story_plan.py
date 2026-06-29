@@ -625,13 +625,26 @@ class TestAppendixFramingPrelude:
     -> WHY translation that midpoint feedback called out as missing)."""
 
     def test_appendix_prelude_pins_audience_and_economic_intuition(self):
+        """June 29 2026 -- the three-strategy-submission-scope
+        directive REVERSED the previous "appendix shows ALL
+        strategies" framing. The brief + appendix + deck +
+        script now all operate on the SAME three-strategy set
+        (BENCHMARK / CLASSIC_60_40 / REGIME_SWITCHING); the
+        platform's central filter at academic_export.gather_*
+        removes out-of-scope strategies before any prompt
+        sees them. The appendix retains higher-detail metrics
+        for those three strategies (the per-section tables D /
+        E / F / G carry more granular columns than the brief's
+        single performance table) but the strategy roster is
+        identical."""
         from main import _APPENDIX_FRAMING_PRELUDE
         # The audience contract.
         assert "analytical evidence base" \
             in _APPENDIX_FRAMING_PRELUDE
-        # The three-strategy lens explicitly does NOT apply to the
-        # appendix -- the full 10-strategy table is appropriate here.
-        assert "ALL strategies from the cache" \
+        # The three-strategy submission scope is the new
+        # framing -- the appendix operates on it too, not on
+        # a wider "all strategies" set.
+        assert "three-strategy submission scope" \
             in _APPENDIX_FRAMING_PRELUDE
         # The economic-intuition layer.
         assert "economic intuition explaining what the result MEANS" \

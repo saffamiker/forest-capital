@@ -148,14 +148,20 @@ def _build_narrative(
                 f"(Sharpe {bm_sharpe:.2f}) — an edge of about "
                 f"{edge_bps:+.0f} bps in risk-adjusted terms.")
 
-    # 4. Honest caveat — the 0/10 result.
+    # 4. Honest caveat -- the post-FDR-correction result.
+    # June 29 2026 -- the submission scope is now three
+    # strategies (BENCHMARK / CLASSIC_60_40 / REGIME_SWITCHING).
+    # Multiple-testing penalty under BH-FDR at K=3 is smaller
+    # than the original K=10 framing, but no strategy still
+    # clears the strict bar; the methodological-honesty caveat
+    # stands.
     sentences.append(
-        "No strategy clears the strict Benjamin-et-al (2018) bar "
-        "(p < 0.005 after FDR correction across ten strategies). "
-        "That is methodological honesty — three strategies show "
-        "economically meaningful outperformance, and the recommendation "
-        "rests on economic significance, not formal statistical "
-        "significance.")
+        "No strategy in the three-strategy submission set clears "
+        "the strict Benjamin-et-al (2018) bar (p < 0.005 after "
+        "FDR correction). The economic-significance case stands "
+        "on the magnitude of the OOS Sharpe + drawdown-reduction "
+        "evidence; the recommendation does NOT claim formal "
+        "statistical significance.")
 
     # 5. Macro frame — only if a macro digest is actually present.
     if macro_in_use:
