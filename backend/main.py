@@ -5488,6 +5488,163 @@ async def admin_get_submission_status(
     }
 
 
+# June 29 2026 -- freeze-alignment endpoint. The Reports page's
+# "Drafts drifted from freeze hash" warning tile previously
+# fired any time draft.data_hash differed from the freeze hash
+# (even by a single character of the truncated display form).
+# Under the platform's two-hash regime introduced in migration
+# 064 (Hash A vs Hash B -- recompute-timing artefact across the
+# two hashing formulas; both reference the same logical cache
+# state when the cache row shapes match), the truncated forms
+# can differ while the underlying rows are MATERIALLY
+# IDENTICAL (same n_observations + n_strategies = same logical
+# data state). This endpoint answers: "given the active freeze
+# hash + the current live hash, are the two cache rows
+# materially identical (same shape)?" If yes, the warning tile
+# shows green; if no (rows differ in shape OR one row missing
+# from the cache), the warning tile remains amber.
+#
+# Response shape:
+#   {
+#     "aligned":      bool,
+#     "reason":       str,   # human-readable explanation
+#     "freeze_hash":  str | None,
+#     "live_hash":    str | None,
+#     "freeze_shape": dict | None,  # {n_observations, n_strategies}
+#     "live_shape":   dict | None,
+#   }
+#
+# Aligned when: freeze is active AND both hashes resolve to
+# cache rows AND both rows carry identical (n_observations,
+# n_strategies). Misaligned otherwise; reason carries the
+# specific failure mode.
+@app.get("/api/v1/cache/freeze-alignment")
+async def get_freeze_alignment(
+    session: dict = Depends(require_auth),
+):
+    """Cache-row shape alignment between the live + freeze hashes."""
+    from tools.submission_freeze import get_freeze_config
+
+    config = await get_freeze_config()
+    freeze_active = bool(config.get("active"))
+    freeze_hash = config.get("freeze_hash")
+    if not freeze_active or not freeze_hash:
+        return {
+            "aligned": False,
+            "reason": (
+                "submission_freeze_inactive"
+                if not freeze_active
+                else "freeze_hash_missing_in_config"),
+            "freeze_hash": freeze_hash,
+            "live_hash": None,
+            "freeze_shape": None,
+            "live_shape": None,
+        }
+
+    # Live hash: the most recent strategy_results_cache row's
+    # strategy_hash. Read alongside the freeze row's shape so
+    # we can compare both in one DB pass.
+    try:
+        live_hash = await _read_latest_strategy_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "freeze_alignment_live_hash_read_failed",
+            error=str(exc))
+        live_hash = ""
+
+    if not live_hash:
+        return {
+            "aligned": False,
+            "reason": "live_hash_unavailable",
+            "freeze_hash": freeze_hash,
+            "live_hash": None,
+            "freeze_shape": None,
+            "live_shape": None,
+        }
+
+    # Both rows have the same (n_observations, n_strategies)?
+    # Read directly via SQL so we get the column values, not
+    # the results_json blob the get_strategy_cache helper
+    # projects through.
+    freeze_shape: dict | None = None
+    live_shape: dict | None = None
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal as _DB
+        if _DB is None:
+            return {
+                "aligned": False,
+                "reason": "db_unavailable",
+                "freeze_hash": freeze_hash,
+                "live_hash": live_hash,
+                "freeze_shape": None,
+                "live_shape": None,
+            }
+        async with _DB() as s:
+            rows = await s.execute(
+                text(
+                    "SELECT strategy_hash, n_observations, "
+                    "       n_strategies "
+                    "FROM strategy_results_cache "
+                    "WHERE strategy_hash = :fh "
+                    "   OR strategy_hash = :lh"),
+                {"fh": freeze_hash, "lh": live_hash})
+            for r in rows.fetchall():
+                row_hash = r[0]
+                shape = {
+                    "n_observations": (
+                        int(r[1])
+                        if r[1] is not None else None),
+                    "n_strategies": (
+                        int(r[2])
+                        if r[2] is not None else None),
+                }
+                if row_hash == freeze_hash:
+                    freeze_shape = shape
+                if row_hash == live_hash:
+                    live_shape = shape
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "freeze_alignment_shape_read_failed",
+            error=str(exc))
+
+    if freeze_shape is None:
+        return {
+            "aligned": False,
+            "reason": "freeze_row_missing_in_cache",
+            "freeze_hash": freeze_hash,
+            "live_hash": live_hash,
+            "freeze_shape": None,
+            "live_shape": live_shape,
+        }
+    if live_shape is None:
+        return {
+            "aligned": False,
+            "reason": "live_row_missing_in_cache",
+            "freeze_hash": freeze_hash,
+            "live_hash": live_hash,
+            "freeze_shape": freeze_shape,
+            "live_shape": None,
+        }
+    aligned = (
+        freeze_shape.get("n_observations")
+        == live_shape.get("n_observations")
+        and freeze_shape.get("n_strategies")
+        == live_shape.get("n_strategies")
+        and freeze_shape.get("n_observations") is not None
+        and freeze_shape.get("n_strategies") is not None)
+    return {
+        "aligned": aligned,
+        "reason": (
+            "rows_materially_identical" if aligned
+            else "row_shape_mismatch"),
+        "freeze_hash": freeze_hash,
+        "live_hash": live_hash,
+        "freeze_shape": freeze_shape,
+        "live_shape": live_shape,
+    }
+
+
 @app.get("/api/v1/admin/team-activity/merge-commit-authors")
 async def get_merge_commit_authors_diagnostic(
     session: dict = Depends(require_sysadmin),
