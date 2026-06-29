@@ -1047,7 +1047,7 @@ async def refresh_performance_chart(data_hash: str) -> bool:
         # the chart cache that already succeeded above.
         try:
             from tools.regime_meta_validation import out_of_sample_validation
-            oos = out_of_sample_validation(sr, hmm)
+            oos = out_of_sample_validation(sr, hmm, risk_free=rf_map)
             block = (oos or {}).get("oos") or {}
             events = await load_stored_events()
             sc = scorecard(events) if events else {}
