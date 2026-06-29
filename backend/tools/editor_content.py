@@ -19,7 +19,11 @@ for voice; he does not write from scratch.
 """
 from __future__ import annotations
 
+import structlog
 from typing import Any
+
+
+log = structlog.get_logger(__name__)
 
 
 def _text_node(text: str) -> dict[str, Any]:
@@ -630,6 +634,26 @@ def deck_slides_to_editor(
         title = _sub(sl.get("title") or SLIDE_TITLES[i - 1])
         bullets = [_sub(b) for b in (sl.get("bullets") or [])]
         body = "\n".join(f"- {b}" for b in bullets)
+        # June 29 2026 (deck-export fix) -- defensive body
+        # fallback. When the AI deck JSON came back with no
+        # bullets (parse failure, mid-generation truncation,
+        # or a slide spec the LLM didn't fill), the canvas
+        # body element was being persisted with content=""
+        # which renders as an EMPTY textbox -> the editor +
+        # PPTX export both show "titles only" for that slide.
+        # Fall back to the AI's speaker_notes (the first 400
+        # chars) so the slide carries something visible. The
+        # speaker_notes always have content even when bullets
+        # are empty (the LLM prompt requires them per slide).
+        if not body:
+            _notes_fallback = str(
+                sl.get("speaker_notes") or "").strip()
+            if _notes_fallback:
+                body = _sub(_notes_fallback[:400])
+                log.warning(
+                    "deck_slide_body_empty_fallback_to_notes",
+                    slide_id=i,
+                    notes_chars=len(_notes_fallback))
 
         # June 26 2026 -- table_data now flows into a separate
         # first-class type='table' canvas element (via table_spec)
