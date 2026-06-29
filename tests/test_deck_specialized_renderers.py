@@ -19,7 +19,7 @@ Test groups:
 
   TestSplitPanelSlide
     Slide 3 carries a left stat-card column + a right OOS table +
-    the "+98% vs benchmark" callout. The Regime-Conditional row in
+    the "+85% vs benchmark" callout. The Regime-Conditional row in
     the OOS table is highlighted teal.
 
   TestCardGridSlide
@@ -193,7 +193,7 @@ class TestDispatch:
     def test_slide_3_uses_split_panel(self):
         prs = _build_deck()
         text = _slide_text(prs.slides[2])
-        assert "+98% Sharpe improvement vs benchmark" in text
+        assert "+85% Sharpe improvement vs benchmark" in text
 
     def test_slide_4_uses_card_grid(self):
         prs = _build_deck()
@@ -301,7 +301,7 @@ class TestSplitPanelSlide:
     def test_callout_present(self):
         prs = _build_deck()
         text = _slide_text(prs.slides[2])
-        assert "+98% Sharpe improvement vs benchmark" in text
+        assert "+85% Sharpe improvement vs benchmark" in text
 
     def test_left_cards_carry_strategy_names(self):
         prs = _build_deck()

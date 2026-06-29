@@ -175,7 +175,7 @@ class TestFigureCaptionsAccurate:
         src = inspect.getsource(_docx)
         # New form is present.
         assert (
-            "Post-2022 Sharpe Ratio Comparison by Strategy" in src)
+            "Out-of-Sample Sharpe Ratio by Strategy" in src)
         # The old mislabel is gone.
         assert (
             "Out-of-Sample Sharpe Ratio Comparison, "

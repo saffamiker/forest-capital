@@ -57,14 +57,14 @@ class TestMidpointFeedbackFraming:
         # June 22 2026 (story-arc PR) -- the primary proof point
         # was switched from the live figures (1.24 vs 0.73,
         # +70%) to the December 2025 academic submission lock
-        # (0.86 vs 0.43, +98% over 53 months). The live
+        # (0.91 vs 0.49, +85% over 53 months). The live
         # figures are still mentioned in the block as the
         # Performance Record context but they are not the
         # lead-with answer; that role belongs to the
         # submission-lock figures the panel defends.
         assert "diversification improve risk-adjusted performance" \
             in CENTRAL_QUESTION_AND_ANSWER
-        assert "OOS Sharpe 0.86 (blend) vs 0.43 (benchmark)" \
+        assert "OOS Sharpe 0.91 (blend) vs 0.49 (benchmark)" \
             in CENTRAL_QUESTION_AND_ANSWER
         assert "98% improvement" in CENTRAL_QUESTION_AND_ANSWER
         assert "53 months" in CENTRAL_QUESTION_AND_ANSWER
@@ -1160,8 +1160,8 @@ class TestDeterministicFallback:
         from tools.story_plan import _deterministic_deck_plan
         ctx = {
             "validated_constants": {
-                "oos_sharpe_regime_conditional": 0.86,
-                "oos_sharpe_benchmark": 0.43,
+                "oos_sharpe_regime_conditional": 0.91,
+                "oos_sharpe_benchmark": 0.49,
             },
         }
         plan = _deterministic_deck_plan(ctx)
@@ -1171,15 +1171,15 @@ class TestDeterministicFallback:
         assert len(plan["slide_plan"]) >= 1
         # Numeric anchors lifted from the validated constants.
         first = plan["slide_plan"][0]
-        assert first["numeric_anchors"]["oos_sharpe_blend"] == 0.86
-        assert first["numeric_anchors"]["oos_sharpe_benchmark"] == 0.43
+        assert first["numeric_anchors"]["oos_sharpe_blend"] == 0.91
+        assert first["numeric_anchors"]["oos_sharpe_benchmark"] == 0.49
 
     def test_brief_fallback_has_six_rubric_sections(self):
         from tools.story_plan import _deterministic_brief_plan
         ctx = {
             "validated_constants": {
-                "oos_sharpe_regime_conditional": 0.86,
-                "oos_sharpe_benchmark": 0.43,
+                "oos_sharpe_regime_conditional": 0.91,
+                "oos_sharpe_benchmark": 0.49,
             },
         }
         plan = _deterministic_brief_plan(ctx)
@@ -1219,7 +1219,7 @@ class TestPass1HarnessWiring:
                 '{"central_argument": "x", "presentation_arc": "y", '
                 '"slide_plan": [{"slide_number": 1, "title": "t", '
                 '"headline": "h", "key_visual": "v", '
-                '"numeric_anchors": {"oos_sharpe_blend": 0.86}, '
+                '"numeric_anchors": {"oos_sharpe_blend": 0.91}, '
                 '"slide_bullets": [], "speaker_notes": "n", '
                 '"transition_to_next": "to"}]}')
             final_score = 8.0
@@ -1252,8 +1252,8 @@ class TestPass1HarnessWiring:
 
         plan = story_plan.generate_deck_story_plan(
             {"validated_constants": {
-                "oos_sharpe_regime_conditional": 0.86,
-                "oos_sharpe_benchmark": 0.43,
+                "oos_sharpe_regime_conditional": 0.91,
+                "oos_sharpe_benchmark": 0.49,
             }},
             ["Slide 1", "Slide 2"])
 

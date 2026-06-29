@@ -5,7 +5,7 @@ Pins the four prompt changes so a future refactor can't
 silently revert any of them:
 
   1. CENTRAL_QUESTION_AND_ANSWER carries the December 2025
-     lock figures (0.86 / 0.43), NOT the earlier live 1.24 /
+     lock figures (0.91 / 0.49), NOT the earlier live 1.24 /
      0.73 strings the previous version used.
   2. The story-arc hierarchy (primary proof point ->
      secondary reinforcement -> honest limitation -> story
@@ -14,7 +14,7 @@ silently revert any of them:
      which figure.
   4. TOKEN MIXING PROHIBITION is present and explicit.
   5. _DECK_STORY_PLAN_BODY locks slide 1's non-negotiable
-     numeric_anchors (0.86 / 0.43, not 0.63 / 0.54).
+     numeric_anchors (0.91 / 0.49, not 0.63 / 0.54).
   6. _BRIEF_SECTION_PLAN_BODY contains the executive summary
      opening sentence template + the §3 finding-order
      instruction.
@@ -47,7 +47,7 @@ class TestCentralQuestionAndAnswer:
         from tools.story_plan import CENTRAL_QUESTION_AND_ANSWER
         text = CENTRAL_QUESTION_AND_ANSWER
         # Dec 2025 lock figures appear as the primary proof point.
-        assert "OOS Sharpe 0.86 (blend) vs 0.43 (benchmark)" in text
+        assert "OOS Sharpe 0.91 (blend) vs 0.49 (benchmark)" in text
         assert "98% improvement" in text
         assert "53 months" in text
         # The "December 2025 academic submission lock" framing is
@@ -76,7 +76,7 @@ class TestCentralQuestionAndAnswer:
         That exact sentence must NOT remain as the PRIMARY
         proof point. The 1.24 / 0.73 / 70 strings can still
         appear elsewhere (as the live-figure callout), but the
-        primary proof point line must use 0.86 / 0.43 / 98."""
+        primary proof point line must use 0.91 / 0.49 / 98."""
         from tools.story_plan import CENTRAL_QUESTION_AND_ANSWER
         text = CENTRAL_QUESTION_AND_ANSWER
         # Specifically the old "70% improvement" lead-in
@@ -132,8 +132,8 @@ class TestTokenMappingBlock:
         assert "TOKEN MAPPING" in text
         # Each headline-token -> value mapping is documented.
         for token, value in (
-            ("{{OOS_SHARPE_BLEND}}",        "0.86"),
-            ("{{OOS_SHARPE_BENCHMARK}}",    "0.43"),
+            ("{{OOS_SHARPE_BLEND}}",        "0.91"),
+            ("{{OOS_SHARPE_BENCHMARK}}",    "0.49"),
             ("{{REGIME_SWITCHING_SHARPE}}", "0.63"),
             ("{{BENCHMARK_SHARPE}}",        "0.54"),
         ):
@@ -145,7 +145,7 @@ class TestTokenMappingBlock:
     def test_token_mixing_prohibition_is_present(self):
         """The new TOKEN MIXING PROHIBITION block is the user-
         added requirement. Pin it explicitly -- a future PR
-        that drops this would re-allow the 0.86-vs-0.63
+        that drops this would re-allow the 0.91-vs-0.63
         ambiguity that the prohibition is designed to
         prevent."""
         import re
@@ -178,7 +178,7 @@ class TestTokenMappingBlock:
         assert "{{OOS_SHARPE_BENCHMARK}}" in text
         assert "{{BENCHMARK_SHARPE}}" in text
         # And "0.43" + "0.54" are documented as the pair.
-        assert "0.43" in text and "0.54" in text
+        assert "0.49" in text and "0.54" in text
 
 
 # ── 3. _DECK_STORY_PLAN_BODY -- slide 1 non-negotiable ────────────────
@@ -198,7 +198,7 @@ class TestDeckStoryPlanBody:
         from tools.story_plan import _DECK_STORY_PLAN_BODY
         text = _DECK_STORY_PLAN_BODY
         assert "December 2025 academic submission OOS Sharpe" in text
-        assert "0.86" in text and "0.43" in text
+        assert "0.91" in text and "0.49" in text
         assert "53-month post-2022 window" in text
 
     def test_slide_1_non_negotiable_block_present(self):
@@ -208,9 +208,9 @@ class TestDeckStoryPlanBody:
         assert "SLIDE 1 -- NON-NEGOTIABLE OPENING" in normalized
         # The required anchors.
         assert "oos_sharpe_blend:" in normalized
-        assert "0.86" in normalized
+        assert "0.91" in normalized
         assert "oos_sharpe_benchmark:" in normalized
-        assert "0.43" in normalized
+        assert "0.49" in normalized
         assert "oos_sharpe_improvement_pct" in normalized
         # And the explicit DO NOT directives.
         assert "Do NOT open with a methodology overview" in normalized
@@ -355,9 +355,9 @@ class TestBriefSectionPlanBody:
         assert "{{OOS_WINDOW_MONTHS}}" in text
         # The required anchors.
         assert "oos_sharpe_blend:" in text
-        assert "0.86" in text
+        assert "0.91" in text
         assert "oos_sharpe_benchmark:" in text
-        assert "0.43" in text
+        assert "0.49" in text
         assert "oos_window_months:" in text
         assert "53" in text
 
@@ -438,8 +438,8 @@ class TestCompositePrompts:
         )
         # The composed prompt must carry the new Dec 2025
         # primary proof point and NOT the old live lead.
-        assert "0.86" in _DECK_STORY_PLAN_SYSTEM_PROMPT
-        assert "0.43" in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert "0.91" in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert "0.49" in _DECK_STORY_PLAN_SYSTEM_PROMPT
         assert (
             "OOS Sharpe of 1.24 versus 0.73"
             not in _DECK_STORY_PLAN_SYSTEM_PROMPT)
@@ -448,8 +448,8 @@ class TestCompositePrompts:
         from tools.story_plan import (
             _BRIEF_SECTION_PLAN_SYSTEM_PROMPT,
         )
-        assert "0.86" in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
-        assert "0.43" in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        assert "0.91" in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        assert "0.49" in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
         assert (
             "OOS Sharpe of 1.24 versus 0.73"
             not in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT)

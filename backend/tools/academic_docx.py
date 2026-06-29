@@ -301,17 +301,11 @@ def _sort_apa_citations(citations: list[str]) -> list[str]:
     forms hashed to different keys and survived as duplicates
     in the consolidated References block.
 
-    June 29 2026 (Issue 5) -- _BRIEF_CANONICAL_APA_REFERENCES
-    is merged into the input list so the consolidated block
-    ALWAYS carries the six foundational works the methodology
-    rests on. Per-section traversal occasionally missed a
-    citation (the LLM cited a work in-prose but omitted it
-    from a per-section References block). Merging with the
-    canonical set + the standard dedupe collapses any LLM-
-    emitted duplicate into the canonical entry and guarantees
-    all six appear in the final References."""
-    citations = list(citations) + list(
-        _BRIEF_CANONICAL_APA_REFERENCES)
+    PURE: no side effects, no canonical-set merging. The brief
+    builder caller is responsible for prepending
+    _BRIEF_CANONICAL_APA_REFERENCES to the input list before
+    calling this function (see Issue 5 fix in
+    build_executive_brief)."""
     seen: set[str] = set()
     unique: list[str] = []
     for c in citations:
@@ -889,6 +883,14 @@ def build_executive_brief(
         else:
             _stripped_narratives[_k] = _v
     narratives = _stripped_narratives
+    # Issue 5 (June 29 2026) -- prepend the canonical 6-work
+    # set so the consolidated References block ALWAYS carries
+    # the foundational citations the methodology rests on,
+    # even when per-section traversal missed one. Dedupe in
+    # _sort_apa_citations collapses any LLM-emitted duplicate
+    # into the canonical entry.
+    _all_citations = (
+        list(_BRIEF_CANONICAL_APA_REFERENCES) + _all_citations)
     _consolidated_refs = _sort_apa_citations(_all_citations)
 
     # ── Title page ────────────────────────────────────────────────────────
@@ -2115,6 +2117,15 @@ def build_editor_docx(
     # section if any citations were collected during the main
     # walk. Dedupe + alphabetise by author last name. Skip
     # entirely when zero refs collected (silent fail-open).
+    # June 29 2026 (Issue 5) -- prepend canonical 6-work set for
+    # the executive brief so the consolidated block ALWAYS
+    # carries the foundational works the methodology rests on.
+    _is_brief_doc = (
+        draft.get("document_type") == "executive_brief")
+    if _is_brief_doc:
+        consolidated_refs = (
+            list(_BRIEF_CANONICAL_APA_REFERENCES)
+            + list(consolidated_refs))
     if consolidated_refs:
         _sorted_refs = _sort_apa_citations(consolidated_refs)
         if _sorted_refs:
