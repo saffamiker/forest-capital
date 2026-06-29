@@ -32,26 +32,29 @@ class TestPathAConstantValues:
     drifts these silently breaks brief / appendix consistency."""
 
     def test_oos_sharpe_regime_conditional_locked_to_dec_2025(self):
-        """June 22 2026 revert -- OOS_SHARPE_REGIME_CONDITIONAL
-        stays at the December 2025 academic submission lock
-        (0.8576), NOT the live full-period value (0.6291). The
-        Council Performance Record's two-state design says the
-        submission record defends the December figures; the
-        live figures appear elsewhere on the platform but do
-        NOT flow into the brief / deck / appendix headlines.
-
-        The live full-period blend Sharpe IS surfaced -- via
-        {{REGIME_SWITCHING_SHARPE}} reading directly from the
-        strategy cache -- but that's the full-period token, not
-        the OOS headline."""
+        """June 29 2026 (Issue 7) -- OOS_SHARPE_REGIME_CONDITIONAL
+        updated to the rf-adjusted live OOS value (0.9117). The
+        retired 0.8576 value was the December 2025 academic
+        submission lock, but the reproduction audit (June 29
+        2026) could not reproduce that figure from any
+        documented computation against the live data. The
+        replacement 0.9117 is computed by
+        out_of_sample_validation() now correctly threading the
+        DTB3-derived rf series (PR fix(oos-sharpe-rf) #484 +
+        #488). Test name kept for grep continuity; content
+        updated to reflect the live rf-adjusted convention."""
         from tools.academic_deck import OOS_SHARPE_REGIME_CONDITIONAL
-        assert OOS_SHARPE_REGIME_CONDITIONAL == 0.8576
+        assert OOS_SHARPE_REGIME_CONDITIONAL == 0.9117
 
     def test_oos_sharpe_benchmark_locked_to_dec_2025(self):
-        """Same revert -- the OOS benchmark Sharpe stays at the
-        December 2025 academic submission lock (0.4341)."""
+        """June 29 2026 (Issue 7) -- updated to the rf-adjusted
+        live OOS value (0.4927). Test name kept for grep
+        continuity; the previous 0.4341 lock could not be
+        reproduced from the live data + Kenneth French rf
+        series. 0.4927 is the methodologically defensible
+        replacement."""
         from tools.academic_deck import OOS_SHARPE_BENCHMARK
-        assert OOS_SHARPE_BENCHMARK == 0.4341
+        assert OOS_SHARPE_BENCHMARK == 0.4927
 
     def test_oos_sharpe_equal_weight_matches_live_cache(self):
         from tools.academic_deck import OOS_SHARPE_EQUAL_WEIGHT

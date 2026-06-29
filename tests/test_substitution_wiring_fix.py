@@ -456,7 +456,7 @@ class TestGetSubstitutionTableCacheKey:
         # whose BENCHMARK_POST2022_SHARPE is the em-dash fallback.
         table_no_kwargs = get_substitution_table(
             "hash-X", {"BENCHMARK": {}}, None,
-            oos_sharpe_blend=0.86)
+            oos_sharpe_blend=0.91)
         assert table_no_kwargs.get(
             "{{BENCHMARK_POST2022_SHARPE}}") == "—"
         # 2. Second call WITH the new kwargs at SAME data_hash.
@@ -470,7 +470,7 @@ class TestGetSubstitutionTableCacheKey:
                         ["2022-01-31", 0.01], ["2022-02-28", 0.02]],
                 },
             }, None,
-            oos_sharpe_blend=0.86,
+            oos_sharpe_blend=0.91,
             regime_conditional=[{
                 "strategy": "BENCHMARK",
                 "post_2022_sharpe": 0.43,
@@ -760,7 +760,7 @@ class TestCrisisPerformanceTokens:
 
 
 class TestOosImprovementPctTokenFormatWarning:
-    """June 22 2026 -- slide 1 rendered "+98%%" / "++98%%" in
+    """June 22 2026 -- slide 1 rendered "+85%%" / "++85%%" in
     production. The {{OOS_SHARPE_IMPROVEMENT_PCT}} token
     already includes the + prefix and % suffix; the writer was
     adding more formatting around it. The SLIDE_SPECIFICATIONS
@@ -779,8 +779,8 @@ class TestOosImprovementPctTokenFormatWarning:
         assert "{{OOS_SHARPE_IMPROVEMENT_PCT}}" in normalized
         # The wrong-answer examples are present so the LLM
         # sees both the offending pattern AND the correct one.
-        assert "++98%%" in normalized
-        assert "+98%%" in normalized
+        assert "++85%%" in normalized
+        assert "+85%%" in normalized
         # And the right-answer framing.
         assert ("an improvement of {{OOS_SHARPE_IMPROVEMENT_PCT}}"
                 in normalized)
@@ -797,7 +797,7 @@ class TestOosImprovementPctTokenFormatWarning:
         assert ("Token already includes + prefix and % suffix"
                 in src)
         # And the verbatim resolved-example.
-        assert "'+98%'" in src
+        assert "'+85%'" in src
 
 
 class TestPass1bMaxTokensBumped:

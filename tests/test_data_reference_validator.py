@@ -831,8 +831,13 @@ class TestLockedProvenance:
             "derived: blend/benchmark - 1"]
         assert "OOS_SHARPE_REGIME_CONDITIONAL" in oos_imp["method"]
         assert "OOS_SHARPE_BENCHMARK" in oos_imp["method"]
-        assert "0.8576" in oos_imp["method"]
-        assert "0.4341" in oos_imp["method"]
+        # June 29 2026 (Issue 7) -- updated to rf-adjusted live
+        # OOS Sharpe figures (0.9117 / 0.4927) sourced from the
+        # corrected oos_summary cache; the retired Dec 2025 lock
+        # values (0.8576 / 0.4341) could not be reproduced from
+        # any documented computation.
+        assert "0.9117" in oos_imp["method"]
+        assert "0.4927" in oos_imp["method"]
         # DD reduction: |bench_dd| - |blend_dd|
         dd_red = LOCKED_CONSTANT_PROVENANCE[
             "derived: |bench_dd| - |blend_dd|"]
@@ -874,10 +879,12 @@ class TestDerivedTokenStrategies:
         from tools.data_reference_validator import (
             _validate_oos_improvement_pct,
         )
-        # 0.8576 / 0.4341 - 1 = 0.9756 = ~97.6%
+        # June 29 2026 (Issue 7) -- 0.9117 / 0.4927 - 1 = 0.85024
+        # = ~85.0% (rf-adjusted live OOS, replacing the retired
+        # 0.8576 / 0.4341 lock).
         result = _validate_oos_improvement_pct(
             "{{OOS_SHARPE_IMPROVEMENT_PCT}}",
-            "OOS improvement", "97.6%", Sources())
+            "OOS improvement", "85.0%", Sources())
         assert result.status == "pass"
 
     def test_oos_improvement_fail_on_drift(self):

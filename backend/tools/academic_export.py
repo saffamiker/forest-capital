@@ -479,6 +479,29 @@ async def gather_document_data(
         log.warning("academic_export_audit_disclosures_failed",
                     error=str(exc))
 
+    # ── oos_summary cache (June 29 2026, Issue 9 chart fix) ──
+    # The Figure 4 / Slide 4 OOS Sharpe bar chart sources the
+    # regime-conditional BLEND value (and the benchmark reference
+    # line) from this cache, NOT from data["regime_conditional"]
+    # (which only has per-strategy Sharpes -- the BLEND is the OOS
+    # validation output written by tools/play_by_play.refresh_
+    # performance_chart). Shape:
+    #   {"blend": float, "benchmark": float,
+    #    "equal_weight": float | None,
+    #    "value_add_events": int | None,
+    #    "total_events": int | None}
+    # Fail-open: a cold cache leaves bundle["oos_summary"] = None
+    # and the chart renderer falls back to the per-strategy table
+    # for the benchmark line + omits the blend bar.
+    try:
+        from tools.play_by_play import get_cached_oos_summary
+        bundle["oos_summary"] = await get_cached_oos_summary()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "academic_export_oos_summary_read_failed",
+            error=str(exc))
+        bundle["oos_summary"] = None
+
     # ── Uploaded requirements / rubric documents ───────────────────────────
     try:
         from tools.academic_context import _read_all_with_content
@@ -1539,15 +1562,41 @@ def harness_narrative(
 
 def _strip_banner(text: str) -> str:
     """
-    Drops a leading 'AI DRAFT — REQUIRES HUMAN REVIEW' line if the model
-    emitted one. The .docx/.pptx builders add the banner themselves (on
-    every page / slide), so an inline copy would only be a duplicate.
+    Drops any 'AI DRAFT — REQUIRES HUMAN REVIEW' line wherever it
+    appears (leading, trailing, or mid-body). The .docx / .pptx
+    builders emit the banner themselves on every page / slide; an
+    inline copy is a visible duplicate.
+
+    June 29 2026 (Issue 4) -- previously only the LEADING contiguous
+    AI DRAFT line was stripped. The LLM occasionally emitted the
+    banner as a paragraph-footer after specific sections (operator
+    reported Sections 1 + 5 in latest brief, absent from 3 + 4),
+    which then survived into the rendered DOCX. The full-line filter
+    below drops every AI DRAFT-bearing line regardless of position
+    + collapses runs of blank lines that result so paragraph breaks
+    stay clean.
     """
     out = (text or "").strip()
+    if not out:
+        return ""
     lines = out.split("\n")
-    while lines and ("AI DRAFT" in lines[0].upper() or not lines[0].strip()):
-        lines.pop(0)
-    return "\n".join(lines).strip()
+    kept: list[str] = []
+    for ln in lines:
+        if "AI DRAFT" in ln.upper():
+            continue
+        kept.append(ln)
+    # Collapse runs of >= 2 consecutive blank lines that the strip
+    # may have created (e.g., banner sandwiched between two
+    # blank-line separators).
+    collapsed: list[str] = []
+    prev_blank = False
+    for ln in kept:
+        is_blank = not ln.strip()
+        if is_blank and prev_blank:
+            continue
+        collapsed.append(ln)
+        prev_blank = is_blank
+    return "\n".join(collapsed).strip()
 
 
 # ── Table adapters ────────────────────────────────────────────────────────────

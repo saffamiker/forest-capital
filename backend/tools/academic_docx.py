@@ -254,6 +254,37 @@ def _extract_references(narrative: str) -> tuple[str, list[str]]:
     return ("\n".join(body), refs)
 
 
+# June 29 2026 (Issue 5) -- canonical APA reference list for the
+# executive brief. These six works are the foundational citations
+# the brief methodology rests on; the consolidated References
+# section MUST include every one regardless of whether the LLM
+# explicitly cited each one in its narrative output. _sort_apa_
+# citations merges any LLM-emitted citations with this canonical
+# set so the final consolidated block always contains all six.
+# Adding a new canonical reference: append the full APA-formatted
+# entry below; dedupe will collapse a duplicate LLM emission.
+_BRIEF_CANONICAL_APA_REFERENCES: tuple[str, ...] = (
+    "Ang, A., & Bekaert, G. (2002). International asset "
+    "allocation with regime shifts. The Review of Financial "
+    "Studies, 15(4), 1137-1187.",
+    "Benjamin, D. J., Berger, J. O., Johannesson, M., Nosek, "
+    "B. A., Wagenmakers, E.-J., Berk, R., et al. (2018). "
+    "Redefine statistical significance. Nature Human "
+    "Behaviour, 2(1), 6-10.",
+    "Benjamini, Y., & Hochberg, Y. (1995). Controlling the "
+    "false discovery rate: A practical and powerful approach "
+    "to multiple testing. Journal of the Royal Statistical "
+    "Society: Series B, 57(1), 289-300.",
+    "Carhart, M. M. (1997). On persistence in mutual fund "
+    "performance. The Journal of Finance, 52(1), 57-82.",
+    "Hamilton, J. D. (1989). A new approach to the economic "
+    "analysis of nonstationary time series and the business "
+    "cycle. Econometrica, 57(2), 357-384.",
+    "Markowitz, H. (1952). Portfolio selection. The Journal "
+    "of Finance, 7(1), 77-91.",
+)
+
+
 def _sort_apa_citations(citations: list[str]) -> list[str]:
     """Deduplicate + alphabetically sort citation lines by
     author last name (the first token before the comma).
@@ -268,7 +299,13 @@ def _sort_apa_citations(citations: list[str]) -> list[str]:
     AND plain form across different sections. Without stripping
     the asterisks + underscores before dedupe-keying, both
     forms hashed to different keys and survived as duplicates
-    in the consolidated References block."""
+    in the consolidated References block.
+
+    PURE: no side effects, no canonical-set merging. The brief
+    builder caller is responsible for prepending
+    _BRIEF_CANONICAL_APA_REFERENCES to the input list before
+    calling this function (see Issue 5 fix in
+    build_executive_brief)."""
     seen: set[str] = set()
     unique: list[str] = []
     for c in citations:
@@ -846,6 +883,14 @@ def build_executive_brief(
         else:
             _stripped_narratives[_k] = _v
     narratives = _stripped_narratives
+    # Issue 5 (June 29 2026) -- prepend the canonical 6-work
+    # set so the consolidated References block ALWAYS carries
+    # the foundational citations the methodology rests on,
+    # even when per-section traversal missed one. Dedupe in
+    # _sort_apa_citations collapses any LLM-emitted duplicate
+    # into the canonical entry.
+    _all_citations = (
+        list(_BRIEF_CANONICAL_APA_REFERENCES) + _all_citations)
     _consolidated_refs = _sort_apa_citations(_all_citations)
 
     # ── Title page ────────────────────────────────────────────────────────
@@ -1026,9 +1071,9 @@ _BRIEF_FIGURES: tuple[tuple[str, str, str], ...] = (
         "AnalyticsDesk portfolio intelligence platform using "
         "historical S&P 500, investment-grade bond, and high-yield "
         "bond return data. Vertical dashed line marks the start of "
-        "the post-2022 out-of-sample validation window (January "
-        "2022). Transaction costs of 15 basis points applied per "
-        "rebalance event. Data hash: {{DATA_HASH}}.",
+        "the out-of-sample validation window (January 2022 through "
+        "May 2026). Transaction costs of 15 basis points applied "
+        "per rebalance event. Data hash: {{DATA_HASH}}.",
         "cumulative_returns",
     ),
     (
@@ -1055,16 +1100,15 @@ _BRIEF_FIGURES: tuple[tuple[str, str, str], ...] = (
         "efficient_frontier",
     ),
     (
-        "Post-2022 Sharpe Ratio Comparison by Strategy "
+        "Out-of-Sample Sharpe Ratio by Strategy "
         "(January 2022 Through May 2026)",
-        "Bar chart of each strategy's post-2022 Sharpe ratio, "
-        "computed on monthly returns over the {{OOS_WINDOW_MONTHS}}-"
-        "month post-2022 validation window. The post-2022 window "
-        "coincides with the model's out-of-sample period (training "
-        "data ended December 2021). Dashed reference line marks the "
-        "benchmark's post-2022 Sharpe ({{OOS_SHARPE_BENCHMARK}}); "
-        "the regime-conditional blend's post-2022 Sharpe is "
-        "{{OOS_SHARPE_BLEND}}. Data hash: {{DATA_HASH}}.",
+        "Bar chart comparing out-of-sample Sharpe ratios computed "
+        "on monthly excess returns (rf-adjusted using DTB3-derived "
+        "monthly risk-free rate) over the 53-month out-of-sample "
+        "period. Dashed reference line marks the benchmark Sharpe "
+        "({{OOS_SHARPE_BENCHMARK}}). Regime-conditional blend "
+        "Sharpe: {{OOS_SHARPE_BLEND}}. Classic 60/40 Sharpe: "
+        "{{OOS_SHARPE_CLASSIC_6040}}. Data hash: {{DATA_HASH}}.",
         "strategy_comparison",
     ),
 )
@@ -1139,12 +1183,18 @@ INLINE_FIGURE_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     )),
     ("strategy_comparison", (
         # Specific anchor (the OOS sharpe bench-vs-blend phrasing)
-        "0.86 (blend) versus 0.43 (benchmark)",
-        "0.86 (blend) vs 0.43 (benchmark)",
+        # June 29 2026 (Issue 7) -- updated to rf-adjusted live
+        # values (0.91 / 0.49); legacy 0.86 / 0.43 trigger kept
+        # as fallback for any existing drafts mid-edit.
+        "0.91 (blend) versus 0.49 (benchmark)",
+        "0.91 (blend) vs 0.49 (benchmark)",
+        "0.91 (blend) versus 0.49 (benchmark)",
+        "0.91 (blend) vs 0.49 (benchmark)",
         # Looser fallbacks
         "oos sharpe",
         "out-of-sample sharpe",
-        "0.86",   # the canonical OOS_SHARPE_BLEND
+        "0.91",   # the canonical OOS_SHARPE_BLEND
+        "0.86",   # legacy OOS_SHARPE_BLEND
     )),
 )
 
@@ -1340,7 +1390,18 @@ def _embed_brief_figure(
             png = render_efficient_frontier(
                 data, blend_weights=blend_weights or None)
         elif renderer_key == "strategy_comparison":
-            png = render_strategy_comparison(data, strategy_type="dynamic")
+            # June 29 2026 -- 3-strategy bar chart sourced from
+            # oos_summary cache. Classic 60/40 comes from the per-
+            # strategy regime_conditional table; the regime-
+            # conditional blend + benchmark Sharpe come from the
+            # oos_summary precomputed_analytics row (the same rf-
+            # adjusted values the CIO card displays).
+            oos = (data or {}).get("oos_summary") or {}
+            png = render_strategy_comparison(
+                data,
+                strategies=("CLASSIC_60_40",),
+                blend_sharpe=oos.get("blend"),
+                benchmark_sharpe=oos.get("benchmark"))
     except Exception as exc:  # noqa: BLE001
         _log.warning(
             "chart_embed_failed",
@@ -1697,13 +1758,24 @@ def _add_body_from_runs(
     runs: list[tuple[str, dict[str, bool]]],
     *,
     prefix: str = "",
+    italic_as_bold: bool = False,
 ) -> None:
     """Write one paragraph with per-segment runs that honour the
     TipTap marks. Mirrors _add_body's [[VERIFY: ...]] yellow-bold
     highlight pass on each segment so markers nested inside a
     bolded text node still surface correctly. prefix is prepended
     as a plain run -- used by the bulletList branch in the editor
-    walker to emit '•  ' before the first text node."""
+    walker to emit '•  ' before the first text node.
+
+    June 29 2026 (Issue 2) -- italic_as_bold flag: when True,
+    italic marks emit as BOLD runs instead of italic. The
+    executive brief writes single-asterisk emphasis (*Value*) as
+    TipTap italic marks but the brief template treats every
+    inline emphasis as bold (the panel-defended convention).
+    Other document types (deck, appendix, script) retain the
+    standard italic rendering so paper titles + technical terms
+    italicise correctly. Set by the editor walker for
+    document_type == 'executive_brief' only."""
     if not runs:
         return
     para = doc.add_paragraph()
@@ -1727,7 +1799,10 @@ def _add_body_from_runs(
                 if marks.get("bold"):
                     run.bold = True
                 if marks.get("italic"):
-                    run.italic = True
+                    if italic_as_bold:
+                        run.bold = True
+                    else:
+                        run.italic = True
 
 
 def build_editor_docx(
@@ -1800,6 +1875,14 @@ def build_editor_docx(
     is_brief = (
         draft.get("document_type") == "executive_brief"
         and brief_data is not None)
+    # Issue 2 (June 29 2026) -- in the brief context, treat
+    # TipTap italic marks as BOLD on render. The brief panel-
+    # defended convention is that any inline emphasis renders
+    # bold; the LLM emits single-asterisk *...* prose which
+    # TipTap parses as italic. Other document types retain
+    # standard italic rendering.
+    italic_as_bold = (
+        draft.get("document_type") == "executive_brief")
     embedded_figure_keys: set[str] = set()
 
     def _maybe_embed_inline(plain_text: str) -> None:
@@ -1972,7 +2055,8 @@ def build_editor_docx(
             if _is_section_restate(joined):
                 continue
             subbed = _apply_substitutions_to_runs(runs, sub_table)
-            _add_body_from_runs(doc, subbed)
+            _add_body_from_runs(
+                doc, subbed, italic_as_bold=italic_as_bold)
             _maybe_embed_inline(joined)
         elif ntype in ("bulletList", "orderedList"):
             for item in (node.get("content") or []):
@@ -1999,7 +2083,9 @@ def build_editor_docx(
                     continue
                 subbed = _apply_substitutions_to_runs(
                     runs, sub_table)
-                _add_body_from_runs(doc, subbed, prefix="•  ")
+                _add_body_from_runs(
+                    doc, subbed, prefix="•  ",
+                    italic_as_bold=italic_as_bold)
                 _maybe_embed_inline(joined)
 
     # An empty draft still produces a structurally valid document.
@@ -2031,6 +2117,15 @@ def build_editor_docx(
     # section if any citations were collected during the main
     # walk. Dedupe + alphabetise by author last name. Skip
     # entirely when zero refs collected (silent fail-open).
+    # June 29 2026 (Issue 5) -- prepend canonical 6-work set for
+    # the executive brief so the consolidated block ALWAYS
+    # carries the foundational works the methodology rests on.
+    _is_brief_doc = (
+        draft.get("document_type") == "executive_brief")
+    if _is_brief_doc:
+        consolidated_refs = (
+            list(_BRIEF_CANONICAL_APA_REFERENCES)
+            + list(consolidated_refs))
     if consolidated_refs:
         _sorted_refs = _sort_apa_citations(consolidated_refs)
         if _sorted_refs:

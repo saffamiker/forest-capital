@@ -118,7 +118,8 @@ SCOPE_LEGEND: dict[str, dict[str, str]] = {
             "and is a hardcoded methodology constant in "
             "academic_deck.py. It is immutable."),
         "applies_to": (
-            "OOS_SHARPE_BLEND (0.86), OOS_SHARPE_BENCHMARK (0.43), "
+            "OOS_SHARPE_BLEND (0.91), OOS_SHARPE_BENCHMARK (0.49), "
+            "OOS_SHARPE_CLASSIC_6040 (0.18), "
             "BENCHMARK_MAX_DD (-52.6%), REGIME_SWITCHING_MAX_DD "
             "(-29.7%), correlations (-0.05/+0.57), play-by-play "
             "(2/9), OOS window (53 months)."),
@@ -296,7 +297,7 @@ FACTOR_LOADING_METRICS: tuple[tuple[str, str], ...] = (
 #   defended        Where the value is on the record (peer
 #                   review session, panel, etc.)
 #   locked_value    The canonical value, surfaced for display
-#                   so the tooltip can show "value = 0.8576"
+#                   so the tooltip can show "value = 0.9117"
 #                   without re-importing academic_deck
 #
 # Derived locked tokens (source strings starting with
@@ -308,22 +309,22 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "lock_date": "submission lock",
         "dataset_end": "2026-05-31",
         "method": (
-            "Walk-forward OOS Sharpe, post-2022 validation "
+            "Walk-forward OOS Sharpe, out-of-sample validation "
             "window (Jan 2022 - May 2026)"),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
-        "locked_value": "0.8576",
+        "locked_value": "0.9117",
     },
     "academic_deck.OOS_SHARPE_BENCHMARK": {
         "lock_date": "submission lock",
         "dataset_end": "2026-05-31",
         "method": (
-            "Walk-forward OOS Sharpe, post-2022 validation "
+            "Walk-forward OOS Sharpe, out-of-sample validation "
             "window (Jan 2022 - May 2026); benchmark = "
             "100% equity"),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
-        "locked_value": "0.4341",
+        "locked_value": "0.4927",
     },
 
     # ── Pre/post 2022 equity-IG correlation ──
@@ -460,12 +461,12 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "lock_date": "submission lock",
         "dataset_end": "2026-05-31",
         "method": (
-            "Derived: OOS_SHARPE_REGIME_CONDITIONAL (0.8576) "
-            "/ OOS_SHARPE_BENCHMARK (0.4341) - 1. Both inputs "
+            "Derived: OOS_SHARPE_REGIME_CONDITIONAL (0.9117) "
+            "/ OOS_SHARPE_BENCHMARK (0.4927) - 1. Both inputs "
             "are locked submission constants."),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
-        "locked_value": "+98%",
+        "locked_value": "+85%",
     },
     "derived: |bench_dd| - |blend_dd|": {
         "lock_date": "submission lock",
