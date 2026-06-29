@@ -206,6 +206,20 @@ _CITATION_LINE_RE = re.compile(
     r"(?:[A-Z]\.\s*)?(?:[A-Z]\.\s*)?")
 
 
+# June 29 2026 (Issue 2) -- citation-shaped line detector. Matches
+# an APA citation line that starts with "Lastname, F. M. (1234)..."
+# Used by the headerless-reference-block stripper below to recognise
+# trailing reference entries the LLM emitted without a "References"
+# header.
+_FULL_CITATION_RE = re.compile(
+    r"^\s*[A-Z][a-z'\-]+(?:[\s,&]+[A-Z]\.?[a-zA-Z'\-]*)*"
+    r"\s*[^()]*?\(\d{4}[a-z]?\)")
+# Horizontal-rule line (markdown ---). Triggers headerless-ref-
+# block detection when followed by citation-shaped lines.
+_HORIZONTAL_RULE_RE = re.compile(
+    r"^\s*(?:\*{3,}|-{3,}|_{3,})\s*$")
+
+
 def _extract_references(narrative: str) -> tuple[str, list[str]]:
     """Split `narrative` into (body_text, citation_lines).
     Body is the narrative with any References/Bibliography
@@ -217,7 +231,18 @@ def _extract_references(narrative: str) -> tuple[str, list[str]]:
     sections: a line matching _REFS_HEADING_RE starts a block;
     the block extends to the next non-citation-shaped line OR
     end-of-text. Fail-open: no references heading found
-    returns (narrative, [])."""
+    returns (narrative, []).
+
+    June 29 2026 (Issue 2 residual) -- the LLM emits inline
+    reference blocks WITHOUT a "References" header in some
+    sections, typically: a horizontal rule (---) followed by 2+
+    citation-shaped lines at the end of the section. This
+    function now runs a SECOND pass after the header-based
+    detection: any trailing run of consecutive citation-shaped
+    lines at the end of the body (optionally separated from the
+    rest by a horizontal rule or blank lines) is moved to the
+    refs list. The threshold is 2+ lines so an in-prose
+    parenthetical citation doesn't get stripped."""
     if not narrative:
         return ("", [])
     lines = narrative.splitlines()
@@ -251,6 +276,47 @@ def _extract_references(narrative: str) -> tuple[str, list[str]]:
             in_block = True
             continue
         body.append(ln)
+
+    # SECOND PASS (Issue 2 residual). Scan body backwards for a
+    # trailing run of citation-shaped lines. Eligible trailing
+    # lines are dropped from body + appended to refs. A
+    # horizontal rule or blank line(s) immediately before the
+    # run is also dropped to keep paragraph spacing clean.
+    trailing_refs: list[str] = []
+    while body:
+        last = body[-1].strip()
+        if not last:
+            # Trailing blank line -- drop unconditionally so we
+            # can keep scanning backwards.
+            body.pop()
+            continue
+        if _FULL_CITATION_RE.match(last):
+            cleaned = re.sub(
+                r"^\s*(?:[-*•]|\d+\.)\s+", "", last)
+            cleaned = _HEADING_BOLD_WRAP_RE.sub(
+                "", cleaned).strip()
+            if cleaned:
+                trailing_refs.append(cleaned)
+            body.pop()
+            continue
+        # Stop on first non-citation, non-blank line. Also drop
+        # a trailing horizontal rule if it's the boundary.
+        if _HORIZONTAL_RULE_RE.match(last) and trailing_refs:
+            body.pop()
+            continue
+        break
+    # Only treat the trailing block as references when there are
+    # >= 2 entries -- a single in-prose Author (YYYY) citation
+    # could otherwise be mis-stripped. The header-based detector
+    # above is responsible for 1-entry blocks since it requires
+    # an explicit heading.
+    if len(trailing_refs) >= 2:
+        refs.extend(reversed(trailing_refs))
+    else:
+        # Restore the trailing lines we tentatively removed.
+        for entry in reversed(trailing_refs):
+            body.append(entry)
+
     return ("\n".join(body), refs)
 
 
@@ -285,6 +351,35 @@ _BRIEF_CANONICAL_APA_REFERENCES: tuple[str, ...] = (
 )
 
 
+_AUTHOR_YEAR_RE = re.compile(
+    r"^\s*([A-Z][a-z'\-]+(?:[\s,]+[A-Z][a-z'\-]+)*)"  # surname(s)
+    r"[^(]*?"
+    r"\((\d{4}[a-z]?)\)")
+
+
+def _author_year_key(citation: str) -> str | None:
+    """Extract a normalised (first-author-surname, year) dedupe
+    key from a citation line. Returns None when the line doesn't
+    look like an APA citation (the dedupe falls back to the
+    full-line key in that case).
+
+    Surname-only key: strips initials, journal names, and
+    everything after the author block. Two citations that share
+    the same first author + same year are treated as the same
+    work even when the journal name / formatting differ
+    ('Carhart, M. M. (1997). On persistence... The Journal of
+    Finance, 52(1), 57-82.' vs 'Carhart, M. M. (1997). On
+    persistence in mutual fund performance. Journal of Finance,
+    52, 57-82.')."""
+    cleaned = re.sub(r"[*_]+", "", citation).strip()
+    m = _AUTHOR_YEAR_RE.match(cleaned)
+    if not m:
+        return None
+    surname = m.group(1).split(",")[0].split()[0].lower()
+    year = m.group(2).lower()
+    return f"{surname}:{year}"
+
+
 def _sort_apa_citations(citations: list[str]) -> list[str]:
     """Deduplicate + alphabetically sort citation lines by
     author last name (the first token before the comma).
@@ -301,12 +396,25 @@ def _sort_apa_citations(citations: list[str]) -> list[str]:
     forms hashed to different keys and survived as duplicates
     in the consolidated References block.
 
+    June 29 2026 (Issue 1, residual) -- adds a SECOND dedupe
+    pass keyed on (first_author_surname, year). The LLM emits
+    citations with subtly different journal-name styling
+    ('The Journal of Finance' vs 'Journal of Finance'; ASCII
+    hyphen '-' vs em-dash '—') that survived the previous
+    whitespace-+ markdown normalisation. The author-year key
+    collapses these variants to one entry. When two citations
+    share the same key, the entry whose surface form most
+    closely matches the canonical set wins -- canonical
+    citations sort first in the input (the caller prepends
+    them) and 'in seen' check then drops the LLM variant.
+
     PURE: no side effects, no canonical-set merging. The brief
     builder caller is responsible for prepending
     _BRIEF_CANONICAL_APA_REFERENCES to the input list before
     calling this function (see Issue 5 fix in
     build_executive_brief)."""
     seen: set[str] = set()
+    seen_author_year: set[str] = set()
     unique: list[str] = []
     for c in citations:
         # Strip markdown formatting (asterisks, underscores)
@@ -315,11 +423,27 @@ def _sort_apa_citations(citations: list[str]) -> list[str]:
         # to a single entry. Display form (passed through to
         # `unique`) keeps whatever the FIRST occurrence had.
         no_md = re.sub(r"[*_]+", "", c)
+        # Normalise dashes (em-dash + en-dash -> '-') BEFORE
+        # building the full-line key so cosmetic dash variants
+        # collapse.
+        full_norm = re.sub(r"[–—]", "-", no_md)
+        # Also strip a leading "The " from journal-name segments
+        # ("The Journal of Finance" vs "Journal of Finance" --
+        # APA allows either form).
+        full_norm = re.sub(
+            r"(?<!\w)[Tt]he\s+", "", full_norm)
         key = re.sub(
-            r"\s+", " ", no_md.lower().rstrip(". ")).strip()
+            r"\s+", " ", full_norm.lower().rstrip(". ")).strip()
         if not key or key in seen:
             continue
+        # Issue 1: author-year dedupe collapses variants the
+        # whitespace-normalised key missed.
+        ay_key = _author_year_key(c)
+        if ay_key and ay_key in seen_author_year:
+            continue
         seen.add(key)
+        if ay_key:
+            seen_author_year.add(ay_key)
         # Strip markdown wrappers off the DISPLAY form too so
         # the consolidated References section renders clean
         # plain-text APA citations regardless of which form
