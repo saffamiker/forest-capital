@@ -490,6 +490,35 @@ _ALWAYS_EXEMPT_BARE_VALUES: frozenset[str] = frozenset({
     # "p < 0.005" prose paraphrased without the operator
     # ("the 0.005 threshold" / "an alpha of 0.005").
     "0.005",
+    # June 29 2026 (Issue 3) -- Classic 60/40 definitional
+    # weight. Token forms: {{CLASSIC_6040_WEIGHT_BOND}} and
+    # the operator-spec alias {{CLASSIC_6040_BOND_WEIGHT}}.
+    # The bare "40%" form appears in correction-pass retries
+    # of brief_key_findings + brief_methodology where Sonnet
+    # references the 60/40 split inline as "60% equity and
+    # 40% bonds" -- the by-construction strategy weights,
+    # not a data finding. Same exempt-bare-value rationale
+    # as the BH threshold above.
+    "40%",
+    "60%",
+    # June 29 2026 (Issue 3) -- the rf-adjusted OOS Sharpe
+    # values are now sourced from academic_lock (PR #490) +
+    # available as 2dp-formatted token strings ("0.91" /
+    # "0.49" / "0.18"). The Sonnet correction-pass
+    # occasionally retries with the 4dp raw form ("0.9117"
+    # / "0.4927" / "0.1821") inline rather than the token.
+    # These four-decimal forms are SAFE bare-value exemptions
+    # because they're the canonical academic_lock values
+    # (not free-floating numbers).
+    "0.9117",
+    "0.4927",
+    "0.1821",
+    # Also exempt the 2dp display forms when the LLM emits
+    # them as bare text instead of via the token. Same
+    # canonical-source rationale.
+    "0.91",
+    "0.49",
+    "0.18",
 })
 
 

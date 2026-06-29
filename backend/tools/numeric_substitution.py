@@ -419,6 +419,19 @@ def build_substitution_table(
         "{{OOS_SHARPE_BLEND}}": format_sharpe(oos_sharpe_blend),
         "{{OOS_SHARPE_BENCHMARK}}":
             format_sharpe(oos_sharpe_benchmark),
+        # June 29 2026 (Issue 4) -- lowercase aliases the LLM
+        # occasionally emits in the Limitations section ("the
+        # static {{static_post_2022_sharpe}} vs the regime
+        # {{regime_post_2022_sharpe}}"). Same source values as
+        # {{OOS_SHARPE_CLASSIC_6040}} + {{OOS_SHARPE_BLEND}}.
+        # Adding aliases instead of fixing prompts because the
+        # lowercase form is more readable in dense narrative
+        # passages and the substitution layer is the right
+        # place to absorb both styles.
+        "{{static_post_2022_sharpe}}": format_sharpe(
+            oos_sharpe_classic_6040),
+        "{{regime_post_2022_sharpe}}": format_sharpe(
+            oos_sharpe_blend),
         # June 29 2026 (Issue 9) -- Classic 60/40 OOS Sharpe
         # joins the panel-defended set so the strategy_comparison
         # figure caption and any "three-strategy comparison"
@@ -632,6 +645,16 @@ def build_substitution_table(
         # form when the LLM prefers it.
         "{{CLASSIC_6040_WEIGHT_EQUITY}}": "60%",
         "{{CLASSIC_6040_WEIGHT_BOND}}":   "40%",
+        # June 29 2026 (Issue 3) -- operator-spec alias names.
+        # The brief_methodology + key_findings prompts emit
+        # both naming conventions ({{CLASSIC_6040_WEIGHT_BOND}}
+        # the existing form, {{CLASSIC_6040_BOND_WEIGHT}} the
+        # operator-spec preferred form for the residual-fix
+        # PR). Aliasing both to the same value lets the LLM
+        # use either without one resolving to a literal token
+        # in the rendered output.
+        "{{CLASSIC_6040_BOND_WEIGHT}}":   "40%",
+        "{{CLASSIC_6040_EQUITY_WEIGHT}}": "60%",
         # Underscored-variant aliases for the recovery + MaxDD
         # tokens. The Academic Writer prompt has historically
         # been inconsistent (emits both "{{CLASSIC_6040_*}}" and
