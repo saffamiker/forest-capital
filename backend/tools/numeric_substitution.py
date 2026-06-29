@@ -664,6 +664,15 @@ def build_substitution_table(
         # stat_threshold also exempts the bare p < 0.005 form
         # below; this token provides the swappable alternative.
         "{{BH_SIGNIFICANCE_THRESHOLD}}": "0.005",
+
+        # June 28 2026 (Fix 4) -- rebalancing gate: the
+        # platform rebalances when any single strategy's blend
+        # weight crosses N percentage points. By-construction
+        # methodology constant (currently 2 pp). brief
+        # Methodology + analytical_appendix prose reference it;
+        # token form keeps the value out of the hard-lock's
+        # untoken-numeric flag list.
+        "{{REBALANCE_THRESHOLD_PP}}": "2",
     }
 
     # ── Deck-specific tokens (Layer 2, June 21 2026) ────────────────────

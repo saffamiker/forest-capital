@@ -560,6 +560,22 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "defended": "Academic statistical standard",
         "locked_value": "0.005",
     },
+
+    # ── Rebalancing gate (June 28 2026, Fix 4) ──────────────
+    "constant 2 (methodology rebalance gate)": {
+        "lock_date": "Methodology constant (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional methodology constant: the platform "
+            "rebalances the blend when any single strategy's "
+            "weight drifts more than 2 percentage points from "
+            "its HMM-derived target. The gate filters noise so "
+            "the portfolio does not churn on marginal signal "
+            "changes; matches the monthly cadence at which the "
+            "HMM produces regime updates."),
+        "defended": "Platform methodology",
+        "locked_value": "2",
+    },
 }
 
 
@@ -903,6 +919,17 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
                 "constant 0.005 (BH-FDR academic standard)"),
             is_locked=True,
             document_locations=(_BRIEF_S2, _APP_C)),
+        # June 28 2026 (Fix 4) -- rebalancing-gate methodology
+        # constant. The platform rebalances when any single
+        # strategy's blend weight crosses N percentage points
+        # (currently 2 pp).
+        TokenEntry(
+            token="{{REBALANCE_THRESHOLD_PP}}",
+            label="Rebalancing trigger (pp blend-weight drift)",
+            source=(
+                "constant 2 (methodology rebalance gate)"),
+            is_locked=True,
+            document_locations=(_BRIEF_S2, _APP_B)),
     )),
 
     # ── Correlation regime -------------------------------------------
