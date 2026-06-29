@@ -295,21 +295,26 @@ class TestDocumentGenerationContract:
         assert _DOCX_CT in media
         assert filename.endswith(".docx")
         text = _docx_text(docx_bytes)
-        # All six new section headings present in order.
+        # June 28 2026 -- the brief now has FIVE numbered
+        # sections. Section 6 'Visuals' was removed as an
+        # orphan: the brief_visuals agent was deleted June 26
+        # 2026 + the DOCX builder block was a leftover stub
+        # rendering "[DATA PENDING]" every export.
         assert "1. Executive Summary" in text
         assert "2. Methodology Overview" in text
         assert "3. Key Findings and Insights" in text
         assert "4. Limitations and Risks" in text
         assert "5. Final Recommendations" in text
-        assert "6. Visuals to Demonstrate the Insights" in text
-        # And the section order is preserved.
+        assert "6. Visuals to Demonstrate the Insights" not in (
+            text), (
+            "orphan Section 6 reappeared in the rendered DOCX")
+        # And the section order is preserved across 1-5.
         idx = [text.index(h) for h in (
             "1. Executive Summary",
             "2. Methodology Overview",
             "3. Key Findings and Insights",
             "4. Limitations and Risks",
             "5. Final Recommendations",
-            "6. Visuals to Demonstrate the Insights",
         )]
         assert idx == sorted(idx)
         # The retired pre-rebuild [[BOB]] callouts must not creep back.

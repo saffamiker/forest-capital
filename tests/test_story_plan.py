@@ -579,7 +579,13 @@ class TestRubricCoverageFixes:
             self):
         """Q4 -- the brief Section 2 Methodology task instructs an
         explicit rebalancing-frequency disclosure paragraph + the
-        justification for monthly rather than quarterly cadence."""
+        justification for monthly rather than quarterly cadence.
+
+        June 28 2026 -- the raw '2 percentage points' literal was
+        replaced with the {{REBALANCE_THRESHOLD_PP}} substitution
+        token in the prompt; the rebalancing-gate value is now
+        platform-managed. The disclosure prose + cadence
+        justification remain pinned."""
         from pathlib import Path
         import re
         raw = (Path(__file__).resolve().parents[1] / "backend"
@@ -589,7 +595,10 @@ class TestRubricCoverageFixes:
         source = re.sub(r'"\s*\n\s+"', '', raw)
         assert "Disclose the rebalancing frequency explicitly" \
             in source
-        assert "2 percentage points" in source
+        # Token form replaces the raw "2 percentage points"
+        # literal so the rebalancing gate is platform-managed.
+        assert "{{REBALANCE_THRESHOLD_PP}} percentage points" in (
+            source)
         assert "monthly evaluation matches the cadence at which the " \
                "HMM produces regime updates" in source
 

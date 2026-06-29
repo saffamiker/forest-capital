@@ -85,8 +85,12 @@ _EXEC_BRIEF_SECTIONS = [
     ("3. Key Findings and Insights",        "key_findings",            None),
     ("4. Limitations and Risks",            "limitations",             None),
     ("5. Final Recommendations",            "final_recommendations",   None),
-    ("6. Visuals to Demonstrate the Insights",
-                                            "visuals",                 None),
+    # June 28 2026 -- Section 6 'Visuals' removed. The
+    # brief_visuals agent was deleted June 26 2026 + the DOCX
+    # builder's orphan heading block was removed June 28 2026.
+    # _EXEC_BRIEF_SECTIONS now mirrors the live spec list so
+    # executive_brief_to_editor doesn't render a phantom
+    # Section 6 in the editor either.
 ]
 
 
