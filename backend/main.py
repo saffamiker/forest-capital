@@ -10711,10 +10711,13 @@ async def post_verify_all_for_submission(
                     get_latest_recommendation,
                 )
                 from tools.academic_deck import (
-                    OOS_SHARPE_REGIME_CONDITIONAL,
-                    OOS_SHARPE_BENCHMARK,
                     CORRELATION_PRE_2022, CORRELATION_POST_2022,
                 )
+                # Fix A (June 29 2026) -- read OOS Sharpe pair
+                # from the frozen academic_lock cache row so
+                # document tokens stay deterministic across runs.
+                from tools.play_by_play import get_academic_lock
+                _lock = await get_academic_lock()
                 strategy_cache = (
                     await get_latest_strategy_cache() or {})
                 cio_row = await get_latest_recommendation()
@@ -10728,8 +10731,10 @@ async def post_verify_all_for_submission(
                     await load_substitution_metric_sources())
                 table = get_substitution_table(
                     cur_hash, strategy_cache, cio_row,
-                    oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
-                    oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                    oos_sharpe_blend=_lock["oos_sharpe_blend"],
+                    oos_sharpe_benchmark=_lock["oos_sharpe_benchmark"],
+                    oos_sharpe_classic_6040=_lock[
+                        "oos_sharpe_classic_6040"],
                     pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                     post_2022_eq_ig_correlation=CORRELATION_POST_2022,
                     regime_conditional=rc_rows,
@@ -12936,8 +12941,6 @@ async def get_data_reference_sheet(
         get_substitution_table,
     )
     from tools.academic_deck import (
-        OOS_SHARPE_REGIME_CONDITIONAL,
-        OOS_SHARPE_BENCHMARK,
         CORRELATION_PRE_2022, CORRELATION_POST_2022,
     )
     # June 22 2026 -- defensive import. OOS_WINDOW_PCT_OF_STUDY
@@ -13060,13 +13063,21 @@ async def get_data_reference_sheet(
     # signature check matches the kwargs it actually accepts.
     import inspect
     _sig = inspect.signature(build_substitution_table)
+    # Fix A (June 29 2026) -- OOS Sharpe pair sourced from the
+    # frozen academic_lock cache row so the data-reference-sheet
+    # tooltip values match the brief / appendix / deck tokens.
+    from tools.play_by_play import get_academic_lock
+    _lock = await get_academic_lock()
     _kwargs = {
-        "oos_sharpe_blend": OOS_SHARPE_REGIME_CONDITIONAL,
-        "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
+        "oos_sharpe_blend": _lock["oos_sharpe_blend"],
+        "oos_sharpe_benchmark": _lock["oos_sharpe_benchmark"],
         "pre_2022_eq_ig_correlation": CORRELATION_PRE_2022,
         "post_2022_eq_ig_correlation": CORRELATION_POST_2022,
         "implied_allocation": implied_alloc,
     }
+    if "oos_sharpe_classic_6040" in _sig.parameters:
+        _kwargs["oos_sharpe_classic_6040"] = _lock[
+            "oos_sharpe_classic_6040"]
     if "oos_window_pct_of_study" in _sig.parameters:
         _kwargs["oos_window_pct_of_study"] = OOS_WINDOW_PCT_OF_STUDY
     if "live_signals" in _sig.parameters:
@@ -14359,9 +14370,12 @@ async def _editor_export(editor_draft_id: int) -> Response:
                 from tools.academic_deck import (
                     CORRELATION_POST_2022,
                     CORRELATION_PRE_2022,
-                    OOS_SHARPE_BENCHMARK,
-                    OOS_SHARPE_REGIME_CONDITIONAL,
                 )
+                # Fix A (June 29 2026) -- frozen academic_lock
+                # cache row, falls back to academic_deck.py
+                # constants on cold cache.
+                from tools.play_by_play import get_academic_lock
+                _ee_lock = await get_academic_lock()
                 # Freeze-aware hash so the editor-export table
                 # matches what generation produced when a freeze
                 # was active.
@@ -14416,8 +14430,10 @@ async def _editor_export(editor_draft_id: int) -> Response:
                     cur_hash,
                     brief_data.get("strategy_results") or {},
                     cio_row,
-                    oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
-                    oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                    oos_sharpe_blend=_ee_lock["oos_sharpe_blend"],
+                    oos_sharpe_benchmark=_ee_lock["oos_sharpe_benchmark"],
+                    oos_sharpe_classic_6040=_ee_lock[
+                        "oos_sharpe_classic_6040"],
                     pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                     post_2022_eq_ig_correlation=CORRELATION_POST_2022,
                     oos_window_pct_of_study=_ee_oos_pct,
@@ -18099,6 +18115,8 @@ async def _generate_brief_document(
                     "oos_sharpe_regime_conditional"),
                 oos_sharpe_benchmark=constants.get(
                     "oos_sharpe_benchmark"),
+                oos_sharpe_classic_6040=constants.get(
+                    "oos_sharpe_classic_6040"),
                 pre_2022_eq_ig_correlation=(
                     constants.get("correlation_pre_2022")
                     or rolling.get("pre_2022")),
@@ -18736,8 +18754,6 @@ async def _generate_appendix_document(
                 get_substitution_table,
             )
             from tools.academic_deck import (
-                OOS_SHARPE_REGIME_CONDITIONAL,
-                OOS_SHARPE_BENCHMARK,
                 CORRELATION_PRE_2022, CORRELATION_POST_2022,
                 OOS_WINDOW_PCT_OF_STUDY,
             )
@@ -18789,12 +18805,19 @@ async def _generate_appendix_document(
                 cost_sensitivity_payload, crisis_payload = (
                     await load_substitution_metric_sources(
                         data_hash=data_hash or None))
+            # Fix A (June 29 2026) -- frozen academic_lock for
+            # OOS Sharpe pair + classic_60_40.
+            from tools.play_by_play import get_academic_lock
+            _appendix_lock = await get_academic_lock()
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
                 cio_row,
-                oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
-                oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                oos_sharpe_blend=_appendix_lock["oos_sharpe_blend"],
+                oos_sharpe_benchmark=_appendix_lock[
+                    "oos_sharpe_benchmark"],
+                oos_sharpe_classic_6040=_appendix_lock[
+                    "oos_sharpe_classic_6040"],
                 pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                 post_2022_eq_ig_correlation=CORRELATION_POST_2022,
                 oos_window_pct_of_study=OOS_WINDOW_PCT_OF_STUDY,
@@ -20199,12 +20222,18 @@ async def _generate_deck_document(
                 cost_sensitivity_payload, crisis_payload = (
                     await load_substitution_metric_sources(
                         data_hash=data_hash or None))
+            # Fix A (June 29 2026) -- frozen academic_lock for
+            # OOS Sharpe pair + classic_60_40.
+            from tools.play_by_play import get_academic_lock
+            _deck_lock = await get_academic_lock()
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
                 cio_row,
-                oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
-                oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                oos_sharpe_blend=_deck_lock["oos_sharpe_blend"],
+                oos_sharpe_benchmark=_deck_lock["oos_sharpe_benchmark"],
+                oos_sharpe_classic_6040=_deck_lock[
+                    "oos_sharpe_classic_6040"],
                 pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                 post_2022_eq_ig_correlation=CORRELATION_POST_2022,
                 oos_window_pct_of_study=OOS_WINDOW_PCT_OF_STUDY,
