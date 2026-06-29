@@ -3895,6 +3895,45 @@ async def post_verify_post_refresh(
 # ── Dual-mode token storage endpoints (PR-DM-Lite, June 28) ──────
 
 
+async def _manifest_data_hash() -> str:
+    """June 29 2026 (manifest-hash PR) -- freeze-aware
+    manifest stamp.
+
+    Returns the hash to stamp on value_manifest entries:
+      - When submission_freeze is ACTIVE + freeze_hash set,
+        returns the FREEZE hash. Cache rows (academic_lock,
+        oos_summary, academic_analytics) live under the
+        freeze hash; a manifest stamped with the live hash
+        silently misses every cache lookup that consumes
+        manifest.data_hash.
+      - Otherwise (freeze inactive OR freeze_hash missing),
+        returns current_data_hash() -- the live platform
+        hash. Same value the prior _cur_hash() calls used.
+
+    Fail-open: any read error returns the empty string so the
+    caller persists the manifest with an empty data_hash
+    rather than raising mid-generation."""
+    try:
+        from tools.submission_freeze import get_freeze_config
+        cfg = await get_freeze_config()
+        if isinstance(cfg, dict) and cfg.get("active"):
+            fh = cfg.get("freeze_hash")
+            if isinstance(fh, str) and fh:
+                return fh
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "manifest_data_hash_freeze_read_failed",
+            error=str(exc))
+    try:
+        from tools.audit_assembler import current_data_hash
+        return (await current_data_hash()) or ""
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "manifest_data_hash_live_read_failed",
+            error=str(exc))
+        return ""
+
+
 async def _auto_upgrade_draft_to_token_values(
     draft_id: int, document_type: str,
 ) -> None:
@@ -3966,9 +4005,16 @@ async def _auto_upgrade_draft_to_token_values(
             # + migration hasn't run yet.
             if (defer_on and manifest
                     and not migration_run):
+                # June 29 2026 (manifest-hash PR) -- override
+                # manifest entry data_hash with the freeze hash
+                # when freeze is active. Heals manifests whose
+                # entries were stamped with a live-rebuild hash.
+                _freeze_override = await _manifest_data_hash()
                 cj_after, token_stats = (
                     upgrade_content_json_to_token_values(
-                        cj_after, manifest))
+                        cj_after, manifest,
+                        freeze_hash_override=(
+                            _freeze_override or None)))
             # June 28 2026 (PR #479) -- unverified-tag upgrade
             # runs for every doc type, every generation,
             # regardless of the deferral flag. The deck uses
@@ -4084,9 +4130,15 @@ async def post_upgrade_all_drafts_to_token_values(
                 })
                 continue
             try:
+                # June 29 2026 -- freeze-hash override for the
+                # admin batch endpoint same as the per-draft
+                # auto-upgrade hook.
+                _batch_freeze_hash = await _manifest_data_hash()
                 upgraded, stats = (
                     upgrade_content_json_to_token_values(
-                        content_json, manifest))
+                        content_json, manifest,
+                        freeze_hash_override=(
+                            _batch_freeze_hash or None)))
                 # Persist: snapshot + new content + flag.
                 await s.execute(_text(
                     "UPDATE editor_drafts "
@@ -18480,7 +18532,20 @@ async def _generate_brief_document(
                     )
                     from datetime import datetime as _dt
                     from datetime import timezone as _tz
-                    _hash_for_manifest = await _cur_hash() or ""
+                    # June 29 2026 (manifest-hash PR) -- under a
+                    # submission freeze, stamp manifest entries
+                    # with the freeze hash, not the live hash.
+                    # The cache rows (academic_lock, oos_summary,
+                    # academic_analytics) are keyed by the freeze
+                    # hash; a manifest pointing at the live hash
+                    # (e.g. d0b1339e post-freeze cache rebuild)
+                    # silently misses every cache lookup that
+                    # consumes manifest.data_hash. Sites that
+                    # always want the LIVE platform hash (e.g.,
+                    # export verification against live cache)
+                    # still read _cur_hash() separately.
+                    _hash_for_manifest = (
+                        await _manifest_data_hash())
                     manifest = build_value_manifest(
                         substitution_table,
                         data_hash=_hash_for_manifest[:64],
@@ -18492,6 +18557,8 @@ async def _generate_brief_document(
                         "value_manifest_persisted",
                         document_type="executive_brief",
                         draft_id=draft_id,
+                        manifest_data_hash=(
+                            _hash_for_manifest[:8]),
                         n_values=len(manifest))
                 except Exception as exc:  # noqa: BLE001
                     log.warning(
@@ -19196,9 +19263,6 @@ async def _generate_appendix_document(
             # Mirrors the brief block in _generate_brief_document.
             if draft_id is not None and substitution_table is not None:
                 try:
-                    from tools.audit_assembler import (
-                        current_data_hash as _cur_hash,
-                    )
                     from tools.editor_drafts import (
                         update_value_manifest as _update_manifest,
                     )
@@ -19207,7 +19271,11 @@ async def _generate_appendix_document(
                     )
                     from datetime import datetime as _dt
                     from datetime import timezone as _tz
-                    _hash_for_manifest = await _cur_hash() or ""
+                    # June 29 2026 (manifest-hash PR) -- freeze-
+                    # aware hash for manifest stamping. See brief
+                    # block for the rationale.
+                    _hash_for_manifest = (
+                        await _manifest_data_hash())
                     manifest = build_value_manifest(
                         substitution_table,
                         data_hash=_hash_for_manifest[:64],
@@ -20186,9 +20254,6 @@ async def _finalize_deck(
         # Layer 3b -- persist value manifest for deck drafts.
         if draft_id is not None and substitution_table is not None:
             try:
-                from tools.audit_assembler import (
-                    current_data_hash as _cur_hash,
-                )
                 from tools.editor_drafts import (
                     update_value_manifest as _update_manifest,
                 )
@@ -20197,7 +20262,9 @@ async def _finalize_deck(
                 )
                 from datetime import datetime as _dt
                 from datetime import timezone as _tz
-                _hash_for_manifest = await _cur_hash() or ""
+                # June 29 2026 (manifest-hash PR) -- freeze-aware
+                # manifest hash. See brief block for rationale.
+                _hash_for_manifest = await _manifest_data_hash()
                 manifest = build_value_manifest(
                     substitution_table,
                     data_hash=_hash_for_manifest[:64],

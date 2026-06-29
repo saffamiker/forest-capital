@@ -270,6 +270,8 @@ def _walk_and_upgrade(
 def upgrade_content_json_to_token_values(
     content_json: dict[str, Any],
     value_manifest: dict[str, dict[str, Any]] | None,
+    *,
+    freeze_hash_override: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Upgrade a draft's content_json from plain-text numeric
     values to token_value nodes.
@@ -283,6 +285,17 @@ def upgrade_content_json_to_token_values(
                       Pass None for legacy drafts that pre-date
                       migration 057 -- the function then no-ops
                       and returns (content_json, {} stats).
+      freeze_hash_override: when supplied, overrides the
+                      manifest entry's data_hash on every
+                      generated token_value node. Used by the
+                      _auto_upgrade hook to heal legacy
+                      manifests that were stamped with a live-
+                      rebuild hash (post-freeze cache rebuild
+                      drift); the override ensures downstream
+                      export-verification looks up cache rows
+                      under the freeze-bearing hash. None
+                      preserves the manifest entry's stamp
+                      verbatim (the legacy behaviour).
 
     Returns:
       (new_content_json, stats) where stats carries:
@@ -339,9 +352,37 @@ def upgrade_content_json_to_token_values(
         # because build_value_manifest writes one entry per
         # value+token pair). The resolved value the upgrade
         # writes is the one from the chosen entry.
+        # June 29 2026 (manifest-hash PR) -- freeze-aware
+        # data_hash stamp. When the manifest entry's data_hash
+        # is a live-rebuild hash but submission_freeze is
+        # active, override with the freeze hash so any
+        # downstream consumer (NodeView attrs, export
+        # verification) reading manifest.data_hash sees the
+        # cache-row-bearing hash. This is a defensive write --
+        # the walker itself doesn't lookup cache values, but
+        # downstream code that consumes the resulting
+        # token_value attrs (e.g. export verification at
+        # tools.export_verification.verify_export_against_
+        # cache) does, and a wrong data_hash on the node
+        # causes silent verification misses.
+        entry_hash = entry.get("data_hash", "") or ""
+        # Freeze-hash override: when supplied + entry was stamped
+        # with a different hash, swap to the freeze hash so the
+        # generated token_value node's data_hash points at the
+        # cache row where the resolved value actually lives.
+        stamped_hash = entry_hash
+        if (freeze_hash_override
+                and entry_hash
+                and entry_hash != freeze_hash_override):
+            stamped_hash = freeze_hash_override
+            log.info(
+                "manifest_entry_hash_overridden_to_freeze",
+                token=token_literal,
+                from_hash=entry_hash[:8],
+                to_hash=freeze_hash_override[:8])
         valid_tokens[token_literal] = {
             "resolved":     resolved_value,
-            "data_hash":    entry.get("data_hash", ""),
+            "data_hash":    stamped_hash,
             "generated_at": entry.get("generated_at", ""),
         }
     if not valid_tokens:
