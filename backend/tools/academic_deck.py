@@ -2861,6 +2861,31 @@ def build_editor_pptx(
     content = draft.get("content_json") or {}
     slides = content.get("slides", []) if isinstance(content, dict) else []
 
+    # June 29 2026 (deck-export fix) -- diagnostic. The
+    # operator reported draft 87 exporting "slides with titles
+    # only" -- a strong signal that body elements either had
+    # empty content or were missing entirely. This log surfaces
+    # the per-slide element counts so the failure mode is
+    # visible in Render logs without needing DB access:
+    #   total slides, total elements, elements per type
+    _diag_total_elements = 0
+    _diag_by_type: dict[str, int] = {}
+    for _diag_sl in slides:
+        if not isinstance(_diag_sl, dict):
+            continue
+        for _diag_el in (_diag_sl.get("elements") or []):
+            if isinstance(_diag_el, dict):
+                _diag_total_elements += 1
+                _diag_t = str(
+                    _diag_el.get("type") or "unknown")
+                _diag_by_type[_diag_t] = (
+                    _diag_by_type.get(_diag_t, 0) + 1)
+    log.info(
+        "editor_pptx_build_start",
+        n_slides=len(slides),
+        n_elements_total=_diag_total_elements,
+        elements_by_type=_diag_by_type)
+
     for sl in slides:
         if not isinstance(sl, dict):
             continue
