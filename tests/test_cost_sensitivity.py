@@ -128,7 +128,8 @@ def test_performance_chart_net_series_applies_drag_at_rebalance(monkeypatch):
     to the gross path."""
     from tools import play_by_play
 
-    def fake_oos(strategy_results, hmm_result, *, split_date, return_series):
+    def fake_oos(strategy_results, hmm_result, *, split_date,
+                 return_series, risk_free=None):
         return {
             "test_dates": ["2022-01-31", "2022-02-28", "2022-03-31"],
             "blend_monthly": [0.01, 0.02, 0.00],
