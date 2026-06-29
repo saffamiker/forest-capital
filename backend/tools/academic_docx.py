@@ -1388,7 +1388,18 @@ def _embed_brief_figure(
             png = render_efficient_frontier(
                 data, blend_weights=blend_weights or None)
         elif renderer_key == "strategy_comparison":
-            png = render_strategy_comparison(data, strategy_type="dynamic")
+            # June 29 2026 -- 3-strategy bar chart sourced from
+            # oos_summary cache. Classic 60/40 comes from the per-
+            # strategy regime_conditional table; the regime-
+            # conditional blend + benchmark Sharpe come from the
+            # oos_summary precomputed_analytics row (the same rf-
+            # adjusted values the CIO card displays).
+            oos = (data or {}).get("oos_summary") or {}
+            png = render_strategy_comparison(
+                data,
+                strategies=("CLASSIC_60_40",),
+                blend_sharpe=oos.get("blend"),
+                benchmark_sharpe=oos.get("benchmark"))
     except Exception as exc:  # noqa: BLE001
         _log.warning(
             "chart_embed_failed",

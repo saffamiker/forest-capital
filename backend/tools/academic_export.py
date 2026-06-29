@@ -469,6 +469,29 @@ async def gather_document_data(
         log.warning("academic_export_audit_disclosures_failed",
                     error=str(exc))
 
+    # ── oos_summary cache (June 29 2026, Issue 9 chart fix) ──
+    # The Figure 4 / Slide 4 OOS Sharpe bar chart sources the
+    # regime-conditional BLEND value (and the benchmark reference
+    # line) from this cache, NOT from data["regime_conditional"]
+    # (which only has per-strategy Sharpes -- the BLEND is the OOS
+    # validation output written by tools/play_by_play.refresh_
+    # performance_chart). Shape:
+    #   {"blend": float, "benchmark": float,
+    #    "equal_weight": float | None,
+    #    "value_add_events": int | None,
+    #    "total_events": int | None}
+    # Fail-open: a cold cache leaves bundle["oos_summary"] = None
+    # and the chart renderer falls back to the per-strategy table
+    # for the benchmark line + omits the blend bar.
+    try:
+        from tools.play_by_play import get_cached_oos_summary
+        bundle["oos_summary"] = await get_cached_oos_summary()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "academic_export_oos_summary_read_failed",
+            error=str(exc))
+        bundle["oos_summary"] = None
+
     # ── Uploaded requirements / rubric documents ───────────────────────────
     try:
         from tools.academic_context import _read_all_with_content

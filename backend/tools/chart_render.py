@@ -816,50 +816,105 @@ def render_cumulative_returns(
 
 
 def render_strategy_comparison(
-    data: dict[str, Any], *, strategy_type: str = "dynamic",
+    data: dict[str, Any],
+    *,
+    strategies: tuple[str, ...] = ("CLASSIC_60_40",),
+    blend_sharpe: float | None = None,
+    benchmark_sharpe: float | None = None,
+    strategy_type: str | None = None,    # legacy, kept for back-compat
 ) -> bytes | None:
-    """Slide 4 — post-2022 Sharpe bar per strategy of the given type, with the
-    benchmark post-2022 Sharpe as a reference line."""
+    """Brief Figure 4 / deck Slide 4 -- out-of-sample Sharpe bar chart.
+
+    The chart shows one bar per strategy named in `strategies` (sourced
+    from data["regime_conditional"] rows' post_2022_sharpe field), plus
+    an explicit "Regime-Conditional Blend" bar sourced from the
+    `blend_sharpe` kwarg (the OOS validation blend, which is NOT in the
+    per-strategy regime_conditional table). The benchmark renders as a
+    dashed horizontal reference line at `benchmark_sharpe` (when given)
+    OR at the per-strategy BENCHMARK row's post_2022_sharpe (fallback).
+
+    June 29 2026 -- previously took a `strategy_type='dynamic'` filter
+    that intersected with the 3-strategy submission scope to leave only
+    REGIME_SWITCHING as a single bar. The fix replaces the static/
+    dynamic split with an explicit `strategies` tuple + an explicit
+    `blend_sharpe` argument so the brief can show the panel-defended
+    three-strategy comparison (Classic 60/40 + Regime-Conditional
+    Blend, plus the Benchmark reference line). The legacy
+    strategy_type kwarg is kept (ignored) so existing deck callers
+    don't need a flag-day update.
+
+    Bar order: ascending by Sharpe (left = lower); value labels above
+    each bar to 2 decimal places. Returns PNG bytes or None on
+    render failure / no bars.
+    """
     rows_in = (data or {}).get("regime_conditional") or []
-    if not rows_in:
-        return None
     plt = _deck_mpl()
     if plt is None:
         return None
     try:
-        from tools.academic_deck import (
-            _DYNAMIC_STRATEGIES, _STATIC_STRATEGIES,
-        )
-        wanted = {_norm_name(n) for n in (
-            _DYNAMIC_STRATEGIES if strategy_type == "dynamic"
-            else _STATIC_STRATEGIES)}
-        bars = [(r.get("strategy"), r.get("post_2022_sharpe")) for r in rows_in
-                if _norm_name(r.get("strategy")) in wanted
-                and isinstance(r.get("post_2022_sharpe"), (int, float))]
+        # Bars from data["regime_conditional"] for each named strategy.
+        wanted = {_norm_name(n) for n in (strategies or ())}
+        per_strategy = [
+            (r.get("strategy"), r.get("post_2022_sharpe"))
+            for r in rows_in
+            if _norm_name(r.get("strategy")) in wanted
+            and isinstance(r.get("post_2022_sharpe"), (int, float))]
+        bars: list[tuple[str, float]] = list(per_strategy)
+        # Append the regime-conditional blend bar when the caller
+        # supplied it (sourced from oos_summary cache, NOT the per-
+        # strategy table -- the blend is the OOS validation output).
+        if isinstance(blend_sharpe, (int, float)):
+            bars.append(("Regime-Conditional Blend", float(blend_sharpe)))
         if not bars:
             return None
-        bars.sort(key=lambda kv: kv[1], reverse=True)
+        # Ascending by Sharpe so the lower bar (typically Classic
+        # 60/40) renders left + the higher bar (typically the blend)
+        # renders right.
+        bars.sort(key=lambda kv: kv[1])
         names = [b[0] for b in bars]
         vals = [b[1] for b in bars]
-        bench = next(
-            (r.get("post_2022_sharpe") for r in rows_in
-             if _norm_name(r.get("strategy")) == "BENCHMARK"
-             and isinstance(r.get("post_2022_sharpe"), (int, float))), None)
+        # Benchmark reference line: caller-supplied first, fall back
+        # to the BENCHMARK row in data["regime_conditional"].
+        bench: float | None = None
+        if isinstance(benchmark_sharpe, (int, float)):
+            bench = float(benchmark_sharpe)
+        else:
+            bench_row = next(
+                (r.get("post_2022_sharpe") for r in rows_in
+                 if _norm_name(r.get("strategy")) == "BENCHMARK"
+                 and isinstance(r.get("post_2022_sharpe"),
+                                (int, float))), None)
+            if bench_row is not None:
+                bench = float(bench_row)
         fig, ax = plt.subplots(figsize=(8, 4.4))
-        ax.bar(range(len(names)), vals, color=_DECK_ACCENT, zorder=3)
+        bar_artists = ax.bar(
+            range(len(names)), vals, color=_DECK_ACCENT, zorder=3)
         ax.set_xticks(range(len(names)))
         ax.set_xticklabels(names, rotation=30, ha="right", fontsize=8)
+        # Value labels above each bar (2 decimal places).
+        for rect, v in zip(bar_artists, vals):
+            ax.annotate(
+                f"{v:.2f}",
+                xy=(rect.get_x() + rect.get_width() / 2,
+                    rect.get_height()),
+                xytext=(0, 3), textcoords="offset points",
+                ha="center", va="bottom", fontsize=8)
         if bench is not None:
-            ax.axhline(bench, color=_DECK_AMBER, linestyle="--", linewidth=1.4,
-                       label=f"Benchmark ({bench:.2f})")
+            ax.axhline(
+                bench, color=_DECK_AMBER, linestyle="--",
+                linewidth=1.4,
+                label=f"Benchmark ({bench:.2f})")
             ax.legend(fontsize=8, frameon=False)
-        ax.set_title(f"Post-2022 Sharpe - {strategy_type.title()} Strategies",
-                     fontsize=11)
-        ax.set_ylabel("Post-2022 Sharpe")
+        ax.set_title(
+            "Out-of-Sample Sharpe Ratio\n"
+            "January 2022 through May 2026",
+            fontsize=11)
+        ax.set_ylabel("Out-of-Sample Sharpe")
         _deck_style(ax)
         return _deck_finish(plt, fig)
     except Exception as exc:  # noqa: BLE001
-        log.warning("deck_render_strategy_comparison_failed", error=str(exc))
+        log.warning(
+            "deck_render_strategy_comparison_failed", error=str(exc))
         return None
 
 
