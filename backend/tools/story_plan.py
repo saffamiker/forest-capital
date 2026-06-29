@@ -888,7 +888,7 @@ input slide_plan must have a corresponding key in the output:
 ORAL_PRESENTATION_CONTEXT = """\
 ORAL PRESENTATION CONTEXT (speaker notes only -- NEVER on a written \
 slide or in any brief paragraph):
-  The December 2025 submission figures (OOS Sharpe 0.86 vs 0.43) are \
+  The submission figures (OOS Sharpe 0.91 vs 0.49) are \
   the CONSERVATIVE locked record. The platform's Live Figure row on \
   the Council Performance Record shows 1.24 vs 0.73 (+70%) through \
   May 2026 -- the submission UNDERSTATES current performance.
