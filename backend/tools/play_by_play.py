@@ -885,6 +885,14 @@ _CHART_METRIC_KIND = "performance_chart"
 # Performance Record banner and the council's "performance" scope can read
 # the scalars without re-running the OOS validation on a page load.
 _OOS_SUMMARY_METRIC_KIND = "oos_summary"
+# June 29 2026 (Fix A, rounding-consistency PR) -- the FROZEN
+# OOS Sharpe pair the brief / appendix / deck token substitution
+# consume. Written alongside _OOS_SUMMARY_METRIC_KIND by
+# refresh_performance_chart. Documents read this via
+# get_academic_lock() so token values are stable across exports
+# even if a future refresh writes a slightly different HMM-
+# converged Sharpe to the live oos_summary row.
+_ACADEMIC_LOCK_METRIC_KIND = "academic_lock"
 
 
 def _cumulative(returns) -> list[float | None]:
@@ -1064,6 +1072,39 @@ async def refresh_performance_chart(data_hash: str) -> bool:
                 log.info("oos_summary_cached", **{
                     k: summary[k] for k in ("blend", "benchmark",
                                             "value_add_events", "total_events")})
+                # June 29 2026 (Fix A) -- freeze the OOS Sharpe pair
+                # to a SEPARATE academic_lock cache row that document
+                # generators read from. The live oos_summary row above
+                # feeds the CIO card + Figure 4 chart (intentionally
+                # live + HMM-stochastic). The academic_lock row below
+                # is the FROZEN figures the brief / appendix / deck
+                # tokens consume so documents are deterministic
+                # across exports for a given refresh. With PR #486's
+                # N_INIT=10 HMM picking the highest-LL converged fit,
+                # consecutive refreshes against the same input data
+                # write identical values. 4dp on the ratios, 1dp on
+                # the improvement percent so the values round cleanly
+                # at the format_sharpe 2dp display step.
+                _blend = summary["blend"]
+                _bench = summary["benchmark"]
+                _improvement = None
+                if _blend and _bench:
+                    try:
+                        _improvement = round(
+                            (float(_blend) / float(_bench) - 1.0)
+                            * 100.0, 1)
+                    except (TypeError, ZeroDivisionError):
+                        _improvement = None
+                _lock_row = {
+                    "oos_sharpe_blend": round(float(_blend), 4),
+                    "oos_sharpe_benchmark": round(float(_bench), 4)
+                    if isinstance(_bench, (int, float)) else None,
+                    "oos_sharpe_improvement_pct": _improvement,
+                }
+                await set_metric(
+                    data_hash or "", _ACADEMIC_LOCK_METRIC_KIND,
+                    _lock_row, source="play_by_play")
+                log.info("academic_lock_cached", **_lock_row)
         except Exception as exc:  # noqa: BLE001
             log.warning("oos_summary_cache_failed", error=str(exc))
         log.info("performance_chart_cached",
@@ -1097,3 +1138,83 @@ async def get_cached_oos_summary() -> dict | None:
     except Exception as exc:  # noqa: BLE001
         log.warning("oos_summary_read_error", error=str(exc))
         return None
+
+
+async def get_academic_lock() -> dict:
+    """Return the FROZEN OOS Sharpe figures the brief / appendix /
+    deck token substitution consume.
+
+    Read source: the academic_lock precomputed_analytics row written
+    by refresh_performance_chart alongside oos_summary. Falls back to
+    the academic_deck.py constants on a cold cache (first deploy
+    before any refresh has fired) so document generation never breaks
+    -- the constants are the panel-defended values and remain a
+    safe default.
+
+    Returned shape:
+        {
+            "oos_sharpe_blend": float,           # 4dp rounded
+            "oos_sharpe_benchmark": float,       # 4dp rounded
+            "oos_sharpe_classic_6040": float,    # 4dp rounded
+            "oos_sharpe_improvement_pct": float, # 1dp rounded
+        }
+
+    Classic 60/40's OOS Sharpe is NOT computed by
+    out_of_sample_validation (the OOS validator emits regime_
+    conditional / equal_weight / benchmark / regime_switching only),
+    so it stays as a static academic_deck.py constant in both the
+    cache and fallback paths -- the value is the panel-defended
+    methodology constant and would not drift across HMM runs anyway.
+
+    June 29 2026 -- Fix A of fix(rounding-consistency)."""
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        from tools.academic_deck import OOS_SHARPE_CLASSIC_6040
+        row = await get_latest_metric(_ACADEMIC_LOCK_METRIC_KIND)
+        if row and isinstance(row, dict):
+            return {
+                "oos_sharpe_blend":
+                    row.get("oos_sharpe_blend"),
+                "oos_sharpe_benchmark":
+                    row.get("oos_sharpe_benchmark"),
+                "oos_sharpe_classic_6040": OOS_SHARPE_CLASSIC_6040,
+                "oos_sharpe_improvement_pct":
+                    row.get("oos_sharpe_improvement_pct"),
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "academic_lock_read_error", error=str(exc))
+    # Cold-start / read-failure fallback -- academic_deck.py
+    # constants. These are the panel-defended values per the
+    # June 2026 academic submission record.
+    try:
+        from tools.academic_deck import (
+            OOS_SHARPE_BENCHMARK,
+            OOS_SHARPE_CLASSIC_6040,
+            OOS_SHARPE_REGIME_CONDITIONAL,
+        )
+        improvement = None
+        if (OOS_SHARPE_REGIME_CONDITIONAL
+                and OOS_SHARPE_BENCHMARK):
+            try:
+                improvement = round(
+                    (float(OOS_SHARPE_REGIME_CONDITIONAL)
+                     / float(OOS_SHARPE_BENCHMARK) - 1.0)
+                    * 100.0, 1)
+            except (TypeError, ZeroDivisionError):
+                improvement = None
+        return {
+            "oos_sharpe_blend": OOS_SHARPE_REGIME_CONDITIONAL,
+            "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
+            "oos_sharpe_classic_6040": OOS_SHARPE_CLASSIC_6040,
+            "oos_sharpe_improvement_pct": improvement,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "academic_lock_fallback_error", error=str(exc))
+        return {
+            "oos_sharpe_blend": None,
+            "oos_sharpe_benchmark": None,
+            "oos_sharpe_classic_6040": None,
+            "oos_sharpe_improvement_pct": None,
+        }
