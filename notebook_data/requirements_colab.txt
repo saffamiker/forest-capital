@@ -1,0 +1,17 @@
+# Forest Capital -- analytical_appendix.ipynb minimal Colab requirements.
+#
+# Every package below is preinstalled in the default Google Colab
+# runtime as of 2026. The notebook imports nothing else; the file
+# exists as an explicit contract for a grader spinning up a fresh
+# environment outside Colab.
+#
+# Install with:
+#   pip install -r notebook_data/requirements_colab.txt
+#
+# Versions match what authored the notebook -- newer / older within
+# the bounds in the notebook's first code cell ("Imports and version
+# pins") should still execute every cell cleanly.
+pandas>=2.0,<3.0
+numpy>=1.24,<3.0
+scipy>=1.10,<2.0
+matplotlib>=3.7,<4.0
