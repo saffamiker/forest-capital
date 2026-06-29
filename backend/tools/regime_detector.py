@@ -461,19 +461,72 @@ def fit_hmm_historical(
     else:
         X = np.column_stack([clean_ret.values, np.abs(clean_ret.values)])
 
-    model = GaussianHMM(
-        n_components=n_states,
-        covariance_type="full",
-        n_iter=500,
-        random_state=seed,
-        tol=1e-5,
-    )
+    # June 29 2026 (Issue 8) -- convergence-robust HMM fit.
+    # The single-seed Baum-Welch sometimes terminated with a
+    # negative log-likelihood delta against the previous
+    # iteration, leaving the model non-converged but with the
+    # rest of the regime pipeline silently relying on it. Fix:
+    # run N_INIT independent fits from random seeds, prefer
+    # the converged fit with the highest log-likelihood, and
+    # log a warning if none converged so downstream consumers
+    # can decide whether to degrade gracefully. n_iter (500)
+    # and tol (1e-5) already meet the spec (>= 200 / <= 1e-4);
+    # n_init is the robustness lever.
+    N_INIT = 10
+    best_model = None
+    best_ll: float = -float("inf")
+    best_converged = False
+    last_exc: str | None = None
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try:
-            model.fit(X)
-        except Exception as exc:
-            return {"error": str(exc)}
+        for k in range(N_INIT):
+            candidate = GaussianHMM(
+                n_components=n_states,
+                covariance_type="full",
+                n_iter=500,
+                random_state=seed + k,
+                tol=1e-5,
+            )
+            try:
+                candidate.fit(X)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = str(exc)
+                continue
+            try:
+                ll = float(candidate.score(X))
+            except Exception as exc:  # noqa: BLE001
+                last_exc = str(exc)
+                continue
+            converged = bool(getattr(
+                candidate.monitor_, "converged", False))
+            if converged and not best_converged:
+                best_model = candidate
+                best_ll = ll
+                best_converged = True
+            elif converged and best_converged and ll > best_ll:
+                best_model = candidate
+                best_ll = ll
+            elif (not best_converged) and ll > best_ll:
+                best_model = candidate
+                best_ll = ll
+    if best_model is None:
+        return {"error": last_exc or "hmm_fit_failed"}
+    model = best_model
+    if not best_converged:
+        log.warning(
+            "hmm_historical_fit_did_not_converge",
+            n_init=N_INIT,
+            best_log_likelihood=best_ll,
+            note=("No N_INIT random restart reported "
+                  "monitor_.converged=True. Returning the "
+                  "highest-log-likelihood fit as a fallback; "
+                  "downstream consumers should treat its "
+                  "regime classification as advisory."))
+    else:
+        log.info(
+            "hmm_historical_fit_converged",
+            n_init=N_INIT,
+            log_likelihood=best_ll)
 
     hidden_states = model.predict(X)
     state_means = model.means_[:, 0]
