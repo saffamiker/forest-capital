@@ -788,7 +788,7 @@ class TestLockedProvenance:
             source_string="academic_deck.OOS_SHARPE_REGIME_CONDITIONAL")
         d = result.to_dict()
         assert "provenance" in d
-        assert d["provenance"]["lock_date"] == "December 2025"
+        assert d["provenance"]["lock_date"] == "submission lock"
 
     def test_every_locked_catalog_entry_has_provenance(self):
         """Coverage map: every is_locked=True entry in the

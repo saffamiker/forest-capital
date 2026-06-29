@@ -71,9 +71,10 @@ class TokenEntry:
 # Molly: "Is this figure part of the academic submission record?"
 # The four scope values and their semantics are:
 #
-#   SCOPE_LOCKED         IN SCOPE -- locked to Dec 2025 freeze hash.
-#                        Strategy cache + historical analytics
-#                        tokens. Cannot change without a new freeze.
+#   SCOPE_LOCKED         IN SCOPE -- locked to submission freeze
+#                        hash. Strategy cache + historical
+#                        analytics tokens. Cannot change without a
+#                        new freeze.
 #
 #   SCOPE_CONSTANT       IN SCOPE -- hardcoded methodology constant
 #                        in academic_deck.py. Immutable code value.
@@ -101,9 +102,9 @@ SCOPE_LEGEND: dict[str, dict[str, str]] = {
         "label": "IN SCOPE -- LOCKED",
         "description": (
             "This figure is part of the academic submission record "
-            "and is guaranteed identical to the December 2025 "
-            "frozen dataset. It cannot change without a new freeze "
-            "hash."),
+            "and is guaranteed identical to the locked submission "
+            "dataset (study runs through May 2026). It cannot "
+            "change without a new freeze hash."),
         "applies_to": (
             "All strategy cache tokens (Sharpe, drawdown, recovery, "
             "CAGR, volatility, blend weights, factor loadings, cost "
@@ -304,21 +305,21 @@ FACTOR_LOADING_METRICS: tuple[tuple[str, str], ...] = (
 LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
     # ── OOS Sharpe pair (the headline proof point) ──
     "academic_deck.OOS_SHARPE_REGIME_CONDITIONAL": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Walk-forward OOS Sharpe, post-2022 validation "
-            "window (Jan 2022 - Dec 2025)"),
+            "window (Jan 2022 - May 2026)"),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
         "locked_value": "0.8576",
     },
     "academic_deck.OOS_SHARPE_BENCHMARK": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Walk-forward OOS Sharpe, post-2022 validation "
-            "window (Jan 2022 - Dec 2025); benchmark = "
+            "window (Jan 2022 - May 2026); benchmark = "
             "100% equity"),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
@@ -327,8 +328,8 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
 
     # ── Pre/post 2022 equity-IG correlation ──
     "academic_deck.CORRELATION_PRE_2022": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Average of 12-month rolling equity-IG correlation, "
             "pre-2022 window (Jul 2002 - Dec 2021)"),
@@ -337,11 +338,11 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "locked_value": "-0.05",
     },
     "academic_deck.CORRELATION_POST_2022": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Average of 12-month rolling equity-IG correlation, "
-            "post-2022 window (Jan 2022 - Dec 2025)"),
+            "post-2022 window (Jan 2022 - May 2026)"),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
         "locked_value": "+0.57",
@@ -349,8 +350,8 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
 
     # ── OOS window constants ──
     "academic_deck.OOS_WINDOW_MONTHS": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Count of monthly observations in the validation "
             "window (Feb 2022 - May 2026 inclusive = 53 months)"),
@@ -359,8 +360,8 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "locked_value": "53",
     },
     "academic_deck.OOS_WINDOW_PCT_OF_STUDY": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "OOS_WINDOW_MONTHS (53) divided by total study "
             "months (287) = 18.5%"),
@@ -371,8 +372,8 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
 
     # ── Play-by-play scorecard (manual count) ──
     "academic_deck.PLAY_BY_PLAY_EVENTS": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Manual count from rebalance_events.csv "
             "(distinct OOS rebalance events tracked)"),
@@ -381,8 +382,8 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "locked_value": "9",
     },
     "academic_deck.PLAY_BY_PLAY_ADD_VALUE": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Manual count from rebalance_events.csv (events "
             "where the regime signal produced positive value-add "
@@ -394,23 +395,23 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
 
     # ── Max drawdown locked figures ──
     "academic_deck.MAX_DRAWDOWN_BENCHMARK": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Peak-to-trough maximum drawdown of the 100% "
             "equity benchmark over the full study window "
-            "(Jul 2002 - Dec 2025)"),
+            "(Jul 2002 - May 2026)"),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
         "locked_value": "-52.6%",
     },
     "academic_deck.MAX_DRAWDOWN_REGIME_CONDITIONAL": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Peak-to-trough maximum drawdown of the regime-"
             "switching blend over the full study window "
-            "(Jul 2002 - Dec 2025)"),
+            "(Jul 2002 - May 2026)"),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
         "locked_value": "-29.7%",
@@ -418,8 +419,8 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
 
     # ── Study-window text bookends ──
     "academic_deck (constant, July 2002)": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Study period start month; fixed bookend across "
             "every academic deliverable"),
@@ -428,12 +429,12 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "locked_value": "July 2002",
     },
     "academic_deck (constant, May 2026)": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Study period end month; matches the last "
             "ff_factors_monthly observation available at the "
-            "December 2025 lock"),
+            "submission lock"),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
         "locked_value": "May 2026",
@@ -441,8 +442,8 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
     "academic_deck (constant)": {
         # The OOS window definition text token
         # ({{OOS_WINDOW}}) uses this generic source string.
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Fixed text describing the OOS validation window "
             "boundaries"),
@@ -456,23 +457,23 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
     # explicitly + the closed-form computation, so the
     # derivation chain is fully transparent.
     "derived: blend/benchmark - 1": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Derived: OOS_SHARPE_REGIME_CONDITIONAL (0.8576) "
             "/ OOS_SHARPE_BENCHMARK (0.4341) - 1. Both inputs "
-            "are locked December 2025 constants."),
+            "are locked submission constants."),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
         "locked_value": "+98%",
     },
     "derived: |bench_dd| - |blend_dd|": {
-        "lock_date": "December 2025",
-        "dataset_end": "2025-12-31",
+        "lock_date": "submission lock",
+        "dataset_end": "2026-05-31",
         "method": (
             "Derived: |MAX_DRAWDOWN_BENCHMARK (-52.6%)| "
             "minus |MAX_DRAWDOWN_REGIME_CONDITIONAL (-29.7%)|. "
-            "Both inputs are locked December 2025 constants."),
+            "Both inputs are locked submission constants."),
         "defended": (
             "June 3 cohort peer review + July 1 panel"),
         "locked_value": "+22.8pp",

@@ -3,10 +3,10 @@
  *
  * The CIO recommendation card renders an OOS Validation subsection
  * when the /api/v1/recommendation response carries oos_sharpe (the
- * December 2025 academic-lock Sharpe values for the blend and the
- * benchmark plus the value-add event counts from the play-by-play
- * scorecard). Omitted gracefully when the overlay is null (cold
- * oos_summary cache).
+ * submission-freeze Sharpe values for the blend and the benchmark
+ * plus the value-add event counts from the play-by-play scorecard).
+ * Omitted gracefully when the overlay is null (cold oos_summary
+ * cache).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
@@ -72,7 +72,7 @@ describe('CIO card -- OOS Sharpe subsection', () => {
       renderCard()
       const section = await screen.findByTestId('cio-oos-sharpe')
       // Section header.
-      expect(section.textContent).toMatch(/OOS Sharpe \(Dec 2025 lock\)/i)
+      expect(section.textContent).toMatch(/OOS Sharpe \(submission lock\)/i)
       // Sharpe values rounded to 2 decimals (1.2442 -> 1.24,
       // 0.7303 -> 0.73).
       expect(section.textContent).toContain('1.24')

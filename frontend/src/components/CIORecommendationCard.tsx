@@ -88,8 +88,9 @@ interface Recommendation {
   // card omits the regime-shift section in that case.
   regime_blends_implied?: Record<string, RegimeBlendImplied> | null
   // June 15 2026 -- OOS validation overlay. Pulled from the cached
-  // oos_summary metric (December 2025 academic lock). null when the
-  // cache is cold or the read failed; the card omits the row.
+  // oos_summary metric (academic submission freeze record). null
+  // when the cache is cold or the read failed; the card omits the
+  // row.
   oos_sharpe?: {
     blend: number | null
     benchmark: number | null
@@ -357,8 +358,8 @@ export default function CIORecommendationCard() {
       )}
 
       {/* ── OOS validation (June 15 2026) ─────────────────────────────
-          Pulled from oos_summary cached at warm time (December 2025
-          academic-lock numbers). Renders the blend / benchmark
+          Pulled from oos_summary cached at warm time (academic
+          submission freeze record). Renders the blend / benchmark
           Sharpe + the explicit delta, plus a secondary "Blend
           outperformed at N of M rebalance events" line. Hidden
           silently when the overlay is null (cold cache). */}
@@ -373,7 +374,7 @@ export default function CIORecommendationCard() {
           return (
             <div className="mt-4" data-testid="cio-oos-sharpe">
               <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
-                OOS Sharpe (Dec 2025 lock)
+                OOS Sharpe (submission lock)
               </div>
               <p className="text-sm leading-snug">
                 <span className="text-muted">Blend </span>
