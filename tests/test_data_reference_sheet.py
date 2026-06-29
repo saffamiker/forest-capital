@@ -100,37 +100,46 @@ class TestCatalogStructure:
         assert flat["{{NET_SHARPE_10BP}}"].is_locked is False
         assert flat["{{CURRENT_EQUITY_PCT}}"].is_locked is False
 
-    def test_per_strategy_appendix_expansion_50_rows(self):
-        """10 strategies x 5 metrics = 50 rows. The auto-generator
-        in numeric_substitution._append_per_strategy_tokens produces
-        the same shape; the catalog must stay in lockstep so the
-        reference sheet shows the same set."""
+    def test_per_strategy_appendix_expansion_15_rows(self):
+        """3 submission-scope strategies x 5 metrics = 15 rows.
+
+        June 29 2026 (token-registry PR) -- restricted from the
+        prior 10-strategy expansion (50 rows) to the submission
+        scope (BENCHMARK + CLASSIC_60_40 + REGIME_SWITCHING) so
+        the data reference sheet doesn't surface tokens for the
+        7 out-of-scope strategies that the brief / appendix / deck
+        no longer reference. Test name + assertion updated to
+        match the new shape; the row-content pins below remain
+        unchanged."""
         from tools.data_reference_catalog import (
             expand_per_strategy_appendix_metrics,
         )
         rows = expand_per_strategy_appendix_metrics()
-        assert len(rows) == 50
+        assert len(rows) == 15
         # All rows mark is_locked=False since they read from the
         # live strategy cache.
         for row in rows:
             assert row.is_locked is False
             assert row.source.startswith("strategy_cache.")
+        # Out-of-scope leak guard.
+        for row in rows:
+            for prefix in (
+                "EQUAL_WEIGHT_", "RISK_PARITY_", "MIN_VARIANCE_",
+                "VOL_TARGETING_", "BLACK_LITTERMAN_",
+                "MOMENTUM_ROTATION_", "MAX_SHARPE_ROLLING_",
+            ):
+                assert prefix not in row.token, (
+                    f"out-of-scope token leaked: {row.token}")
 
-    def test_per_strategy_factor_loadings_expansion_50_rows(self):
-        """10 strategies x 5 columns = 50 rows. Field key names
-        in the source string MUST match what
-        tools.analytics.factor_loadings actually writes per row:
-        alpha_annualized / mkt_rf / smb / hml / r_squared. The
-        catalog source strings get parsed by main._resolve_value
-        which does row.get(metric_key) directly against the
-        analytics row -- a name mismatch silently renders em-dash
-        on every entry (the bug PR #380 fixed in the parallel
-        substitution-table path but missed in this catalog)."""
+    def test_per_strategy_factor_loadings_expansion_15_rows(self):
+        """3 submission-scope strategies x 5 columns = 15 rows.
+        June 29 2026 (token-registry PR) -- same scope
+        restriction as appendix-metrics expansion."""
         from tools.data_reference_catalog import (
             expand_per_strategy_factor_loadings,
         )
         rows = expand_per_strategy_factor_loadings()
-        assert len(rows) == 50
+        assert len(rows) == 15
         # Capture the metric segment of every source string so
         # we can pin which field keys the resolver will read.
         metric_keys: set[str] = set()
@@ -241,21 +250,23 @@ class TestEndpointBasics:
             assert key in data["categories"], (
                 f"missing category {key}")
 
-    def test_per_strategy_appendix_category_carries_50_rows(self):
+    def test_per_strategy_appendix_category_carries_15_rows(self):
+        # June 29 2026 (token-registry PR) -- restricted to the
+        # 3 submission-scope strategies.
         client, token = self._client()
         r = client.get(
             "/api/v1/export/data-reference-sheet",
             headers={"X-API-Key": token})
         cat = r.json()["categories"]["per_strategy_appendix"]
-        assert len(cat["entries"]) == 50
+        assert len(cat["entries"]) == 15
 
-    def test_factor_loadings_category_carries_50_rows(self):
+    def test_factor_loadings_category_carries_15_rows(self):
         client, token = self._client()
         r = client.get(
             "/api/v1/export/data-reference-sheet",
             headers={"X-API-Key": token})
         cat = r.json()["categories"]["factor_loadings"]
-        assert len(cat["entries"]) == 50
+        assert len(cat["entries"]) == 15
 
     def test_every_response_entry_has_required_fields(self):
         client, token = self._client()
