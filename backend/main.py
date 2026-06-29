@@ -17831,12 +17831,17 @@ async def _generate_brief_document(
                  "added value in 2 of 9 named market events (the play-"
                  "by-play scorecard). No strategy clears statistical "
                  "significance at p < {{BH_SIGNIFICANCE_THRESHOLD}} "
-                 "under Benjamini-Hochberg FDR "
-                 "correction across the ten-strategy set. The case rests "
-                 "on economic magnitude, NOT statistical certainty.\n\n"
-                 "DROP the other seven strategies from the body -- "
-                 "reference the Analytical Appendix for the full 10-"
-                 "strategy table. Numbers from the platform; conclusions "
+                 "under Benjamini-Hochberg FDR correction across the "
+                 "three-strategy submission set (BENCHMARK, "
+                 "CLASSIC_60_40, REGIME_SWITCHING). The multiple-"
+                 "testing penalty is materially smaller than a full "
+                 "ten-strategy survey would carry. The case rests on "
+                 "economic magnitude, NOT statistical certainty.\n\n"
+                 "The brief focuses on the three submission strategies "
+                 "(benchmark, static diversifier 60/40, dynamic blend) "
+                 "-- the appendix carries the same three-strategy "
+                 "table at higher detail. Numbers from the platform; "
+                 "conclusions "
                  "framed as 'our analysis shows' / 'we conclude' / 'we "
                  "interpret'."
                  + _BRIEF_TONE_RULES),
@@ -18310,24 +18315,27 @@ async def export_analytical_appendix(
     return _start_generation_job("analytical_appendix", session, request)
 
 
-# The analytical appendix carries the FULL 10-strategy evidence base
-# behind every claim the brief and the deck make. Unlike the brief/
-# deck/script -- which simplify to a three-strategy lens per the
-# midpoint feedback -- the appendix is the place where every strategy
-# is shown alongside the others. The framing prelude below threads the
-# audience contract and the economic-intuition layer into every
-# section task so the writer treats the appendix as the analytical
-# evidence base for a mixed academic + investment audience, not a
-# table-dump.
+# June 29 2026 -- THREE-STRATEGY SUBMISSION SCOPE. Both the brief
+# AND the appendix now operate on the same restricted three-strategy
+# set (BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING) per the scope
+# filter at tools/academic_export.gather_analytical_appendix_data.
+# The appendix retains the higher-detail evidence base for those
+# three strategies (the per-section tables D / E / F / G carry
+# more granular metrics for each row than the brief shows), but the
+# strategy roster is identical to the brief.
 _APPENDIX_FRAMING_PRELUDE = (
     "APPENDIX FRAMING (applies to every section):\n"
     "  - This is the analytical evidence base supporting the "
     "executive brief and presentation deck. The audience reads the "
     "appendix to verify the claims made elsewhere.\n"
-    "  - Unlike the brief / deck / script (which use a three-strategy "
-    "lens of Benchmark / Static blend / Dynamic blend per midpoint "
-    "feedback), the appendix shows ALL strategies from the cache. "
-    "The full 10-strategy table is appropriate here.\n"
+    "  - The appendix operates on the SAME three-strategy "
+    "submission scope as the brief / deck / script: BENCHMARK, "
+    "CLASSIC_60_40, REGIME_SWITCHING. Higher-detail per-strategy "
+    "metrics (bootstrap CI, factor loadings, crisis windows) are "
+    "shown for those three strategies; out-of-scope strategies "
+    "(MIN_VARIANCE, RISK_PARITY, VOL_TARGETING, etc.) are NOT in "
+    "the submission record and must NOT be named in appendix "
+    "prose.\n"
     "  - Each section's prose must include one sentence of economic "
     "intuition explaining what the result MEANS for a reader, not "
     "just what the table contains. Example: a section reporting a "
@@ -20544,24 +20552,25 @@ _DECK_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
     "regime-switching strategy\n"
     "  {{BLEND_BENCHMARK_WT}} -- live blend weight for the benchmark\n"
     "  {{BLEND_CLASSIC_6040_WT}} -- live blend weight for 60/40\n"
-    "  {{N_STRATEGIES}} -- total strategies evaluated (10)\n"
+    "  {{N_STRATEGIES}} -- total strategies in submission scope (3)\n"
     "\n"
 )
 
 
-# June 21 2026 -- Layer 2 appendix extension. Appended to
-# _NUMERIC_PLACEHOLDER_GUIDE for appendix section prompts. The
-# appendix shows all 10 strategies (not the three-strategy
-# simplification), so it needs per-strategy tokens. Rather than
-# enumerate all 50 tokens (10 strategies x 5 metrics), the guide
-# teaches the pattern: {{STRATEGY_NAME_METRIC}} where the strategy
-# name is the canonical cache key (uppercase + underscores) and
-# the metric suffix is one of the five tracked.
+# June 29 2026 -- THREE-STRATEGY SUBMISSION SCOPE. Both the
+# brief AND the appendix now operate on the same restricted
+# three-strategy set (BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING)
+# per the academic-record scope filter applied at
+# tools/academic_export.gather_document_data /
+# gather_analytical_appendix_data. The appendix retains
+# higher-detail per-strategy tokens for those three strategies
+# only; the guide enumerates the supported (strategy, metric)
+# tokens explicitly.
 _APPENDIX_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
     "\nAPPENDIX-SPECIFIC PLACEHOLDERS:\n"
-    "The appendix shows ALL 10 strategies (not the three-strategy "
-    "simplification used in the brief / deck). Use strategy-specific "
-    "tokens for every performance figure:\n"
+    "The appendix carries the SAME three-strategy scope as the "
+    "brief: BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING. Use "
+    "strategy-specific tokens for every performance figure:\n"
     "\n"
     "  {{STRATEGY_NAME_SHARPE}} -- full-period Sharpe ratio\n"
     "  {{STRATEGY_NAME_MAX_DD}} -- maximum drawdown (negative %)\n"
@@ -20569,13 +20578,14 @@ _APPENDIX_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
     "  {{STRATEGY_NAME_VOLATILITY}} -- annualised volatility (%)\n"
     "  {{STRATEGY_NAME_RECOVERY}} -- drawdown recovery (months)\n"
     "\n"
-    "Where STRATEGY_NAME is one of:\n"
-    "  BENCHMARK, REGIME_SWITCHING, CLASSIC_60_40, MIN_VARIANCE,\n"
-    "  RISK_PARITY, VOL_TARGETING, MAX_SHARPE_ROLLING,\n"
-    "  MOMENTUM_ROTATION, EQUAL_WEIGHT, MAX_DIVERSIFICATION\n"
+    "STRATEGY_NAME must be one of:\n"
+    "  BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING\n"
+    "(any other strategy reference -- MIN_VARIANCE, RISK_PARITY, "
+    "VOL_TARGETING, etc. -- is out of submission scope and the "
+    "token will not resolve.)\n"
     "\n"
-    "Examples: {{REGIME_SWITCHING_SHARPE}}, {{MIN_VARIANCE_MAX_DD}}, "
-    "{{BENCHMARK_CAGR}}, {{RISK_PARITY_RECOVERY}}.\n"
+    "Examples: {{REGIME_SWITCHING_SHARPE}}, {{CLASSIC_6040_MAX_DD}}, "
+    "{{BENCHMARK_CAGR}}.\n"
     "\n"
     "Never write a raw performance figure for any strategy. The "
     "platform substitutes verified cache values after generation, "

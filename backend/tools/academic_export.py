@@ -144,6 +144,87 @@ class StrategyCacheMissingForHashError(RuntimeError):
         self.data_hash = data_hash
 
 
+# June 29 2026 -- SUBMISSION SCOPE: the brief, appendix, deck,
+# and script expose ONLY these three strategies. The full
+# 10-strategy analytical engine still runs in the platform's
+# live caches (Performance Record, CIO Recommendation Card,
+# Implied Asset Allocation chart, all admin / dashboard
+# surfaces); document generation deliberately narrows to the
+# panel-defense set so every table / narrative / token
+# substitution operates on the same scope.
+#
+# This is the SINGLE FILTER POINT. gather_document_data and
+# gather_analytical_appendix_data apply it to the data bundle
+# they return; every downstream consumer (table builders,
+# Academic Writer prompts, story plan, substitution table)
+# operates on the filtered set without per-site changes.
+SUBMISSION_STRATEGIES: frozenset[str] = frozenset({
+    "BENCHMARK",
+    "CLASSIC_60_40",
+    "REGIME_SWITCHING",
+})
+
+
+def _filter_to_submission_scope(
+    bundle: dict[str, Any],
+) -> dict[str, Any]:
+    """Mutate `bundle` in place so every strategy-bearing
+    surface only carries entries for SUBMISSION_STRATEGIES.
+
+    Filters:
+      strategy_results (dict)       -> keys in SUBMISSION_STRATEGIES
+      strategy_metadata (dict)      -> keys in SUBMISSION_STRATEGIES
+      summary_statistics (list)     -> rows whose 'strategy' is in scope
+      regime_conditional (list)     -> rows whose 'strategy' / 'strategy_name'
+                                       is in scope
+      factor_loadings (list)        -> rows whose 'strategy' is in scope
+      drawdown_comparison (list)    -> rows whose 'strategy' is in scope
+      cost_sensitivity (list)       -> NOT filtered (one row per bps
+                                       tier, not per strategy)
+      crisis_performance (dict)     -> 'rows' inner dict filtered to
+                                       SUBMISSION_STRATEGIES keys
+
+    Lists with no recognised strategy field pass through
+    unchanged. Fail-open on unexpected shapes -- the document
+    generator handles missing rows via [DATA PENDING].
+    """
+    def _is_in(row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        s = row.get("strategy") or row.get("strategy_name")
+        return isinstance(s, str) and s in SUBMISSION_STRATEGIES
+
+    # Top-level strategy_results dict.
+    sr = bundle.get("strategy_results")
+    if isinstance(sr, dict):
+        bundle["strategy_results"] = {
+            k: v for k, v in sr.items()
+            if k in SUBMISSION_STRATEGIES}
+
+    sm = bundle.get("strategy_metadata")
+    if isinstance(sm, dict):
+        bundle["strategy_metadata"] = {
+            k: v for k, v in sm.items()
+            if k in SUBMISSION_STRATEGIES}
+
+    for list_key in (
+            "summary_statistics", "regime_conditional",
+            "factor_loadings", "drawdown_comparison"):
+        rows = bundle.get(list_key)
+        if isinstance(rows, list):
+            bundle[list_key] = [r for r in rows if _is_in(r)]
+
+    # crisis_performance has nested {windows, rows: {strategy: {...}}}.
+    cp = bundle.get("crisis_performance")
+    if isinstance(cp, dict) and isinstance(cp.get("rows"), dict):
+        cp["rows"] = {
+            k: v for k, v in cp["rows"].items()
+            if k in SUBMISSION_STRATEGIES}
+        bundle["crisis_performance"] = cp
+
+    return bundle
+
+
 async def gather_document_data(
     data_hash: str | None = None,
 ) -> dict[str, Any]:
@@ -406,6 +487,14 @@ async def gather_document_data(
     # weights itself. Fail-open per the rest of the bundle pattern.
     bundle["live_recommendation"] = await _gather_live_recommendation(
         bundle.get("strategy_results") or {})
+
+    # June 29 2026 -- SUBMISSION SCOPE filter. Applied LAST so
+    # the live_recommendation aggregate (which crosses the full
+    # blend weights to portfolio-level shares) computes against
+    # the unfiltered set first. The filtered bundle then flows
+    # to every document generator + table builder + narrative
+    # prompt.
+    bundle = _filter_to_submission_scope(bundle)
 
     return bundle
 
@@ -1919,5 +2008,13 @@ async def gather_analytical_appendix_data(
             log.warning(
                 "appendix_data_hash_read_failed", error=str(exc))
             bundle["data_hash"] = None
+
+    # June 29 2026 -- SUBMISSION SCOPE filter. Same central
+    # filter the brief bundle applies; restricts every
+    # strategy-bearing surface (strategy_results,
+    # summary_statistics, regime_conditional, factor_loadings,
+    # crisis_performance, etc.) to BENCHMARK + CLASSIC_60_40 +
+    # REGIME_SWITCHING.
+    bundle = _filter_to_submission_scope(bundle)
 
     return bundle

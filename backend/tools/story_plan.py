@@ -77,6 +77,31 @@ except Exception:  # noqa: BLE001
 _DETERMINISTIC = "deterministic_fallback"
 
 
+# June 29 2026 -- story plan cache version. Suffixed onto the
+# document_type column so old cache rows become unreachable
+# when this constant bumps. Use this when a non-data change
+# (prompt rewrite, scope filter, output schema) invalidates
+# every previously-cached plan even though data_hash is
+# unchanged.
+#
+# Bump history:
+#   v1 (initial) -- single-strategy-set scope; brief had Section 6
+#   v2 (2026-06-29) -- THREE-STRATEGY SUBMISSION SCOPE. The brief /
+#                     appendix / deck / script now expose only
+#                     BENCHMARK, CLASSIC_60_40, REGIME_SWITCHING.
+#                     Plans cached against the 10-strategy framing
+#                     are invalid for the new scope.
+STORY_PLAN_VERSION = 2
+
+
+def _versioned_document_type(document_type: str) -> str:
+    """Map a bare document_type ('brief' / 'deck' / 'appendix'
+    / 'script') to its versioned form ('brief_v2' / etc.).
+    Used by read + write paths so a constant bump immediately
+    invalidates every cached plan."""
+    return f"{document_type}_v{STORY_PLAN_VERSION}"
+
+
 # ── Shared framing -- midpoint-feedback constraints (June 19 2026) ──────
 #
 # Three constants threaded into every Pass-1 system prompt below so the
@@ -1799,7 +1824,8 @@ async def get_cached_story_plan(
                      "WHERE data_hash = :h "
                      "  AND document_type = :t "
                      "ORDER BY computed_at DESC LIMIT 1"),
-                {"h": data_hash, "t": document_type})
+                {"h": data_hash,
+                 "t": _versioned_document_type(document_type)})
             r = row.fetchone()
             if not r:
                 return None
@@ -1858,7 +1884,8 @@ async def get_latest_story_plan(
         from sqlalchemy import text
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
             where_clauses = ["document_type = :t"]
-            params: dict[str, Any] = {"t": document_type}
+            params: dict[str, Any] = {
+                "t": _versioned_document_type(document_type)}
             if exclude_fallback:
                 where_clauses.append(
                     "(model IS NULL "
@@ -1947,7 +1974,7 @@ async def persist_story_plan(
                     "      IS DISTINCT FROM 'deterministic_fallback'"),
                 {
                     "h": data_hash,
-                    "t": document_type,
+                    "t": _versioned_document_type(document_type),
                     "c": central,
                     "pj": json.dumps(plan_json),
                     "fs": full_script,
