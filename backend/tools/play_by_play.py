@@ -1128,28 +1128,77 @@ async def get_cached_performance_chart() -> dict | None:
         return None
 
 
-async def get_cached_oos_summary() -> dict | None:
+async def get_cached_oos_summary(
+    data_hash: str | None = None,
+) -> dict | None:
     """The latest cached OOS Sharpe summary (blend / benchmark /
     equal_weight Sharpe + the value-add event count). Fail-open to None so
-    a reader that runs before the first warm simply omits the scalars."""
+    a reader that runs before the first warm simply omits the scalars.
+
+    June 29 2026 -- freeze-hash fallback (substitution-fallback PR).
+    When data_hash is supplied and the lookup misses, falls back to
+    get_metric(freeze_hash, oos_summary) before the legacy latest-
+    write read. Callers that don't pass data_hash (the CIO card
+    overlay, regime visualisations) keep the prior latest-write
+    behaviour."""
     try:
-        from tools.precomputed_analytics import get_latest_metric
+        from tools.precomputed_analytics import (
+            get_latest_metric, get_metric,
+        )
+        if data_hash:
+            row = await get_metric(
+                data_hash, _OOS_SUMMARY_METRIC_KIND)
+            if row is not None:
+                return row
+            try:
+                from tools.submission_freeze import get_freeze_config
+                cfg = await get_freeze_config()
+                freeze_hash = (
+                    cfg.get("freeze_hash")
+                    if isinstance(cfg, dict)
+                    and cfg.get("active")
+                    else None)
+                if (freeze_hash
+                        and freeze_hash != data_hash):
+                    fallback = await get_metric(
+                        freeze_hash, _OOS_SUMMARY_METRIC_KIND)
+                    if fallback is not None:
+                        log.warning(
+                            "oos_summary_fallback_to_freeze_hash",
+                            draft_hash=data_hash[:8],
+                            freeze_hash=freeze_hash[:8])
+                        return fallback
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "oos_summary_freeze_fallback_read_failed",
+                    error=str(_exc))
         return await get_latest_metric(_OOS_SUMMARY_METRIC_KIND)
     except Exception as exc:  # noqa: BLE001
         log.warning("oos_summary_read_error", error=str(exc))
         return None
 
 
-async def get_academic_lock() -> dict:
+async def get_academic_lock(
+    data_hash: str | None = None,
+) -> dict:
     """Return the FROZEN OOS Sharpe figures the brief / appendix /
     deck token substitution consume.
 
-    Read source: the academic_lock precomputed_analytics row written
-    by refresh_performance_chart alongside oos_summary. Falls back to
-    the academic_deck.py constants on a cold cache (first deploy
-    before any refresh has fired) so document generation never breaks
-    -- the constants are the panel-defended values and remain a
-    safe default.
+    Read source order (June 29 2026 -- freeze-hash fallback for the
+    substitution-pipeline fallback PR):
+      1. get_metric(data_hash, 'academic_lock')      -- when the
+         caller supplies the draft's data_hash
+      2. get_metric(freeze_hash, 'academic_lock')    -- when (1)
+         returns None AND submission_freeze is active. Logs
+         'academic_lock_fallback_to_freeze_hash' so the audit
+         spots the fallback.
+      3. get_latest_metric('academic_lock')          -- when (1)
+         and (2) both miss
+      4. academic_deck.py constants                  -- cold-cache
+         fallback (first deploy before any refresh has fired)
+
+    The constants are the panel-defended values and remain a safe
+    default.
 
     Returned shape:
         {
@@ -1166,11 +1215,48 @@ async def get_academic_lock() -> dict:
     cache and fallback paths -- the value is the panel-defended
     methodology constant and would not drift across HMM runs anyway.
 
-    June 29 2026 -- Fix A of fix(rounding-consistency)."""
+    June 29 2026 -- Fix A of fix(rounding-consistency).
+    June 29 2026 -- freeze-hash fallback (substitution-fallback PR)."""
     try:
-        from tools.precomputed_analytics import get_latest_metric
+        from tools.precomputed_analytics import (
+            get_latest_metric, get_metric,
+        )
         from tools.academic_deck import OOS_SHARPE_CLASSIC_6040
-        row = await get_latest_metric(_ACADEMIC_LOCK_METRIC_KIND)
+
+        row = None
+        # Step 1: caller's data_hash, if supplied.
+        if data_hash:
+            row = await get_metric(
+                data_hash, _ACADEMIC_LOCK_METRIC_KIND)
+        # Step 2: freeze_hash fallback when freeze is active
+        # and step 1 missed.
+        if row is None and data_hash:
+            try:
+                from tools.submission_freeze import get_freeze_config
+                cfg = await get_freeze_config()
+                freeze_hash = (
+                    cfg.get("freeze_hash")
+                    if isinstance(cfg, dict)
+                    and cfg.get("active")
+                    else None)
+                if (freeze_hash
+                        and freeze_hash != data_hash):
+                    fallback = await get_metric(
+                        freeze_hash, _ACADEMIC_LOCK_METRIC_KIND)
+                    if fallback is not None:
+                        log.warning(
+                            "academic_lock_fallback_to_freeze_hash",
+                            draft_hash=data_hash[:8],
+                            freeze_hash=freeze_hash[:8])
+                        row = fallback
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "academic_lock_freeze_fallback_read_failed",
+                    error=str(_exc))
+        # Step 3: latest write (hash-agnostic).
+        if row is None:
+            row = await get_latest_metric(
+                _ACADEMIC_LOCK_METRIC_KIND)
         if row and isinstance(row, dict):
             return {
                 "oos_sharpe_blend":
