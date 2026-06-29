@@ -251,6 +251,22 @@ ALL_STRATEGIES: tuple[str, ...] = (
     "MOMENTUM_ROTATION", "MAX_SHARPE_ROLLING",
 )
 
+# June 29 2026 (token-registry PR) -- submission-scope subset.
+# The Data Reference Sheet panel expands per-strategy tokens
+# via expand_per_strategy_* helpers; the appendix exports and
+# substitution table both restrict to the three submission
+# strategies per PR #482. Without the same restriction on the
+# data-reference catalog, the panel surfaced 50+ token rows
+# (10 strategies x 5 metrics) of which 35 were out-of-scope
+# and validated as 'em-dash' because the reference value was
+# correctly absent. The 3-strategy subset below mirrors
+# tools.academic_export.SUBMISSION_STRATEGIES so the panel
+# shows ONLY the strategies that actually appear in the
+# brief / appendix / deck deliverables.
+SUBMISSION_SCOPE_STRATEGIES: tuple[str, ...] = (
+    "BENCHMARK", "CLASSIC_60_40", "REGIME_SWITCHING",
+)
+
 
 # Factor loading metric names. Per-strategy expansion populates
 # each strategy with one row per metric. The keys MUST match
@@ -1155,16 +1171,25 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
 
 
 def expand_per_strategy_appendix_metrics() -> tuple[TokenEntry, ...]:
-    """The 10-strategy x 5-metric token grid the appendix
+    """The 3-strategy x 5-metric token grid the appendix
     Sections B-F tables surface. Mirrors the auto-generation
     inside numeric_substitution._append_per_strategy_tokens so
     the catalog stays in lockstep with the actual table builder.
 
     Returns a flat tuple of TokenEntry rows, one per
-    (strategy, metric) pair = 50 entries.
+    (strategy, metric) pair = 15 entries (3 submission-scope
+    strategies x 5 metrics).
+
+    June 29 2026 (token-registry PR) -- restricted from
+    ALL_STRATEGIES (10) to SUBMISSION_SCOPE_STRATEGIES (3) so
+    the Data Reference Sheet panel doesn't surface tokens for
+    the 7 out-of-scope strategies. Per PR #482 the brief +
+    appendix + deck only carry BENCHMARK + CLASSIC_60_40 +
+    REGIME_SWITCHING; the data reference catalog now mirrors
+    that scope.
     """
     entries: list[TokenEntry] = []
-    for strategy in ALL_STRATEGIES:
+    for strategy in SUBMISSION_SCOPE_STRATEGIES:
         for metric_suffix, metric_label in (
             APPENDIX_PER_STRATEGY_METRICS
         ):
@@ -1193,15 +1218,20 @@ def expand_per_strategy_appendix_metrics() -> tuple[TokenEntry, ...]:
 
 def expand_per_strategy_factor_loadings() -> tuple[TokenEntry, ...]:
     """The per-strategy factor regression grid for Appendix
-    Section E. Five metrics x 10 strategies = 50 entries.
+    Section E. Five metrics x 3 submission-scope strategies =
+    15 entries.
 
     Factor-loading tokens don't pass through the substitution
     table -- the Section E table renderer reads them directly
     from data['factor_loadings']. They appear in the reference
     sheet so Bob can cross-check the table against the
-    underlying regression output."""
+    underlying regression output.
+
+    June 29 2026 (token-registry PR) -- restricted from
+    ALL_STRATEGIES (10) to SUBMISSION_SCOPE_STRATEGIES (3)
+    same as expand_per_strategy_appendix_metrics."""
     entries: list[TokenEntry] = []
-    for strategy in ALL_STRATEGIES:
+    for strategy in SUBMISSION_SCOPE_STRATEGIES:
         for metric, label in FACTOR_LOADING_METRICS:
             entries.append(TokenEntry(
                 token=f"factor_loadings.{strategy}.{metric}",
