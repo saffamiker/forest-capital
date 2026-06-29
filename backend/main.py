@@ -5346,6 +5346,15 @@ async def admin_get_submission_status(
     freeze_active = bool(config.get("active"))
     freeze_hash = config.get("freeze_hash")
     freeze_date = config.get("freeze_date")
+    # June 29 2026 -- surface activated_at on the API so the
+    # frontend banner can prefer the precise activation
+    # timestamp over the calendar-day freeze_date. activated_at
+    # is the ISO timestamp from set_freeze_config; freeze_date
+    # is the date-only form. When the DB row's freeze_date was
+    # written under a misclocked moment, activated_at carries
+    # the actual UTC activation time.
+    activated_at = config.get("activated_at")
+    activated_by = config.get("activated_by")
 
     # June 21 2026 -- read strategy_hash from strategy_results_cache
     # directly, NOT current_data_hash(). The latter is a SHA256 of
@@ -5469,6 +5478,8 @@ async def admin_get_submission_status(
         "freeze_active": freeze_active,
         "freeze_hash": freeze_hash,
         "freeze_date": freeze_date,
+        "activated_at": activated_at,
+        "activated_by": activated_by,
         "current_live_hash": live_hash,
         "hash_drift": hash_drift,
         "frozen_documents": frozen_documents,

@@ -126,15 +126,29 @@ function _classifyRow(
   // CORRECTLY carry the freeze hash were flagged 'stale' against
   // the live hash, producing the misleading "N documents have
   // stale data" warning + amber "Stale" pill.
+  // June 29 2026 -- prefix-tolerant equality so a legacy 8-char
+  // truncated draft hash matches against the 16-char freeze /
+  // live hash. Mirrors _hashesMatch in LiveDataHashBanner.
+  const _match = (a: string, b: string): boolean => {
+    if (!a || !b) return false
+    const al = a.toLowerCase()
+    const bl = b.toLowerCase()
+    if (al === bl) return true
+    const longer = al.length >= bl.length ? al : bl
+    const shorter = al.length >= bl.length ? bl : al
+    if (shorter.length < 4) return false
+    return longer.startsWith(shorter)
+  }
   if (freezeStatus?.freeze_active && freezeStatus.freeze_hash) {
-    if (draftHash === freezeStatus.freeze_hash) return 'current_frozen'
+    if (_match(draftHash, freezeStatus.freeze_hash))
+      return 'current_frozen'
     // A draft NOT matching the freeze hash IS genuinely stale --
     // it was generated under the live hash and needs a regen
     // against the frozen cache. Keep the 'stale' classification.
     return 'stale'
   }
   if (!liveHash) return 'no_hash'
-  if (draftHash === liveHash) return 'current'
+  if (_match(draftHash, liveHash)) return 'current'
   return 'stale'
 }
 

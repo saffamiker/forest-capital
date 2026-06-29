@@ -30,6 +30,12 @@ export interface SubmissionStatus {
   freeze_active: boolean
   freeze_hash: string | null
   freeze_date: string | null
+  // June 29 2026 -- ISO timestamp from set_freeze_config().
+  // Preferred over freeze_date for display because the
+  // calendar-day form was occasionally written under a
+  // misclocked activation moment; activated_at is the
+  // precise UTC timestamp.
+  activated_at?: string | null
   current_live_hash: string
   hash_drift: boolean
   frozen_documents: Record<string, {
@@ -82,6 +88,27 @@ function formatFreezeDate(iso: string | null): string {
 }
 
 
+// June 29 2026 -- format an ISO datetime to a human-readable
+// "Month D, YYYY" string. Used by the activation-date banner
+// in preference to formatFreezeDate when activated_at is
+// available (the precise UTC timestamp vs the calendar-day
+// freeze_date). activated_at is an ISO datetime with timezone
+// (e.g. "2026-06-15T13:42:18+00:00") so we parse + format
+// directly without the YYYY-MM-DD shortcut.
+function formatActivatedAt(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return null
+    return d.toLocaleDateString('en-US', {
+      year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC',
+    })
+  } catch {
+    return null
+  }
+}
+
+
 export interface SubmissionFreezeBannerProps {
   variant?: 'default' | 'compact'
 }
@@ -111,7 +138,16 @@ export default function SubmissionFreezeBanner(
   if (!loaded || !status || !status.freeze_active) return null
 
   const hashFragment = (status.freeze_hash || '').slice(0, 8) || '00000000'
-  const freezeDateLabel = formatFreezeDate(status.freeze_date)
+  // June 29 2026 -- prefer activated_at over freeze_date for
+  // the banner's "active since" timestamp. activated_at is
+  // the precise UTC ISO datetime from set_freeze_config;
+  // freeze_date is the calendar-day form and was occasionally
+  // written under a misclocked activation moment. Falls back
+  // to freeze_date if activated_at is missing (older freeze
+  // rows pre-PR-#494).
+  const freezeDateLabel = (
+    formatActivatedAt(status.activated_at)
+    ?? formatFreezeDate(status.freeze_date))
 
   if (variant === 'compact') {
     return (
