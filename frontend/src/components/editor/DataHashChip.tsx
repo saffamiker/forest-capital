@@ -87,7 +87,16 @@ export default function DataHashChip(
     freezeActive && freezeStatus?.freeze_hash
       ? freezeStatus.freeze_hash
       : liveHash)
-  const match = draftDataHash === comparisonHash
+  // June 29 2026 -- prefix-tolerant equality so legacy 8-char
+  // truncated draft hashes match against the 16-char freeze /
+  // live hash. Mirrors _hashesMatch in LiveDataHashBanner.
+  const _normA = (draftDataHash || "").toLowerCase()
+  const _normB = (comparisonHash || "").toLowerCase()
+  const _longer = _normA.length >= _normB.length ? _normA : _normB
+  const _shorter = _normA.length >= _normB.length ? _normB : _normA
+  const match = (
+    _normA === _normB
+    || (_shorter.length >= 4 && _longer.startsWith(_shorter)))
   if (match) {
     const label = freezeActive
       ? 'Current (freeze active)'
