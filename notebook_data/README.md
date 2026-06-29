@@ -106,6 +106,92 @@ trading-day-months (`days / 21`), not calendar months. The
 notebook's recovery cell computes both and shows the
 reconciliation explicitly.
 
+### `blend_oos_monthly_returns.csv` — 53 × 2
+
+Out-of-sample monthly return stream of the regime-conditional
+council blend, covering the 2022-01 → 2026-05 OOS window.
+Produced by running `out_of_sample_validation()` against the
+frozen `strategy_results.json` with a 2022-01-01 split. The
+HMM regime path comes from `tools/regime_detector.py` (fit on
+the `equity_return` column of `monthly_returns.csv`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `date` | ISO date (month-end) | 2022-01-31 → 2026-05-31 |
+| `return` | float | Blend monthly return (decimal) |
+
+### `regime_classification.csv` — 287 × 2
+
+HMM regime label for every month in the study period. Used by
+the notebook's regime-signals chart (Cell 7) to overlay
+posterior bands on the S&P 500 cumulative path.
+
+| Column | Type | Notes |
+|---|---|---|
+| `date` | ISO date (month-end) | 2002-07-31 → 2026-05-31 |
+| `regime_label` | enum | BULL / TRANSITION / BEAR |
+
+### `oos_summary.json`
+
+The headline OOS scalars sourced from the platform
+`academic_lock` cache (PR #490, locked at submission). Same
+HMM + OOS validation pipeline as the brief/appendix/deck so
+the four deliverables stay consistent.
+
+```json
+{
+  "oos_sharpe_blend":        0.90,
+  "oos_sharpe_benchmark":    0.49,
+  "oos_sharpe_classic_6040": 0.18,
+  "improvement_pct":         83.7,
+  "n_test_months":           53,
+  "oos_window_start":        "2022-01-31",
+  "oos_window_end":          "2026-05-31"
+}
+```
+
+## Regenerating the chart-data exports
+
+`scripts/export_notebook_chart_data.py` writes the three files
+above (`blend_oos_monthly_returns.csv`,
+`regime_classification.csv`, `oos_summary.json`) from the
+frozen inputs. Re-run when the freeze changes, or to refresh
+canonical values on Render.
+
+**hmmlearn requirement.** The HMM regime fit uses `hmmlearn`,
+which doesn't yet have Python 3.14 wheels. If running locally
+on 3.14, the script falls back to a deterministic 3-regime
+quantile classifier that approximates the count distribution
+(~55/196/36 vs canonical 58/191/38) but **does not reproduce
+the canonical OOS Sharpe values**. For final submission,
+regenerate on Render (Python 3.12, hmmlearn installed):
+
+```bash
+# On Render shell, from /opt/render/project/src
+python scripts/export_notebook_chart_data.py
+```
+
+The script's `oos_summary.json` carries the canonical academic-
+lock values whether hmmlearn is present or not; only the
+`regime_classification.csv` + `blend_oos_monthly_returns.csv`
+series shapes differ between local-fallback and canonical
+runs.
+
+## Running in Google Colab
+
+1. Open Google Colab (colab.research.google.com)
+2. Upload `analytical_appendix.ipynb`
+3. Upload the entire `notebook_data/` folder using the Files
+   panel (left sidebar) — the notebook expects the folder
+   alongside the .ipynb file
+4. Run all cells (Runtime → Run all)
+
+All figures and tables reproduce from the pre-exported data
+files. No platform access, API keys, or non-standard packages
+required. The notebook uses only the Colab-default stack:
+`pandas`, `numpy`, `matplotlib`, `scipy`, `json`, `pathlib`,
+`hashlib`.
+
 ## Reproducing the notebook
 
 The notebook runs on a standard Python scientific stack — no
