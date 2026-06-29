@@ -155,7 +155,11 @@ class TestEditorContentBuilders:
         structure (June 6) carried non-rubric "Five Human Decisions"
         and "Part II preview" sections; the rubric-aligned structure
         below replaces those entirely. The editor adapter must render
-        every section in order with the new keys."""
+        every section in order with the new keys.
+
+        June 28 2026 -- Section 6 'Visuals' removed (orphan from
+        June 26 spec removal); brief now ends at Section 5. Test
+        updated to pin five headings."""
         from tools.editor_content import executive_brief_to_editor
         cj, ct = executive_brief_to_editor({
             "executive_summary":     "Executive summary para.",
@@ -163,19 +167,20 @@ class TestEditorContentBuilders:
             "key_findings":          "Key findings para.",
             "limitations":           "Limitations para.",
             "final_recommendations": "Final recommendations para.",
-            "visuals":               "Visuals para.",
         })
         assert cj["type"] == "doc"
-        # Six H1 section headings -- matches the rubric six-section spec.
+        # Five H1 section headings -- Section 6 was an orphan
+        # and is removed from both the editor + the DOCX builder.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
-        assert len(headings) == 6
-        # The six section headings in rubric order.
+        assert len(headings) == 5
+        # The five section headings in rubric order.
         assert "1. Executive Summary" in ct
         assert "2. Methodology Overview" in ct
         assert "3. Key Findings and Insights" in ct
         assert "4. Limitations and Risks" in ct
         assert "5. Final Recommendations" in ct
-        assert "6. Visuals to Demonstrate the Insights" in ct
+        # Orphan Section 6 must NOT reappear.
+        assert "6. Visuals to Demonstrate the Insights" not in ct
         # No legacy [[BOB]] callouts.
         assert ct.count("[[BOB:") == 0
         assert "BOB --" not in ct

@@ -50,13 +50,14 @@ os.environ.setdefault(
 def test_brief_sections_in_required_order():
     from tools.editor_content import _EXEC_BRIEF_SECTIONS
     headings = [h for h, _key, _callout in _EXEC_BRIEF_SECTIONS]
+    # June 28 2026 -- Section 6 'Visuals' removed (orphan
+    # from June 26 spec removal, see editor_content.py).
     assert headings == [
         "1. Executive Summary",
         "2. Methodology Overview",
         "3. Key Findings and Insights",
         "4. Limitations and Risks",
         "5. Final Recommendations",
-        "6. Visuals to Demonstrate the Insights",
     ]
 
 
@@ -65,20 +66,25 @@ def test_brief_section_keys_match_narrative_contract():
     A drift here would silently leave a section showing [DATA PENDING]."""
     from tools.editor_content import _EXEC_BRIEF_SECTIONS
     keys = [key for _h, key, _c in _EXEC_BRIEF_SECTIONS]
+    # June 28 2026 -- 'visuals' key removed with Section 6.
     assert keys == [
         "executive_summary",
         "methodology",
         "key_findings",
         "limitations",
         "final_recommendations",
-        "visuals",
     ]
 
 
 # ── docx renderer reads the new keys ──────────────────────────────────────
 
 
-def test_build_executive_brief_renders_all_six_section_headings():
+def test_build_executive_brief_renders_all_five_section_headings():
+    """June 28 2026 -- renamed from 'six' to 'five' after the
+    Section 6 ('Visuals to Demonstrate the Insights') orphan
+    removal. The orphan heading + 'visuals' narrative key were
+    deleted from both _EXEC_BRIEF_SECTIONS and the DOCX
+    builder; this test pins the new five-section structure."""
     from tools.academic_docx import build_executive_brief
     data = {
         "study_period": {"start": "2002-07", "end": "2025-12",
@@ -95,23 +101,25 @@ def test_build_executive_brief_renders_all_six_section_headings():
         "key_findings":          "KEY_FINDINGS_PARAGRAPH",
         "limitations":           "LIMITATIONS_PARAGRAPH",
         "final_recommendations": "FINAL_RECOMMENDATIONS_PARAGRAPH",
-        "visuals":               "VISUALS_PARAGRAPH",
     }
     blob = build_executive_brief(data, narratives)
     import io
     import zipfile
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         doc_xml = zf.read("word/document.xml").decode("utf-8")
-    # Every section heading present.
+    # Every section heading present (1-5; Section 6 removed).
     for heading in (
         "1. Executive Summary",
         "2. Methodology Overview",
         "3. Key Findings and Insights",
         "4. Limitations and Risks",
         "5. Final Recommendations",
-        "6. Visuals to Demonstrate the Insights",
     ):
         assert heading in doc_xml, f"heading missing: {heading}"
+    # Orphan Section 6 must NOT reappear.
+    assert (
+        "6. Visuals to Demonstrate the Insights" not in doc_xml), (
+        "orphan Section 6 reappeared in the rendered DOCX")
     # Every narrative paragraph wired into its section.
     for token in (
         "EXECUTIVE_SUMMARY_PARAGRAPH",
@@ -119,17 +127,15 @@ def test_build_executive_brief_renders_all_six_section_headings():
         "KEY_FINDINGS_PARAGRAPH",
         "LIMITATIONS_PARAGRAPH",
         "FINAL_RECOMMENDATIONS_PARAGRAPH",
-        "VISUALS_PARAGRAPH",
     ):
         assert token in doc_xml, f"narrative token missing: {token}"
-    # Sections must appear in rubric order.
+    # Sections must appear in rubric order (1-5).
     idx = [doc_xml.index(h) for h in (
         "1. Executive Summary",
         "2. Methodology Overview",
         "3. Key Findings and Insights",
         "4. Limitations and Risks",
         "5. Final Recommendations",
-        "6. Visuals to Demonstrate the Insights",
     )]
     assert idx == sorted(idx), "Brief sections rendered out of order."
 

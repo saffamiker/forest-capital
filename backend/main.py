@@ -14300,7 +14300,16 @@ async def _editor_export(editor_draft_id: int) -> Response:
         # non-editor regen DOCX.
         brief_data = None
         brief_substitution_table: dict[str, str] | None = None
-        if draft.get("document_type") == "executive_brief":
+        # June 28 2026 -- the editor-export substitution table
+        # is needed for BOTH brief AND appendix documents.
+        # Appendix tokens like {{STUDY_START}}, {{STUDY_END}},
+        # {{REGIME_SWITCHING_SHARPE}} would otherwise render
+        # literally. Build the same full kwarg set when the
+        # draft is either type.
+        _needs_sub_table = (
+            draft.get("document_type")
+            in ("executive_brief", "analytical_appendix"))
+        if _needs_sub_table:
             from tools.academic_export import gather_document_data
             brief_data = await gather_document_data()
             # June 25 2026 -- build the substitution table so the
@@ -17759,12 +17768,14 @@ async def _generate_brief_document(
                  "Disclose the rebalancing frequency explicitly: the "
                  "platform evaluates the HMM regime monthly and "
                  "rebalances when any single strategy's blend weight "
-                 "crosses 2 percentage points. This deviates from a "
-                 "strict quarterly cadence; justify the deviation: "
-                 "monthly evaluation matches the cadence at which the "
-                 "HMM produces regime updates, and the 2 percentage "
-                 "points gate filters noise so the portfolio does not "
-                 "churn on marginal signal changes.\n\n"
+                 "crosses {{REBALANCE_THRESHOLD_PP}} percentage "
+                 "points. This deviates from a strict quarterly "
+                 "cadence; justify the deviation: monthly evaluation "
+                 "matches the cadence at which the HMM produces "
+                 "regime updates, and the "
+                 "{{REBALANCE_THRESHOLD_PP}} percentage points gate "
+                 "filters noise so the portfolio does not churn on "
+                 "marginal signal changes.\n\n"
                  "Second paragraph: name the validation layers in one "
                  "sentence each -- three-layer statistical audit, the "
                  "Carhart four-factor model (Carhart, 1997), the "
@@ -17773,10 +17784,21 @@ async def _generate_brief_document(
                  "play-by-play scorecard. Cite Ang and Bekaert (2002) "
                  "as the direct academic precedent for regime-"
                  "conditional asset allocation and Markowitz (1952) "
-                 "as the mean-variance basis for the static blend. "
+                 "as the mean-variance basis for the static blend "
+                 "({{CLASSIC_6040_WEIGHT_EQUITY}} equity / "
+                 "{{CLASSIC_6040_WEIGHT_BOND}} bonds). "
                  "Close by directing the reader to the Carhart factor-"
                  "loading table (embedded below Section 2) and the "
-                 "Analytical Appendix for the per-strategy detail."
+                 "Analytical Appendix for the per-strategy detail.\n\n"
+                 "IMPORTANT TOKEN HYGIENE: when you reference the "
+                 "Classic 60/40 static-blend weights, USE the "
+                 "canonical uppercase token names "
+                 "{{CLASSIC_6040_WEIGHT_EQUITY}} and "
+                 "{{CLASSIC_6040_WEIGHT_BOND}}. Do NOT invent "
+                 "lowercase variants like {{static_equity_weight_pct}} "
+                 "or {{static_bond_weight_pct}} -- those names are "
+                 "not in the substitution table and will render "
+                 "literally in the exported brief."
                  + _BRIEF_TONE_RULES),
              "context": {"study_period": data["study_period"]}},
             {"key": "key_findings", "available": avail, "pending": pending,
@@ -18434,7 +18456,8 @@ _APPENDIX_NARRATIVE_TASKS = {
     "appendix_d": (
         "Write a 100-130 word introduction to Section D: Bootstrap "
         "Confidence Intervals. Note the methodology: block bootstrap "
-        "of length 12 with 10,000 resamples and a fixed seed of 42, "
+        "of length {{BOOTSTRAP_BLOCK_LENGTH}} with 10,000 resamples "
+        "and a fixed seed of {{BOOTSTRAP_SEED}}, "
         "applied to the monthly excess-return series for every "
         "strategy. State that the table that follows reports each "
         "strategy's point Sharpe with its 95% CI, and whether the "

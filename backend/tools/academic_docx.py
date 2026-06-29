@@ -165,8 +165,16 @@ _MD_HEADING_LINE_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
 # Tolerates the bold-wrapped form "## **Section 1: ...**" and
 # the bold-only form "**Section 1: ...**" without a markdown
 # heading prefix.
+#
+# June 28 2026 -- extended to match LETTER section labels too
+# ("Section A:", "Section B:", "Section H:") so the appendix's
+# A-H section restates are also stripped. The original regex
+# only matched DIGITS (\d+), which covered the brief's 1-5
+# sections but missed every appendix section restate.
 _SECTION_RESTATE_RE = re.compile(
-    r"^(?:\*{0,2})\s*section\s*\d+\s*[:\-\.]",
+    r"^(?:\s*#{1,6}\s*)?(?:\*{0,2})\s*section\s*"
+    r"(?:\d+|[A-H])"
+    r"\s*[:\-\.]",
     re.IGNORECASE)
 
 # June 28 2026 (Fix 2) -- strip leading/trailing markdown bold
@@ -250,17 +258,36 @@ def _sort_apa_citations(citations: list[str]) -> list[str]:
     """Deduplicate + alphabetically sort citation lines by
     author last name (the first token before the comma).
     Comparison is case-insensitive; dedupe key is the
-    whitespace-normalised lowercased full line so trivial
-    formatting differences (extra spaces, trailing periods)
-    collapse to one entry."""
+    whitespace-normalised lowercased + markdown-stripped full
+    line so trivial formatting differences (extra spaces,
+    trailing periods, ** wrappers, italic underscores)
+    collapse to one entry.
+
+    June 28 2026 (Fix 2) -- the LLM emits the same citation in
+    both markdown-italic form (e.g. *Benjamin et al., 2018*)
+    AND plain form across different sections. Without stripping
+    the asterisks + underscores before dedupe-keying, both
+    forms hashed to different keys and survived as duplicates
+    in the consolidated References block."""
     seen: set[str] = set()
     unique: list[str] = []
     for c in citations:
-        key = re.sub(r"\s+", " ", c.lower().rstrip(". ")).strip()
+        # Strip markdown formatting (asterisks, underscores)
+        # from the key so a citation that appears in italic
+        # *...*  in one section + plain in another collapses
+        # to a single entry. Display form (passed through to
+        # `unique`) keeps whatever the FIRST occurrence had.
+        no_md = re.sub(r"[*_]+", "", c)
+        key = re.sub(
+            r"\s+", " ", no_md.lower().rstrip(". ")).strip()
         if not key or key in seen:
             continue
         seen.add(key)
-        unique.append(c.strip())
+        # Strip markdown wrappers off the DISPLAY form too so
+        # the consolidated References section renders clean
+        # plain-text APA citations regardless of which form
+        # the LLM emitted first.
+        unique.append(re.sub(r"[*_]+", "", c).strip())
 
     def _sort_key(line: str) -> str:
         m = _CITATION_LINE_RE.match(line)
@@ -903,16 +930,19 @@ def build_executive_brief(
         doc, narratives.get(
             "final_recommendations", "[DATA PENDING]"))
 
-    # Section 6 -- VISUALS. June 25 2026: section retains the prose
-    # summary describing what each chart shows so the rubric's
-    # Visuals section still has anchoring text, but the figure
-    # IMAGES are placed inline near the paragraphs that reference
-    # them (see _place_brief_figures_inline call below). Figures
-    # that don't match any inline trigger fall back to Section 6
-    # via the _embed_brief_figures(skip_keys=<inline-placed>) call.
-    _add_heading(doc, "6. Visuals to Demonstrate the Insights")
-    _add_brief_body(
-        doc, narratives.get("visuals", "[DATA PENDING]"))
+    # June 28 2026 (Fix 1) -- the Section 6 'Visuals to
+    # Demonstrate the Insights' heading + body emission was
+    # an orphan from the June 26 2026 spec removal: the
+    # brief_visuals agent was deleted from the generator's
+    # spec list (see main.py:17968-17976 comment) but this
+    # DOCX builder block was not removed. Result: every brief
+    # DOCX rendered with "[DATA PENDING]" under a Section 6
+    # heading the spec said should not exist. Brief now ends
+    # after Section 5; figures still place inline via
+    # _place_brief_figures_inline below, and any unplaced
+    # figure falls back via _embed_brief_figures (no Section 6
+    # heading needed for that fallback -- the figures stand on
+    # their own caption lines).
 
     # June 25 2026 -- post-prose paragraph-level figure placement.
     # All section prose is now in the doc; iterate paragraphs and
@@ -2189,7 +2219,21 @@ def build_analytical_appendix(
     _add_brief_body(doc, _narrative("appendix_f"))
     h, r = table_crisis_performance(data.get("crisis_performance"))
     _add_table(doc, "Table F1. Cumulative Return by Strategy and "
-                    "Crisis Window († indicates partial-overlap)", h, r)
+                    "Crisis Window", h, r)
+    # June 28 2026 -- explicit footnote explaining the dagger
+    # symbol on partial-overlap cells (the title-parenthetical
+    # form was too easy to miss; operator reported every cell
+    # carrying † with no visible explanation).
+    _footnote = doc.add_paragraph()
+    _footnote_run = _footnote.add_run(
+        "Note. † indicates partial-overlap of the strategy's "
+        "available return history with the crisis window. "
+        "Strategies that began trading after a crisis window "
+        "opened, or had data gaps within the window, are "
+        "flagged so the cumulative-return figure is read with "
+        "that context.")
+    _footnote_run.italic = True
+    _footnote_run.font.size = Pt(9)
 
     # ── Section G — Transaction Cost Sensitivity ──────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[6])
