@@ -121,14 +121,9 @@ function _classifyRow(
 ): HashRowStatus {
   if (!hasDraft) return 'no_draft'
   if (!draftHash) return 'no_hash'
-  // June 27 2026 (Task 2) -- under freeze, compare against the
-  // freeze hash, not the live hash. Without this, drafts that
-  // CORRECTLY carry the freeze hash were flagged 'stale' against
-  // the live hash, producing the misleading "N documents have
-  // stale data" warning + amber "Stale" pill.
-  // June 29 2026 -- prefix-tolerant equality so a legacy 8-char
-  // truncated draft hash matches against the 16-char freeze /
-  // live hash. Mirrors _hashesMatch in LiveDataHashBanner.
+  // Prefix-tolerant equality so a legacy 8-char truncated
+  // draft hash matches against the 16-char freeze / live
+  // hash. Mirrors _hashesMatch in LiveDataHashBanner.
   const _match = (a: string, b: string): boolean => {
     if (!a || !b) return false
     const al = a.toLowerCase()
@@ -139,16 +134,34 @@ function _classifyRow(
     if (shorter.length < 4) return false
     return longer.startsWith(shorter)
   }
-  if (freezeStatus?.freeze_active && freezeStatus.freeze_hash) {
-    if (_match(draftHash, freezeStatus.freeze_hash))
-      return 'current_frozen'
-    // A draft NOT matching the freeze hash IS genuinely stale --
-    // it was generated under the live hash and needs a regen
-    // against the frozen cache. Keep the 'stale' classification.
-    return 'stale'
-  }
+  // June 29 2026 (addendum) -- LIVE-first comparison. The
+  // Light Refresh panel is about sync with the LIVE analytics
+  // cache, NOT with the submission freeze. A draft whose
+  // data_hash matches the live hash is 'current' regardless
+  // of whether a freeze is active -- the freeze affects
+  // document generation, not the analytics cache the panel
+  // is measuring drift against. Prior logic (June 27 2026,
+  // Task 2) flipped this: under freeze it compared against
+  // the freeze hash and flagged drafts on the live hash as
+  // 'stale'. The operator's draft-79 scenario (Draft Hash =
+  // Live Hash = d0b1339e; Freeze Hash = c421fb89) demonstrated
+  // the bug: the panel reported "drifted from freeze hash"
+  // for a draft already in sync with live.
+  //
+  // Order:
+  //   1. Draft matches LIVE -> 'current' (regardless of
+  //      freeze state)
+  //   2. Under freeze, draft matches FREEZE hash but NOT
+  //      live -> 'current_frozen' (the freeze case the prior
+  //      fix legitimately introduced; a draft anchored to the
+  //      freeze cache while live has drifted is correctly
+  //      'frozen + valid')
+  //   3. Otherwise -> 'stale'
+  if (liveHash && _match(draftHash, liveHash)) return 'current'
+  if (freezeStatus?.freeze_active && freezeStatus.freeze_hash
+      && _match(draftHash, freezeStatus.freeze_hash))
+    return 'current_frozen'
   if (!liveHash) return 'no_hash'
-  if (_match(draftHash, liveHash)) return 'current'
   return 'stale'
 }
 
@@ -672,11 +685,18 @@ function StaleSummaryCallout(
   // the legacy copy applies. Either way the user-facing
   // problem is the same: drafts don't match the comparison
   // hash and a regen-against-cache pass is needed.
-  const summaryText = freezeActive
-    ? `${staleCount} document(s) have drifted from the freeze `
-      + 'hash. Regenerate to lock them to the freeze cache.'
-    : `${staleCount} document(s) have stale data. Run Light `
-      + 'Refresh to update all drafts to the current hash.'
+  // June 29 2026 (addendum) -- copy aligned with the LIVE-
+  // first comparison in _classifyRow. The Light Refresh panel
+  // measures drift against the LIVE analytics cache; drafts
+  // anchored to the freeze hash but NOT the live hash are
+  // 'current_frozen' (counted separately as
+  // frozenCurrentCount, not in staleCount). When staleCount
+  // > 0 the warning is the same regardless of freeze state:
+  // these drafts differ from both live AND freeze; Light
+  // Refresh updates them to live.
+  const summaryText =
+    `${staleCount} document(s) have stale data. Run Light `
+    + 'Refresh to update all drafts to the current hash.'
   return (
     <div
       data-testid="stale-summary-callout-stale"
