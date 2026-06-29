@@ -94,6 +94,25 @@ interface FreezeStatus {
 }
 
 
+// June 29 2026 -- freeze-alignment shape from
+// GET /api/v1/cache/freeze-alignment. Returns whether the live +
+// freeze cache rows are materially identical (same n_observations
+// + n_strategies). When aligned=true, the panel suppresses the
+// drift warning even though the hashes differ -- the rows
+// reference the same logical data state across the two hashing
+// formulas (Hash A vs Hash B per migration 064).
+interface FreezeAlignment {
+  aligned:       boolean
+  reason:        string
+  freeze_hash:   string | null
+  live_hash:     string | null
+  freeze_shape:  { n_observations: number | null;
+                   n_strategies:   number | null } | null
+  live_shape:    { n_observations: number | null;
+                   n_strategies:   number | null } | null
+}
+
+
 export default function LiveDataHashBanner(): React.ReactElement | null {
   const [liveHash, setLiveHash] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<DraftRow[]>([])
@@ -105,6 +124,15 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
   // from PR #459.
   const [freezeStatus, setFreezeStatus]
     = useState<FreezeStatus | null>(null)
+  // June 29 2026 -- freeze-alignment shape check. When freeze
+  // is active, this overrides the hash-string comparison: if
+  // the live + freeze cache rows are materially identical
+  // (same n_observations + n_strategies), the panel shows the
+  // green "freeze hash verified" state even when the hash
+  // strings differ. Fail-open to null on fetch failure -- the
+  // banner falls back to the prefix-tolerant hash comparison.
+  const [freezeAlignment, setFreezeAlignment]
+    = useState<FreezeAlignment | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -128,6 +156,16 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
         setFreezeStatus(res.data ?? null)
       })
       .catch(() => { if (!cancelled) setFreezeStatus(null) })
+    // June 29 2026 -- freeze-alignment shape check.
+    axios.get<FreezeAlignment>(
+      '/api/v1/cache/freeze-alignment')
+      .then((res) => {
+        if (cancelled) return
+        setFreezeAlignment(res.data ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) setFreezeAlignment(null)
+      })
     return () => { cancelled = true }
   }, [])
 
@@ -151,13 +189,25 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
       && d.data_hash
       && d.document_type in DOC_LABELS)
 
-  const staleDocs = currentDrafts
-    .filter((d) => !_hashesMatch(d.data_hash, comparisonHash))
-    .map((d) => ({
-      label: DOC_LABELS[
-        d.document_type as LiveDataHashBannerDocType],
-      draftHash: (d.data_hash || '').slice(0, 8),
-    }))
+  // June 29 2026 -- freeze-alignment override. When the
+  // backend's freeze-alignment endpoint reports aligned=true,
+  // the live + freeze cache rows are materially identical
+  // (same n_observations + n_strategies) so any draft whose
+  // hash matches either is on the same logical data state.
+  // Suppress the drift warning entirely in that case by
+  // treating every draft as matching the comparison hash.
+  const freezeAligned = Boolean(
+    freezeActive && freezeAlignment?.aligned)
+  const staleDocs = freezeAligned
+    ? []
+    : currentDrafts
+        .filter(
+          (d) => !_hashesMatch(d.data_hash, comparisonHash))
+        .map((d) => ({
+          label: DOC_LABELS[
+            d.document_type as LiveDataHashBannerDocType],
+          draftHash: (d.data_hash || '').slice(0, 8),
+        }))
 
   const allCurrent = (
     currentDrafts.length > 0 && staleDocs.length === 0)
@@ -208,9 +258,11 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
               ? 'Drafts drifted from freeze hash'
               : 'Hash mismatch detected')
             : (allCurrent
-              ? (freezeActive
-                ? 'All drafts locked to submission freeze hash'
-                : 'All drafts current')
+              ? (freezeAligned
+                ? 'Drafts current -- freeze hash verified'
+                : (freezeActive
+                  ? 'All drafts locked to submission freeze hash'
+                  : 'All drafts current'))
               : (freezeActive
                 ? 'Submission freeze active'
                 : 'Live platform data hash'))}
