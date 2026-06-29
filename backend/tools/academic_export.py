@@ -388,15 +388,25 @@ async def gather_document_data(
                 CURRENT_EQUITY_WEIGHT, CURRENT_REGIME,
                 MAX_DRAWDOWN_BENCHMARK,
                 MAX_DRAWDOWN_REGIME_CONDITIONAL,
-                OOS_SHARPE_BENCHMARK, OOS_SHARPE_EQUAL_WEIGHT,
-                OOS_SHARPE_REGIME_CONDITIONAL,
+                OOS_SHARPE_EQUAL_WEIGHT,
                 OOS_WINDOW_MONTHS, OOS_WINDOW_PCT_OF_STUDY,
                 PLAY_BY_PLAY_ADD_VALUE, PLAY_BY_PLAY_EVENTS,
             )
+            # Fix A (June 29 2026, rounding-consistency PR) --
+            # OOS Sharpe pair + classic_60_40 sourced from the
+            # frozen academic_lock cache row. Cold-cache
+            # fallback inside get_academic_lock() returns the
+            # academic_deck.py constants so document generation
+            # never breaks before the first refresh fires.
+            from tools.play_by_play import get_academic_lock
+            _lock = await get_academic_lock()
             validated_constants = {
                 "oos_sharpe_regime_conditional":
-                    OOS_SHARPE_REGIME_CONDITIONAL,
-                "oos_sharpe_benchmark":      OOS_SHARPE_BENCHMARK,
+                    _lock["oos_sharpe_blend"],
+                "oos_sharpe_benchmark":
+                    _lock["oos_sharpe_benchmark"],
+                "oos_sharpe_classic_6040":
+                    _lock["oos_sharpe_classic_6040"],
                 "oos_sharpe_equal_weight":   OOS_SHARPE_EQUAL_WEIGHT,
                 "correlation_pre_2022":      CORRELATION_PRE_2022,
                 "correlation_post_2022":     CORRELATION_POST_2022,
