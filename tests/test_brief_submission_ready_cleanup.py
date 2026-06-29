@@ -142,3 +142,124 @@ class TestRebalanceThresholdToken:
         # Prompt now uses the token; bare "2 percentage" was
         # the prior form.
         assert "{{REBALANCE_THRESHOLD_PP}}" in slice_
+
+
+# ── Appendix Fix 1: section restate strip covers letters ────
+
+
+class TestSectionRestateLetters:
+
+    def test_section_letter_b_matches(self):
+        from tools.academic_docx import _SECTION_RESTATE_RE
+        for text in [
+            "Section B: Full Strategy Performance",
+            "Section C: Statistical Tests",
+            "Section E: Factor Loadings",
+            "Section H: Validation Audit Summary",
+            "**Section B: Bootstrap CI**",
+            "## Section D: Cross-strategy comparison",
+            "section a -- intro",
+        ]:
+            assert _SECTION_RESTATE_RE.match(text), (
+                f"failed to match: {text!r}")
+
+    def test_section_digit_still_matches(self):
+        from tools.academic_docx import _SECTION_RESTATE_RE
+        for text in [
+            "Section 1: Executive Summary",
+            "**Section 3: Key Findings**",
+        ]:
+            assert _SECTION_RESTATE_RE.match(text)
+
+    def test_non_section_still_skipped(self):
+        from tools.academic_docx import _SECTION_RESTATE_RE
+        for text in [
+            "Executive Summary",
+            "1. Executive Summary",
+            "This section explores 5 strategies",
+        ]:
+            assert not _SECTION_RESTATE_RE.match(text)
+
+
+# ── Appendix Fix 2: editor-export sub_table for appendix ────
+
+
+class TestAppendixEditorExportSubTable:
+
+    def test_substitution_table_built_for_appendix_too(self):
+        """Source-pin: _editor_export gate builds the
+        substitution table for executive_brief OR
+        analytical_appendix (was brief-only)."""
+        import main as _main
+        with open(
+                _main.__file__, encoding="utf-8") as f:
+            src = f.read()
+        # Look for the gate that includes both types.
+        assert (
+            '("executive_brief", "analytical_appendix")'
+            in src) or (
+            "_needs_sub_table" in src)
+
+
+# ── Appendix Fix 3: bootstrap tokens + prompt ──────────────
+
+
+class TestBootstrapMethodologyTokens:
+
+    def test_block_length_token_resolves(self):
+        from tools.numeric_substitution import (
+            get_substitution_table,
+        )
+        t = get_substitution_table(
+            "test_boot_001", {}, None, hash_verified=True)
+        assert t.get("{{BOOTSTRAP_BLOCK_LENGTH}}") == "12"
+        assert t.get("{{BOOTSTRAP_SEED}}") == "42"
+
+    def test_tokens_in_catalog(self):
+        from tools.data_reference_catalog import CATALOG
+        tokens = set()
+        for _ck, _cl, entries in CATALOG:
+            for e in entries:
+                tokens.add(e.token)
+        assert "{{BOOTSTRAP_BLOCK_LENGTH}}" in tokens
+        assert "{{BOOTSTRAP_SEED}}" in tokens
+
+    def test_appendix_d_prompt_uses_tokens(self):
+        import main as _main
+        with open(
+                _main.__file__, encoding="utf-8") as f:
+            src = f.read()
+        idx = src.find('"appendix_d"')
+        assert idx > -1
+        slice_ = src[idx:idx + 1200]
+        assert "{{BOOTSTRAP_BLOCK_LENGTH}}" in slice_
+        assert "{{BOOTSTRAP_SEED}}" in slice_
+
+
+# ── Appendix Fix 4: crisis table footnote ──────────────────
+
+
+class TestCrisisTableDaggerFootnote:
+
+    def test_explicit_footnote_paragraph_after_table(self):
+        """Source-pin: an italic Note. paragraph explaining †
+        is added after Table F1. Replaces the
+        title-parenthetical form that the operator reported as
+        too easy to miss."""
+        from tools.academic_docx import (
+            build_analytical_appendix,
+        )
+        src = inspect.getsource(build_analytical_appendix)
+        assert "Note. † indicates partial-overlap" in src
+
+    def test_title_no_longer_carries_dagger_parenthetical(
+            self):
+        from tools.academic_docx import (
+            build_analytical_appendix,
+        )
+        src = inspect.getsource(build_analytical_appendix)
+        assert (
+            "Crisis Window († indicates partial-overlap)"
+            not in src), (
+            "title-parenthetical form not removed; footnote "
+            "explanation should be the only dagger doc")

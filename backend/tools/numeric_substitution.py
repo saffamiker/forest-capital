@@ -673,6 +673,15 @@ def build_substitution_table(
         # token form keeps the value out of the hard-lock's
         # untoken-numeric flag list.
         "{{REBALANCE_THRESHOLD_PP}}": "2",
+
+        # June 28 2026 -- bootstrap methodology constants for
+        # the analytical_appendix Section D (Bootstrap CI on
+        # Sharpe). Block-bootstrap length matches the monthly
+        # study cadence x 1 year; random seed is fixed so the
+        # CI is reproducible. By-construction methodology
+        # constants -- not data-derived.
+        "{{BOOTSTRAP_BLOCK_LENGTH}}": "12",
+        "{{BOOTSTRAP_SEED}}":         "42",
     }
 
     # ── Deck-specific tokens (Layer 2, June 21 2026) ────────────────────

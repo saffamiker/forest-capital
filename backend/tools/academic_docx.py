@@ -165,8 +165,16 @@ _MD_HEADING_LINE_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
 # Tolerates the bold-wrapped form "## **Section 1: ...**" and
 # the bold-only form "**Section 1: ...**" without a markdown
 # heading prefix.
+#
+# June 28 2026 -- extended to match LETTER section labels too
+# ("Section A:", "Section B:", "Section H:") so the appendix's
+# A-H section restates are also stripped. The original regex
+# only matched DIGITS (\d+), which covered the brief's 1-5
+# sections but missed every appendix section restate.
 _SECTION_RESTATE_RE = re.compile(
-    r"^(?:\*{0,2})\s*section\s*\d+\s*[:\-\.]",
+    r"^(?:\s*#{1,6}\s*)?(?:\*{0,2})\s*section\s*"
+    r"(?:\d+|[A-H])"
+    r"\s*[:\-\.]",
     re.IGNORECASE)
 
 # June 28 2026 (Fix 2) -- strip leading/trailing markdown bold
@@ -2211,7 +2219,21 @@ def build_analytical_appendix(
     _add_brief_body(doc, _narrative("appendix_f"))
     h, r = table_crisis_performance(data.get("crisis_performance"))
     _add_table(doc, "Table F1. Cumulative Return by Strategy and "
-                    "Crisis Window († indicates partial-overlap)", h, r)
+                    "Crisis Window", h, r)
+    # June 28 2026 -- explicit footnote explaining the dagger
+    # symbol on partial-overlap cells (the title-parenthetical
+    # form was too easy to miss; operator reported every cell
+    # carrying † with no visible explanation).
+    _footnote = doc.add_paragraph()
+    _footnote_run = _footnote.add_run(
+        "Note. † indicates partial-overlap of the strategy's "
+        "available return history with the crisis window. "
+        "Strategies that began trading after a crisis window "
+        "opened, or had data gaps within the window, are "
+        "flagged so the cumulative-return figure is read with "
+        "that context.")
+    _footnote_run.italic = True
+    _footnote_run.font.size = Pt(9)
 
     # ── Section G — Transaction Cost Sensitivity ──────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[6])

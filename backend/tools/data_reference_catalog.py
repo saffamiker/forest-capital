@@ -576,6 +576,38 @@ LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
         "defended": "Platform methodology",
         "locked_value": "2",
     },
+
+    # ── Bootstrap constants (June 28 2026) ──────────────────
+    # Appendix Section D (Bootstrap CI on Sharpe) reports the
+    # block bootstrap length + the RNG seed for
+    # reproducibility. Both are definitional methodology
+    # constants, not data-derived.
+    "constant 12 (block-bootstrap methodology)": {
+        "lock_date": "Methodology constant (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional methodology constant: the analytical "
+            "appendix Section D reports 95% confidence "
+            "intervals on Sharpe via a moving-block bootstrap "
+            "with block length = 12 months. Matches the study's "
+            "monthly cadence x 1 year so the resampled series "
+            "preserve annual autocorrelation structure."),
+        "defended": "Statistical methodology",
+        "locked_value": "12",
+    },
+    "constant 42 (bootstrap RNG seed)": {
+        "lock_date": "Methodology constant (immutable)",
+        "dataset_end": "n/a (not cache-derived)",
+        "method": (
+            "Definitional methodology constant: the analytical "
+            "appendix Section D fixes the bootstrap RNG seed at "
+            "42 so the confidence intervals are reproducible "
+            "across re-runs of the appendix. Standard Python / "
+            "NumPy convention for a fixed seed in published "
+            "reproducibility statements."),
+        "defended": "Statistical methodology",
+        "locked_value": "42",
+    },
 }
 
 
@@ -930,6 +962,22 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
                 "constant 2 (methodology rebalance gate)"),
             is_locked=True,
             document_locations=(_BRIEF_S2, _APP_B)),
+        # June 28 2026 -- bootstrap methodology constants
+        # used by analytical_appendix Section D.
+        TokenEntry(
+            token="{{BOOTSTRAP_BLOCK_LENGTH}}",
+            label="Block-bootstrap length (months)",
+            source=(
+                "constant 12 (block-bootstrap methodology)"),
+            is_locked=True,
+            document_locations=(_APP_D,)),
+        TokenEntry(
+            token="{{BOOTSTRAP_SEED}}",
+            label="Bootstrap random seed",
+            source=(
+                "constant 42 (bootstrap RNG seed)"),
+            is_locked=True,
+            document_locations=(_APP_D,)),
     )),
 
     # ── Correlation regime -------------------------------------------

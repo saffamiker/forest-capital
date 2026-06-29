@@ -14300,7 +14300,16 @@ async def _editor_export(editor_draft_id: int) -> Response:
         # non-editor regen DOCX.
         brief_data = None
         brief_substitution_table: dict[str, str] | None = None
-        if draft.get("document_type") == "executive_brief":
+        # June 28 2026 -- the editor-export substitution table
+        # is needed for BOTH brief AND appendix documents.
+        # Appendix tokens like {{STUDY_START}}, {{STUDY_END}},
+        # {{REGIME_SWITCHING_SHARPE}} would otherwise render
+        # literally. Build the same full kwarg set when the
+        # draft is either type.
+        _needs_sub_table = (
+            draft.get("document_type")
+            in ("executive_brief", "analytical_appendix"))
+        if _needs_sub_table:
             from tools.academic_export import gather_document_data
             brief_data = await gather_document_data()
             # June 25 2026 -- build the substitution table so the
@@ -18447,7 +18456,8 @@ _APPENDIX_NARRATIVE_TASKS = {
     "appendix_d": (
         "Write a 100-130 word introduction to Section D: Bootstrap "
         "Confidence Intervals. Note the methodology: block bootstrap "
-        "of length 12 with 10,000 resamples and a fixed seed of 42, "
+        "of length {{BOOTSTRAP_BLOCK_LENGTH}} with 10,000 resamples "
+        "and a fixed seed of {{BOOTSTRAP_SEED}}, "
         "applied to the monthly excess-return series for every "
         "strategy. State that the table that follows reports each "
         "strategy's point Sharpe with its 95% CI, and whether the "
