@@ -330,12 +330,12 @@ export default function PerformanceRecord() {
       {/*
         Two figures coexist by design:
 
-          ACADEMIC SUBMISSION  (Dec 2025 data lock — frozen). The
-            figures Bob and Molly defend in the cohort peer review
-            (June 3) and on the July 1 panel. These are NEVER
-            replaced by the live figures in the executive brief or
-            the final presentation — the locked dataset is the
-            submitted record.
+          ACADEMIC SUBMISSION (submission freeze record — frozen).
+            The figures Bob and Molly defend in the cohort peer
+            review (June 3) and on the July 1 panel. These are
+            NEVER replaced by the live figures in the executive
+            brief or the final presentation — the locked dataset
+            is the submitted record.
           LIVE PERFORMANCE  (extends through the most recent month
             available). Shown alongside so the platform reflects
             ongoing reality without overwriting the submitted
@@ -356,14 +356,14 @@ export default function PerformanceRecord() {
                     metricLabel="Post-2022 Sharpe ratio" size="md" />
         </div>
 
-        {/* Row 1 — academic submission (locked Dec 2025). */}
+        {/* Row 1 — academic submission (submission freeze record). */}
         <div className="mb-2 flex items-center gap-2">
           <div className="text-2xs font-semibold text-amber-300
                           uppercase tracking-wide">
             Academic Submission
           </div>
           <div className="text-2xs text-slate-400">
-            (locked December 2025 — defended Jun 3 + Jul 1)
+            (submission freeze record — defended Jun 3 + Jul 1)
           </div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -442,7 +442,7 @@ export default function PerformanceRecord() {
           basis across the 40-month post-2022 out-of-sample period.
           Outperformance is driven by systematic regime weighting,
           not shock prediction. The submitted figures are the
-          December 2025 data lock; the live figures are shown
+          locked submission record; the live figures are shown
           alongside so the platform reflects ongoing performance, but
           are <strong className="text-slate-300">not used in the
           executive brief or final presentation</strong> — the

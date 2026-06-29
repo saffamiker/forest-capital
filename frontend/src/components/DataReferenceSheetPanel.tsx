@@ -379,7 +379,7 @@ const SCOPE_CHIP_STYLES: Record<SubmissionScope, {
     className: ('inline-flex items-center gap-1 px-1.5 py-0.5 '
       + 'rounded text-2xs font-medium bg-success/15 '
       + 'border border-success/40 text-success'),
-    title: 'In scope -- locked to Dec 2025 freeze hash.',
+    title: 'In scope -- locked to submission freeze hash.',
   },
   IN_SCOPE_CONSTANT: {
     label: 'CONSTANT',
@@ -457,8 +457,8 @@ function SubmissionScopeHeader({
               {freezeHash.slice(0, 8)}
             </code>. Strategy performance figures (Sharpe,
             drawdown, recovery, factor loadings, cost sensitivity)
-            are locked to December 2025 market data. Live regime
-            signal and watchpoint tokens are intentionally
+            are locked to the submission freeze record. Live
+            regime signal and watchpoint tokens are intentionally
             current. Study period (287 months through May 2026)
             reflects the full dataset used in the analysis.
           </span>

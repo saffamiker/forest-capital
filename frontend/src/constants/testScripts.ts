@@ -694,7 +694,7 @@ const michael: TestScript = {
       title: 'Expected red staleness pills',
       instruction: 'Find market_data_monthly and ff_factors_monthly.',
       expectedResult: 'Both show a red staleness pill — expected, the '
-        + 'dataset is locked at December 2025.',
+        + 'dataset is at the submission freeze record.',
       allowSkip: true,
     },
     {

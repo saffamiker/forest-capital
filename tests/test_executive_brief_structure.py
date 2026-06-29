@@ -302,8 +302,8 @@ def test_final_recommendations_requires_locked_vs_live_framing():
     assert "BEFORE the regime reading" in source
     # Key phrases from the required framing sentence.
     assert ("analytical performance figures throughout this "
-            "brief reflect the December 2025 academic submission "
-            "record") in source
+            "brief reflect the academic submission record "
+            "(locked at the submission freeze hash)") in source
     assert ("live platform readings at the time of generation"
             in source)
     # The rationale -- two layered states -- is in the spec so
