@@ -48,14 +48,24 @@ class TestSubmissionScopeFilter:
             "BENCHMARK", "CLASSIC_60_40", "REGIME_SWITCHING"}
 
     def test_filter_list_rows_by_strategy_field(self):
+        """June 29 2026 (Table-A1 fix) -- summary_statistics is
+        no longer in the filter loop. Its rows are asset-keyed
+        (EQUITY / IG / HY / BENCHMARK) rather than strategy-
+        keyed; the prior filter discarded every row because
+        _is_in() returned False on the missing 'strategy' /
+        'strategy_name' field. The four asset-level rows are
+        intrinsically in scope so no filtering is needed. Test
+        updated to verify summary_statistics passes through
+        unchanged (3 rows in, 3 rows out) and factor_loadings
+        is still filtered correctly."""
         from tools.academic_export import (
             _filter_to_submission_scope,
         )
         bundle = {
             "summary_statistics": [
-                {"strategy": "BENCHMARK", "x": 1},
-                {"strategy": "MIN_VARIANCE", "x": 2},
-                {"strategy": "CLASSIC_60_40", "x": 3},
+                {"asset": "EQUITY", "x": 1},
+                {"asset": "IG", "x": 2},
+                {"asset": "HY", "x": 3},
             ],
             "factor_loadings": [
                 {"strategy": "REGIME_SWITCHING", "alpha": 1.2},
@@ -63,8 +73,10 @@ class TestSubmissionScopeFilter:
             ],
         }
         out = _filter_to_submission_scope(bundle)
+        # summary_statistics passes through unchanged.
         assert [r["x"] for r in out["summary_statistics"]] == (
-            [1, 3])
+            [1, 2, 3])
+        # factor_loadings is still filtered.
         assert [r["alpha"] for r in out["factor_loadings"]] == (
             [1.2])
 
@@ -150,10 +162,14 @@ class TestStoryPlanVersionBump:
         assert out == f"brief_v{STORY_PLAN_VERSION}"
 
     def test_cache_read_uses_versioned_key(self):
-        """Source-pin: get_cached_story_plan binds the version-
-        suffixed document_type when querying."""
-        from tools.story_plan import get_cached_story_plan
-        src = inspect.getsource(get_cached_story_plan)
+        """Source-pin: the cache read binds the version-suffixed
+        document_type when querying. June 29 2026 -- the SQL was
+        extracted from get_cached_story_plan into the inner
+        helper _read_story_plan_row (PR #502 freeze-hash
+        fallback refactor); the test now pins the helper's
+        source instead of the public wrapper."""
+        from tools.story_plan import _read_story_plan_row
+        src = inspect.getsource(_read_story_plan_row)
         assert "_versioned_document_type(document_type)" in src
 
     def test_cache_write_uses_versioned_key(self):
