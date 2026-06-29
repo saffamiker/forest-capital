@@ -1805,12 +1805,12 @@ def generate_brief_section_plan(
 # ── Persistence + cache reader ──────────────────────────────────────────
 
 
-async def get_cached_story_plan(
+async def _read_story_plan_row(
     data_hash: str, document_type: str,
 ) -> dict[str, Any] | None:
-    """Read the cached story plan for (data_hash, document_type).
-    Returns the plan dict on cache hit, None on cold cache or DB
-    unavailable. Fail-open."""
+    """Inner SQL read for (data_hash, document_type). Returns the
+    plan dict on hit, None on miss. No fallback logic -- the public
+    get_cached_story_plan wraps this with the freeze-hash fallback."""
     if not _DB_AVAILABLE or not data_hash:
         return None
     try:
@@ -1842,6 +1842,57 @@ async def get_cached_story_plan(
     except Exception as exc:  # noqa: BLE001
         log.warning("story_plan_read_error", error=str(exc))
         return None
+
+
+async def get_cached_story_plan(
+    data_hash: str, document_type: str,
+) -> dict[str, Any] | None:
+    """Read the cached story plan for (data_hash, document_type).
+    Returns the plan dict on cache hit, None on cold cache or DB
+    unavailable. Fail-open.
+
+    June 29 2026 -- freeze-hash fallback (substitution-fallback PR).
+    When the lookup for `data_hash` misses AND submission_freeze
+    is active, retries with the freeze hash from platform_config
+    BEFORE returning None. The draft-88 scenario triggered the
+    fallback: the brief story plan was persisted under the freeze
+    hash (c421fb89...) but the draft's data_hash (d0b1339e...)
+    differed, so the generation pipeline saw no plan and the LLM
+    emitted out-of-scope strategy tokens. Logs
+    'story_plan_fallback_to_freeze_hash' on fallback hit so the
+    audit can spot which generations routed through it."""
+    primary = await _read_story_plan_row(data_hash, document_type)
+    if primary is not None:
+        return primary
+    if not data_hash:
+        return None
+    # Freeze-hash fallback. Only fires when the freeze is ACTIVE
+    # + the active freeze_hash differs from the bare data_hash
+    # passed in (preventing a redundant retry against the same key).
+    try:
+        from tools.submission_freeze import get_freeze_config
+        cfg = await get_freeze_config()
+        freeze_hash = (
+            cfg.get("freeze_hash")
+            if isinstance(cfg, dict)
+            and cfg.get("active")
+            else None)
+        if not freeze_hash or freeze_hash == data_hash:
+            return None
+        fallback = await _read_story_plan_row(
+            freeze_hash, document_type)
+        if fallback is not None:
+            log.warning(
+                "story_plan_fallback_to_freeze_hash",
+                document_type=document_type,
+                live_hash=data_hash[:8],
+                freeze_hash=freeze_hash[:8])
+            return fallback
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "story_plan_freeze_fallback_error",
+            error=str(exc))
+    return None
 
 
 async def get_latest_story_plan(

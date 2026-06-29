@@ -91,10 +91,65 @@ async def load_substitution_metric_sources(
             get_latest_metric, get_metric,
         )
 
+        # June 29 2026 -- freeze-hash fallback. When data_hash is
+        # supplied but the analytics_metrics_cache has no row keyed
+        # to that hash (the draft-88 scenario: draft generated
+        # against the post-freeze live cache rebuild that left no
+        # academic_analytics / oos_cost_sensitivity rows behind
+        # for d0b1339e), fall back to the active submission freeze
+        # hash. Without the fallback, substitution tokens silently
+        # resolved to em-dashes for every metric-cache-sourced
+        # value (regime_conditional, factor_loadings, cost
+        # sensitivity, crisis windows).
+        #
+        # Read order:
+        #   1. get_metric(data_hash, kind)   -- the draft's hash
+        #   2. get_metric(freeze_hash, kind) -- when (1) is None
+        #      AND submission_freeze is active. Logs
+        #      'substitution_metric_fallback_to_freeze_hash'
+        #      so the audit can spot which tokens routed through
+        #      the fallback path.
+        #   3. None                           -- when both lookups
+        #      miss (cold cache). Caller renders em-dashes.
+        # When data_hash is None (legacy live-platform callers),
+        # the existing get_latest_metric path applies unchanged.
+        _freeze_hash_cached: list = []   # one-shot cache, captured lazily
+        async def _get_freeze_hash() -> str | None:
+            if _freeze_hash_cached:
+                return _freeze_hash_cached[0]
+            try:
+                from tools.submission_freeze import get_freeze_config
+                _cfg = await get_freeze_config()
+                _h = (
+                    _cfg.get("freeze_hash")
+                    if isinstance(_cfg, dict)
+                    and _cfg.get("active")
+                    else None)
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "substitution_freeze_hash_read_failed",
+                    error=str(_exc))
+                _h = None
+            _freeze_hash_cached.append(_h)
+            return _h
+
         async def _read(kind: str) -> Any:
-            if data_hash:
-                return await get_metric(data_hash, kind)
-            return await get_latest_metric(kind)
+            if not data_hash:
+                return await get_latest_metric(kind)
+            primary = await get_metric(data_hash, kind)
+            if primary is not None:
+                return primary
+            freeze_hash = await _get_freeze_hash()
+            if freeze_hash and freeze_hash != data_hash:
+                fallback = await get_metric(freeze_hash, kind)
+                if fallback is not None:
+                    log.warning(
+                        "substitution_metric_fallback_to_freeze_hash",
+                        metric_kind=kind,
+                        draft_hash=data_hash[:8] if data_hash else None,
+                        freeze_hash=freeze_hash[:8])
+                    return fallback
+            return None
 
         aa = await _read("academic_analytics")
         if isinstance(aa, dict):
