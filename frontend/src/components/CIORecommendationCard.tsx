@@ -14,6 +14,7 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import { ChevronDown, ChevronRight, Loader2, AlertTriangle, MessageSquare } from 'lucide-react'
 import InfoIcon from './InfoIcon'
+import { RegimeFreshnessBadge } from './RegimeFreshnessBadge'
 
 interface Confidence {
   regime?: string | null
@@ -239,6 +240,14 @@ export default function CIORecommendationCard() {
               ) : null}
             </span>
           </div>
+          {/* June 28 2026 -- live freshness indicator. Renders
+              below the regime+confidence line, color-coded by
+              age (green <5m / amber <15m / red >=15m). Hover
+              shows absolute UTC. Updates every 15s via
+              internal setInterval -- no parent re-fetch
+              required. */}
+          <RegimeFreshnessBadge
+            computed_at={rec.computed_at ?? null} />
         </div>
         <div className="text-2xs text-muted font-mono text-right">
           As of {asOf(rec.computed_at)}
