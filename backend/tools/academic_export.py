@@ -262,8 +262,17 @@ def _filter_to_submission_scope(
             k: v for k, v in sm.items()
             if k in SUBMISSION_STRATEGIES}
 
+    # June 29 2026 (Table-A1 fix) -- summary_statistics REMOVED
+    # from this filter loop. Its rows are keyed by "asset"
+    # (EQUITY / IG / HY / BENCHMARK), not "strategy" /
+    # "strategy_name", so _is_in() returned False for every row
+    # and the entire list was discarded. Table A1 in the appendix
+    # ("Summary Statistics by Asset Class") consequently
+    # rendered [DATA PENDING]. The four rows are intrinsically
+    # in scope (the three assets are the universe + BENCHMARK
+    # is in SUBMISSION_STRATEGIES) so no filtering is needed.
     for list_key in (
-            "summary_statistics", "regime_conditional",
+            "regime_conditional",
             "factor_loadings", "drawdown_comparison",
             # June 29 2026 -- bootstrap_ci_sharpe filter
             # (audit-finding 1, appendix-export PR). The Table
