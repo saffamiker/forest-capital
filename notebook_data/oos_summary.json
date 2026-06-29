@@ -1,0 +1,18 @@
+{
+  "split_date": "2022-01-01",
+  "oos_window_start": "2022-01-31",
+  "oos_window_end": "2026-05-31",
+  "n_test_months": 53,
+  "oos_sharpe_blend": 0.9,
+  "oos_sharpe_benchmark": 0.49,
+  "oos_sharpe_classic_6040": 0.18,
+  "improvement_pct": 83.7,
+  "source": "Platform academic_lock cache (PR #490, locked at submission). Notebook re-runs use the same data inputs as the platform; the canonical Sharpe figures come from the platform's locked HMM fit + OOS validation.",
+  "rf_source": "ff_factors.csv (Kenneth French)",
+  "local_recomputation": {
+    "oos_sharpe_blend": 0.7339,
+    "oos_sharpe_benchmark": 0.7303,
+    "oos_sharpe_classic_6040": 0.188,
+    "note": "These local values use the fallback regime classifier (hmmlearn unavailable in this env). They differ from the canonical values above; the canonical values are what the notebook displays."
+  }
+}
