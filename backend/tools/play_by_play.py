@@ -903,6 +903,7 @@ def compute_performance_chart(
     hmm_result: dict,
     *,
     split_date: str = "2022-01-01",
+    risk_free: dict | float | None = None,
 ) -> dict:
     """PURE: the post-split cumulative return series for the Council
     Performance Record chart. The regime-conditional blend is the Layer 3
@@ -911,12 +912,22 @@ def compute_performance_chart(
     Returns {series: [{date, regime_conditional, benchmark,
     classic_6040}], event_markers: [iso, ...]} or {} when the OOS path is
     unavailable. Pure given strategy_results + hmm_result, so it is unit-
-    tested without a live HMM fit."""
+    tested without a live HMM fit.
+
+    June 29 2026 -- risk_free kwarg added so the OOS Sharpe figures
+    persisted alongside the chart are computed against the actual T-
+    bill series instead of rf=0. Threads straight through to
+    out_of_sample_validation; same shape as that function's
+    risk_free param ({iso_date: monthly_rate} map, scalar, or None
+    for the zero-rf default). The default stays None so existing
+    unit tests that don't supply rf continue to pass; the live
+    refresh path at refresh_performance_chart builds rf_map from
+    monthly['rf'] and passes it explicitly."""
     from tools.regime_meta_validation import out_of_sample_validation
 
     oos = out_of_sample_validation(
         strategy_results, hmm_result, split_date=split_date,
-        return_series=True)
+        risk_free=risk_free, return_series=True)
     dates = oos.get("test_dates") or []
     blend_monthly = oos.get("blend_monthly") or []
     if oos.get("error") or not dates or len(blend_monthly) != len(dates):
@@ -971,7 +982,21 @@ async def refresh_performance_chart(data_hash: str) -> bool:
             log.warning("performance_chart_hmm_failed",
                         error=(hmm or {}).get("error"))
             return False
-        chart = compute_performance_chart(sr, hmm)
+        # June 29 2026 -- build the rf_map so the cached OOS Sharpe
+        # figures use the actual T-bill series, not rf=0. Same
+        # pattern as tools/regime_meta_validation.refresh_oos_cost_
+        # sensitivity:604-609. monthly['rf'] is a list of decimal
+        # monthly rates aligned to monthly['dates'].
+        rf_map: dict | None = None
+        rf_dates = monthly.get("dates") or []
+        rf_vals = monthly.get("rf") or []
+        if rf_dates and rf_vals and len(rf_dates) == len(rf_vals):
+            rf_map = {
+                str(d)[:10]: float(v)
+                for d, v in zip(rf_dates, rf_vals)
+                if v is not None
+            }
+        chart = compute_performance_chart(sr, hmm, risk_free=rf_map)
         if not chart.get("series"):
             return False
         await set_metric(data_hash or "", _CHART_METRIC_KIND, chart,
