@@ -56,6 +56,31 @@ interface DraftRow {
 }
 
 
+// June 29 2026 -- prefix-tolerant hash equality. The platform
+// stores draft.data_hash with the SAME canonical 16-char form
+// the cache writes (tools.cache._compute_data_hash takes
+// SHA256[:16]), but some legacy drafts persisted only the
+// 8-char display form, and the freeze config row stores the
+// full 16-char value. A strict === comparison miscounted
+// legacy 8-char drafts as 'drifted' when they were on the
+// same cache state. Returns True when either hash is a
+// prefix of the other (case-insensitive) OR they're equal.
+// Empty / null returns False.
+function _hashesMatch(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  if (!a || !b) return false
+  const al = a.toLowerCase()
+  const bl = b.toLowerCase()
+  if (al === bl) return true
+  const longer = al.length >= bl.length ? al : bl
+  const shorter = al.length >= bl.length ? bl : al
+  if (shorter.length < 4) return false
+  return longer.startsWith(shorter)
+}
+
+
 // June 28 2026 hotfix -- submission-freeze status shape returned
 // by GET /api/v1/admin/submission-status. Mirrors the FreezeStatus
 // interface in LightRefreshButton.tsx (PR #459). Available to any
@@ -127,7 +152,7 @@ export default function LiveDataHashBanner(): React.ReactElement | null {
       && d.document_type in DOC_LABELS)
 
   const staleDocs = currentDrafts
-    .filter((d) => d.data_hash !== comparisonHash)
+    .filter((d) => !_hashesMatch(d.data_hash, comparisonHash))
     .map((d) => ({
       label: DOC_LABELS[
         d.document_type as LiveDataHashBannerDocType],
