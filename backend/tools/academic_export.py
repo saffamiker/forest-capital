@@ -209,7 +209,20 @@ def _filter_to_submission_scope(
 
     for list_key in (
             "summary_statistics", "regime_conditional",
-            "factor_loadings", "drawdown_comparison"):
+            "factor_loadings", "drawdown_comparison",
+            # June 29 2026 -- bootstrap_ci_sharpe filter
+            # (audit-finding 1, appendix-export PR). The Table
+            # D1 builder iterates this list unfiltered; without
+            # the scope filter the table renders all 10
+            # strategies. Per operator: keep BENCHMARK +
+            # CLASSIC_60_40 + REGIME_SWITCHING (the latter is
+            # the closest proxy in the bootstrap data for the
+            # regime-conditional blend's statistical
+            # properties; the table footnote spells out that
+            # the blend's OOS Sharpe is derived from the HMM-
+            # posterior-weighted combination and is not
+            # directly represented).
+            "bootstrap_ci_sharpe"):
         rows = bundle.get(list_key)
         if isinstance(rows, list):
             bundle[list_key] = [r for r in rows if _is_in(r)]

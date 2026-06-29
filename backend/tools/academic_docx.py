@@ -350,6 +350,32 @@ _BRIEF_CANONICAL_APA_REFERENCES: tuple[str, ...] = (
     "of Finance, 7(1), 77-91.",
 )
 
+# June 29 2026 (Issue 3, appendix-export PR) -- canonical APA
+# reference set for the analytical appendix. Superset of the
+# brief's six works, adding Fama & French (1993) for the
+# three-factor model that Carhart extends, Politis & Romano
+# (1994) for the block-bootstrap methodology Section D uses,
+# and Newey & West (1987) for the HAC standard-error
+# adjustment Section E's factor-loading t-statistics rely on.
+# These three additional citations are appendix-specific
+# because the brief does not cite them; including them in
+# every appendix consolidates the appendix's methodology
+# bibliography regardless of which methods the LLM happens
+# to mention by name in any one section's narrative.
+_APPENDIX_CANONICAL_APA_REFERENCES: tuple[str, ...] = (
+    _BRIEF_CANONICAL_APA_REFERENCES + (
+        "Fama, E. F., & French, K. R. (1993). Common risk "
+        "factors in the returns on stocks and bonds. Journal "
+        "of Financial Economics, 33(1), 3-56.",
+        "Newey, W. K., & West, K. D. (1987). A simple, "
+        "positive semi-definite, heteroskedasticity and "
+        "autocorrelation consistent covariance matrix. "
+        "Econometrica, 55(3), 703-708.",
+        "Politis, D. N., & Romano, J. P. (1994). The "
+        "stationary bootstrap. Journal of the American "
+        "Statistical Association, 89(428), 1303-1313.",
+    ))
+
 
 _AUTHOR_YEAR_RE = re.compile(
     r"^\s*([A-Z][a-z'\-]+(?:[\s,]+[A-Z][a-z'\-]+)*)"  # surname(s)
@@ -1779,13 +1805,42 @@ def _apply_substitutions(
     EVENTS}} named crisis events…' rendered with the literal token
     in the DOCX. Routing every paragraph + heading + list-item
     string through this helper resolves the token before any
-    text is written to the document."""
+    text is written to the document.
+
+    June 29 2026 (Issue 2, appendix-export PR) -- adds case-
+    insensitive matching + tolerates whitespace inside the
+    {{...}} braces. The LLM occasionally emits tokens as
+    `{{study_start}}` (lowercase) or `{{ STUDY_START }}`
+    (padded), neither of which the straight string-replace
+    pass caught. Now any token whose normalised form (strip
+    inner whitespace, uppercase the key body, re-wrap in {{}})
+    matches a key in the substitution table resolves
+    correctly."""
     if not text or not substitution_table:
         return text
     out = text
+    # Build a case-insensitive lookup: keys normalised by
+    # stripping {{}} + inner whitespace + uppercasing, mapped
+    # to the canonical (key, value) pair from the table.
+    norm_lookup: dict[str, tuple[str, str]] = {}
+    for key, value in substitution_table.items():
+        if (key.startswith("{{") and key.endswith("}}")):
+            inner = key[2:-2].strip().upper()
+            norm_lookup[inner] = (key, str(value))
+    # First pass: exact match (the common case; preserves the
+    # case-sensitive replace semantics the existing prompt-
+    # exact-token consumers expect).
     for key, value in substitution_table.items():
         if key in out:
             out = out.replace(key, str(value))
+    # Second pass: case-insensitive + whitespace-tolerant.
+    # Pattern catches {{anything}} with optional inner padding.
+    def _resolve(match: re.Match) -> str:
+        inner = match.group(1).strip().upper()
+        if inner in norm_lookup:
+            return norm_lookup[inner][1]
+        return match.group(0)  # leave unresolved tokens intact
+    out = re.sub(r"\{\{\s*([^{}]+?)\s*\}\}", _resolve, out)
     return out
 
 
@@ -2422,6 +2477,23 @@ def build_analytical_appendix(
     # resolving at export time. When None (legacy path), the
     # narratives already carry resolved values from generation-
     # time substitution and the helper is a no-op.
+    # June 29 2026 (Issue 3, appendix-export PR) -- APA refs
+    # consolidation, mirroring the brief's pre-pass. Walk every
+    # narrative, strip inline References / Bibliography blocks
+    # via _extract_references, replace the narrative with body-
+    # only text + accumulate citations. The consolidated block
+    # emits once at the end of the document below Section H.
+    _appendix_all_citations: list[str] = []
+    _stripped_app_narratives: dict[str, str] = {}
+    for _k, _v in narratives.items():
+        if isinstance(_v, str):
+            _body, _refs = _extract_references(_v)
+            _stripped_app_narratives[_k] = _body
+            _appendix_all_citations.extend(_refs)
+        else:
+            _stripped_app_narratives[_k] = _v
+    narratives = _stripped_app_narratives
+
     def _narrative(key: str) -> str:
         raw_text = narratives.get(key, "[DATA PENDING]")
         if substitution_table is None:
@@ -2455,6 +2527,27 @@ def build_analytical_appendix(
     h, r = table_bootstrap_ci(data.get("bootstrap_ci_sharpe") or [])
     _add_table(doc, "Table D1. Sharpe Ratio with 95% Bootstrap CI "
                     "(block bootstrap, length 12, 10,000 resamples)", h, r)
+    # June 29 2026 (Issue 1) -- Table D1 footnote clarifying
+    # the relationship between the REGIME_SWITCHING bootstrap
+    # CI (the per-strategy data point in this table) and the
+    # regime-conditional blend's OOS Sharpe (the HMM-weighted
+    # combination across strategies, shown elsewhere in the
+    # document). The blend's CI is not directly represented
+    # in the bootstrap_ci_sharpe payload because the bootstrap
+    # resamples a per-strategy return series; the blend's
+    # return series is a derived weighted sum that would
+    # require its own bootstrap pass to produce a CI.
+    _d1_note = doc.add_paragraph()
+    _d1_note_run = _d1_note.add_run(
+        "Note. The Regime Switching row reflects the "
+        "underlying strategy's bootstrap confidence interval. "
+        "The regime-conditional blend's out-of-sample Sharpe "
+        "of 0.90 is derived from the HMM-posterior-weighted "
+        "combination across strategies and is not directly "
+        "represented in this table; see Section G for the "
+        "blend's out-of-sample validation.")
+    _d1_note_run.italic = True
+    _d1_note_run.font.size = Pt(9)
 
     # ── Section E — Factor Loadings ───────────────────────────────────────
     _add_heading(doc, _APPENDIX_SECTION_TITLES[4])
@@ -2518,6 +2611,22 @@ def build_analytical_appendix(
     _embed_brief_figures(
         doc, data, None,
         skip_keys=appendix_inline_placed)
+
+    # ── Consolidated References section (Issue 3) ─────────────────────────
+    # June 29 2026 -- prepend the appendix canonical set + dedupe
+    # against any LLM-emitted citations stripped from per-section
+    # narratives at the top of this function. Single # References
+    # heading emits below Section H + above the reproducibility
+    # footer + audit appendix.
+    _appendix_all_citations = (
+        list(_APPENDIX_CANONICAL_APA_REFERENCES)
+        + _appendix_all_citations)
+    _appendix_sorted_refs = _sort_apa_citations(
+        _appendix_all_citations)
+    if _appendix_sorted_refs:
+        _add_heading(doc, "References")
+        for _ref in _appendix_sorted_refs:
+            doc.add_paragraph(_ref)
 
     # ── Reproducibility footer line ───────────────────────────────────────
     _add_reproducibility_line(doc, data.get("data_hash"))
