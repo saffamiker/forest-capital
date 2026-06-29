@@ -128,7 +128,7 @@ The central question: does diversification improve risk-adjusted \
 performance vs 100% equity?
 
 PRIMARY PROOF POINT (the answer -- lead with this):
-YES. OOS Sharpe 0.86 (blend) vs 0.43 (benchmark) over 53 months of \
+YES. OOS Sharpe 0.91 (blend) vs 0.49 (benchmark) over 53 months of \
 genuinely unseen post-2022 data -- a 98% improvement in risk-adjusted \
 return on data the model never trained on. These are the December \
 2025 academic submission lock figures (the panel-defense record). \
@@ -151,7 +151,7 @@ regimes, NOT crisis prediction or market timing. The 2025-04 \
 than hiding it.
 
 STORY ARC HIERARCHY (apply to every deliverable):
-  1. Lead with the OOS proof point. 0.86 vs 0.43 over 53 months of \
+  1. Lead with the OOS proof point. 0.91 vs 0.49 over 53 months of \
      unseen data is THE answer to the research question. It belongs \
      in the first sentence of the brief executive summary and on \
      slide 1 of the deck. NOT the full-period 0.63 vs 0.54 from the \
@@ -164,8 +164,8 @@ STORY ARC HIERARCHY (apply to every deliverable):
      construction, retain bond sleeve, monitor monthly.
 
 TOKEN MAPPING (be explicit about which token carries which figure):
-  - {{OOS_SHARPE_BLEND}}        -> "0.86"  (December 2025 lock)
-  - {{OOS_SHARPE_BENCHMARK}}    -> "0.43"  (December 2025 lock)
+  - {{OOS_SHARPE_BLEND}}        -> "0.91"  (rf-adjusted live OOS)
+  - {{OOS_SHARPE_BENCHMARK}}    -> "0.49"  (rf-adjusted live OOS)
   - {{REGIME_SWITCHING_SHARPE}} -> "0.63"  (live full-period; ONLY in
                                             per-strategy tables,
                                             NEVER in the OOS headline)
@@ -175,12 +175,12 @@ TOKEN MAPPING (be explicit about which token carries which figure):
   appendix Section B comparison table only.
 
 TOKEN MIXING PROHIBITION (non-negotiable):
-  NEVER place {{OOS_SHARPE_BLEND}} (0.86) and \
+  NEVER place {{OOS_SHARPE_BLEND}} (0.91) and \
   {{REGIME_SWITCHING_SHARPE}} (0.63) in the same sentence, bullet, or \
   table row without a clear label distinguishing OOS from full-\
-  period. A reader seeing "0.86 vs 0.63" without labels cannot tell \
+  period. A reader seeing "0.91 vs 0.63" without labels cannot tell \
   which is the headline figure. Same applies to \
-  {{OOS_SHARPE_BENCHMARK}} (0.43) and {{BENCHMARK_SHARPE}} (0.54). \
+  {{OOS_SHARPE_BENCHMARK}} (0.49) and {{BENCHMARK_SHARPE}} (0.54). \
   In the brief: OOS figures belong in section 1, the section 3 \
   lead, and section 5. Full-period figures belong in section 3 \
   supporting context and the section 6 visuals table only. In the \
@@ -685,11 +685,11 @@ but are NOT used in the deck -- the academic submission record stands.
 SLIDE 1 -- NON-NEGOTIABLE OPENING:
   Slide 1's headline MUST be the OOS proof point in one visual punch. \
   Required numeric_anchors for slide 1:
-    oos_sharpe_blend:           0.86
-    oos_sharpe_benchmark:       0.43
+    oos_sharpe_blend:           0.91
+    oos_sharpe_benchmark:       0.49
     oos_sharpe_improvement_pct: 98
     oos_window_months:          53
-  The headline assertion is the +98% risk-adjusted advantage in \
+  The headline assertion is the +85% risk-adjusted advantage in \
   genuinely unseen data. Do NOT open with a methodology overview. Do \
   NOT bury the headline. Do NOT substitute the full-period Sharpe \
   (0.63 / 0.54) for the OOS pair on this slide. The audience sees \
@@ -723,7 +723,7 @@ generate alternative titles):
 - Slide 1:  "Yes -- Regime-Conditional Beats 100% Equity Out-of-Sample"
 - Slide 2:  "Agenda" (structural -- no so-what needed)
 - Slide 3:  "Three Strategies, One Question"
-- Slide 4:  "The Numbers: 0.86 vs 0.43, 53 Months of Unseen Data"
+- Slide 4:  "The Numbers: 0.91 vs 0.49, 53 Months of Unseen Data"
 - Slide 5:  "Why Static Allocation Failed in 2022"
 - Slide 6:  "Capital Preservation: Half the Drawdown, Half the Recovery Time"
 - Slide 7:  "Does It Hold Up Out-of-Sample? Yes."
@@ -744,7 +744,7 @@ max_bullets=2 means "no more than 2", never "write exactly 2".
 
 BULLET WRITING RULE:
 A bullet is a "because" or a "which means" -- never a "what".
-Wrong: "The blend achieved an OOS Sharpe of 0.86" (that is the \
+Wrong: "The blend achieved an OOS Sharpe of 0.91" (that is the \
 title's job).
 Right: "Nearly double the benchmark's risk-adjusted return on data \
 the model never trained on".
@@ -760,7 +760,7 @@ that job.
 
 PRESENTATION ARC (lock in the central_argument + presentation_arc \
 fields of the JSON output):
-  Slide 1:    Answer + OOS proof point (0.86 vs 0.43)
+  Slide 1:    Answer + OOS proof point (0.91 vs 0.49)
   Slide 2:    Agenda (structural, no data, no chart)
   Slides 3-4: Three-strategy framing + the numbers
   Slides 5-6: Why it works (correlation break, drawdown)
@@ -888,7 +888,7 @@ input slide_plan must have a corresponding key in the output:
 ORAL_PRESENTATION_CONTEXT = """\
 ORAL PRESENTATION CONTEXT (speaker notes only -- NEVER on a written \
 slide or in any brief paragraph):
-  The December 2025 submission figures (OOS Sharpe 0.86 vs 0.43) are \
+  The December 2025 submission figures (OOS Sharpe 0.91 vs 0.49) are \
   the CONSERVATIVE locked record. The platform's Live Figure row on \
   the Council Performance Record shows 1.24 vs 0.73 (+70%) through \
   May 2026 -- the submission UNDERSTATES current performance.
@@ -900,7 +900,7 @@ slide or in any brief paragraph):
   submission record stands as the record. The live-figure context \
   exists only in spoken delivery; it does NOT appear on any slide \
   bullet, in any brief paragraph, or in the appendix. The slide \
-  headline carries the 0.86 vs 0.43 submission figures."""
+  headline carries the 0.91 vs 0.49 submission figures."""
 
 
 _DECK_SPEAKER_NOTES_SYSTEM_PROMPT = (
@@ -1050,8 +1050,8 @@ EXECUTIVE SUMMARY OPENING SENTENCE (non-negotiable):
     max_drawdown_benchmark:            -0.526
 
 KEY FINDINGS (section 3) STRUCTURE:
-  Finding 1 -- THE OOS proof point. 0.86 vs 0.43 over the 53-month \
-              post-2022 window. +98% risk-adjusted advantage on data \
+  Finding 1 -- THE OOS proof point. 0.91 vs 0.49 over the 53-month \
+              post-2022 window. +85% risk-adjusted advantage on data \
               the model did not see during construction. THIS IS THE \
               LEAD finding; it appears first in section 3's prose.
   Finding 2 -- Drawdown reduction. -29.7% (blend) vs -52.6% \

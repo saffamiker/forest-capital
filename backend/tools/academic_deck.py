@@ -68,7 +68,7 @@ log = structlog.get_logger(__name__)
 # The platform footnote is authoritative: "The submitted figures are
 # the December 2025 data lock... not used in the executive brief or
 # final presentation -- the academic submission stands as the record."
-# So the brief / deck / appendix OOS HEADLINE cites 0.86 vs 0.43.
+# So the brief / deck / appendix OOS HEADLINE cites 0.91 vs 0.49.
 #
 # The live full-period Sharpes (REGIME_SWITCHING.sharpe_ratio = 0.6291,
 # BENCHMARK.sharpe_ratio = 0.5370) appear separately via the per-
@@ -83,13 +83,22 @@ log = structlog.get_logger(__name__)
 # panel-defense alignment; the rest of Path A (max drawdown live,
 # equal-weight Sharpe live, new OOS window constants) is unchanged.
 #
-# DO NOT manually edit OOS_SHARPE_REGIME_CONDITIONAL or
-# OOS_SHARPE_BENCHMARK without an explicit decision to break the
-# December 2025 academic submission record. Updating these in
-# response to a fresh data ingestion is a SUBMISSION INTEGRITY
-# VIOLATION; the academic record defends these specific values.
-OOS_SHARPE_REGIME_CONDITIONAL = 0.8576  # Dec 2025 academic submission
-OOS_SHARPE_BENCHMARK = 0.4341          # Dec 2025 academic submission
+# June 29 2026 (Issue 7) -- updated to the rf-adjusted live OOS
+# Sharpe figures (computed against the actual T-bill rate, not
+# rf=0). Source: tools/play_by_play.refresh_performance_chart
+# now passes risk_free=rf_map into out_of_sample_validation
+# (PR fix(oos-sharpe-rf)). The rf-adjusted figures are
+# methodologically defensible and reproducible from the live
+# strategy_results_cache; the previously locked 0.8576 / 0.4341
+# could not be reproduced under any reasonable convention from
+# the live data + Kenneth French rf series. Operator-confirmed
+# values via the Render-shell verification:
+#   regime_conditional blend (rf-adjusted):  0.9117
+#   benchmark (S&P 500, rf-adjusted):        0.4927
+#   risk-adjusted advantage:                 +85% (0.9117/0.4927 - 1)
+OOS_SHARPE_REGIME_CONDITIONAL = 0.9117  # rf-adjusted live OOS
+OOS_SHARPE_BENCHMARK = 0.4927          # rf-adjusted live OOS
+OOS_SHARPE_CLASSIC_6040 = 0.1821       # rf-adjusted live OOS
 OOS_SHARPE_EQUAL_WEIGHT = 0.5728       # live EQUAL_WEIGHT.sharpe_ratio
 CORRELATION_PRE_2022 = -0.05           # avg of 12m rolling corr pre-2022
 CORRELATION_POST_2022 = 0.57           # avg of 12m rolling corr post-2022
@@ -163,7 +172,7 @@ SLIDE_TITLES = [
     "Agenda",
     # 3 -- combined Investment Case slide. June 27 2026: merged
     # what were previously slide 3 ("Three Strategies, One
-    # Question" setup) + slide 4 ("The Numbers: 0.86 vs 0.43 OOS
+    # Question" setup) + slide 4 ("The Numbers: 0.91 vs 0.49 OOS
     # verdict") into a single split-panel slide -- IS setup on
     # the left, OOS verdict table on the right. Mirrors Molly's
     # reference deck and shrinks the platform deck from 12 to 11
@@ -361,13 +370,13 @@ SLIDE FORMAT CONSTRAINTS (non-negotiable, apply to every slide):
 TOKEN FORMAT NOTE (non-negotiable, apply to every slide):
 - {{{{OOS_SHARPE_IMPROVEMENT_PCT}}}} already resolves to a complete
   formatted string including the + prefix AND the % suffix (e.g.
-  "+98%"). Do NOT add any surrounding + or % characters around
+  "+85%"). Do NOT add any surrounding + or % characters around
   this token; they duplicate the formatting already in the token
   value. Wrong: "+{{{{OOS_SHARPE_IMPROVEMENT_PCT}}}}%" (produces
-  "++98%%"). Wrong: "{{{{OOS_SHARPE_IMPROVEMENT_PCT}}}}%" (produces
-  "+98%%"). Right: write the token alone -- "...an improvement of
+  "++85%%"). Wrong: "{{{{OOS_SHARPE_IMPROVEMENT_PCT}}}}%" (produces
+  "+85%%"). Right: write the token alone -- "...an improvement of
   {{{{OOS_SHARPE_IMPROVEMENT_PCT}}}}..." renders as
-  "...an improvement of +98%...".
+  "...an improvement of +85%...".
 - The same rule applies to any *_PCT token whose value already
   carries a built-in % suffix. If a token's name suggests it is
   already a percentage, treat the resolved value as complete --
@@ -436,7 +445,7 @@ stat callout cards stacked vertically, each card carrying the \
 strategy name, its IS Sharpe figure, and a "full period" label. The \
 Regime-Conditional card is the highlighted card. RIGHT (50% width) -- \
 OOS verdict table: Strategy | OOS Sharpe | Max Drawdown | OOS CAGR. The \
-Regime-Conditional row is the highlighted row. A "+98% vs benchmark" \
+Regime-Conditional row is the highlighted row. A "+85% vs benchmark" \
 callout sits below the table.
 Message: Frame the three strategies the panel will hear about, then \
 answer the headline question with the OOS verdict in the same slide. \
@@ -1852,7 +1861,7 @@ def _render_split_panel_slide(
     Drawdown / OOS CAGR) with the navy header band + alternating
     rows + the Regime-Conditional row highlighted teal.
 
-    "+98% vs benchmark" callout below the table.
+    "+85% vs benchmark" callout below the table.
 
     Data source: the slide's bullets array carries the three IS
     setup lines (one per strategy); the slide's table_data carries
@@ -1950,7 +1959,7 @@ def _render_split_panel_slide(
                       "left panel + callout only per spec (no "
                       "[DATA PENDING] placeholder)"))
 
-        # "+98% vs benchmark" callout below the table.
+        # "+85% vs benchmark" callout below the table.
         callout_top = Inches(5.5)
         callout = s.shapes.add_shape(
             MSO_SHAPE.ROUNDED_RECTANGLE,
@@ -1967,7 +1976,7 @@ def _render_split_panel_slide(
         cp.alignment = PP_ALIGN.CENTER
         cr = cp.add_run()
         cr.text = (
-            "+98% Sharpe improvement vs benchmark "
+            "+85% Sharpe improvement vs benchmark "
             "across the OOS window")
         cr.font.size = Pt(16)
         cr.font.bold = True

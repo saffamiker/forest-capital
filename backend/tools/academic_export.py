@@ -1529,15 +1529,41 @@ def harness_narrative(
 
 def _strip_banner(text: str) -> str:
     """
-    Drops a leading 'AI DRAFT — REQUIRES HUMAN REVIEW' line if the model
-    emitted one. The .docx/.pptx builders add the banner themselves (on
-    every page / slide), so an inline copy would only be a duplicate.
+    Drops any 'AI DRAFT — REQUIRES HUMAN REVIEW' line wherever it
+    appears (leading, trailing, or mid-body). The .docx / .pptx
+    builders emit the banner themselves on every page / slide; an
+    inline copy is a visible duplicate.
+
+    June 29 2026 (Issue 4) -- previously only the LEADING contiguous
+    AI DRAFT line was stripped. The LLM occasionally emitted the
+    banner as a paragraph-footer after specific sections (operator
+    reported Sections 1 + 5 in latest brief, absent from 3 + 4),
+    which then survived into the rendered DOCX. The full-line filter
+    below drops every AI DRAFT-bearing line regardless of position
+    + collapses runs of blank lines that result so paragraph breaks
+    stay clean.
     """
     out = (text or "").strip()
+    if not out:
+        return ""
     lines = out.split("\n")
-    while lines and ("AI DRAFT" in lines[0].upper() or not lines[0].strip()):
-        lines.pop(0)
-    return "\n".join(lines).strip()
+    kept: list[str] = []
+    for ln in lines:
+        if "AI DRAFT" in ln.upper():
+            continue
+        kept.append(ln)
+    # Collapse runs of >= 2 consecutive blank lines that the strip
+    # may have created (e.g., banner sandwiched between two
+    # blank-line separators).
+    collapsed: list[str] = []
+    prev_blank = False
+    for ln in kept:
+        is_blank = not ln.strip()
+        if is_blank and prev_blank:
+            continue
+        collapsed.append(ln)
+        prev_blank = is_blank
+    return "\n".join(collapsed).strip()
 
 
 # ── Table adapters ────────────────────────────────────────────────────────────

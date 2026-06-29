@@ -268,10 +268,11 @@ def build_substitution_table(
     *,
     oos_sharpe_blend: float | None = None,
     oos_sharpe_benchmark: float | None = None,
+    oos_sharpe_classic_6040: float | None = None,
     pre_2022_eq_ig_correlation: float | None = None,
     post_2022_eq_ig_correlation: float | None = None,
-    oos_window_definition: str = "October 2021 through May 2026",
-    oos_window_months: int = 56,
+    oos_window_definition: str = "January 2022 through May 2026",
+    oos_window_months: int = 53,
     oos_window_pct_of_study: float | None = None,
     study_months: int | None = None,
     study_start: str = "July 2002",
@@ -418,6 +419,12 @@ def build_substitution_table(
         "{{OOS_SHARPE_BLEND}}": format_sharpe(oos_sharpe_blend),
         "{{OOS_SHARPE_BENCHMARK}}":
             format_sharpe(oos_sharpe_benchmark),
+        # June 29 2026 (Issue 9) -- Classic 60/40 OOS Sharpe
+        # joins the panel-defended set so the strategy_comparison
+        # figure caption and any "three-strategy comparison"
+        # narrative can name it via token.
+        "{{OOS_SHARPE_CLASSIC_6040}}": format_sharpe(
+            oos_sharpe_classic_6040),
         "{{OOS_WINDOW}}": oos_window_definition,
         "{{OOS_WINDOW_MONTHS}}": str(oos_window_months),
         "{{OOS_SHARPE_IMPROVEMENT_PCT}}": oos_improvement,
@@ -604,7 +611,14 @@ def build_substitution_table(
             else str(strategy_cache.get("n_observations") or "—")),
         "{{STUDY_START}}": study_start,
         "{{STUDY_END}}": study_end,
-        "{{DATA_HASH}}": (data_hash or "")[:8] or "—",
+        # June 29 2026 (Issue 3) -- the full 16-character hash
+        # is the canonical freeze identifier; truncating to 8
+        # characters in figure captions obscured the provenance
+        # claim. The strategy_hash column in strategy_results_
+        # cache stores 16 characters (SHA256[:16] per
+        # tools/cache._compute_data_hash) so the supplied
+        # data_hash arg is already the full 16-char value.
+        "{{DATA_HASH}}": (data_hash or "")[:16] or "—",
 
         # June 28 2026 -- definitional Classic 60/40 weights.
         # These are by-construction strategy constants (not
