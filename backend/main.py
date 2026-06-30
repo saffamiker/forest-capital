@@ -3196,30 +3196,35 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
         # fresh prose without blocking this one.
         from tools.cio_recommendation import get_endpoint_recommendation
         rec = await get_endpoint_recommendation()
-        # Overlay the LIVE regime read so the headline regime label +
-        # confidence are never the data_hash-stale cached values, and match
-        # the Forward Projection tile exactly (both read the same
-        # detect_current_regime() 15-minute in-process regime cache). The
-        # cached recommendation/dissent/limitations text is unchanged — the
-        # card reads regime + probability from rec.confidence.
+        # June 29 2026 (Investment Outlook headline / implied-allocation
+        # consistency fix per panel-presentation review). The two render-
+        # time overlays that previously fired here -- _overlay_live_regime
+        # on rec.confidence + the forward-projection blend_weights swap --
+        # were producing a visible inconsistency: the CIO recommendation
+        # in the DB (row 19, TRANSITION at 62.7%) was served by
+        # get_endpoint_recommendation, but then _overlay_live_regime
+        # overwrote rec.confidence.regime with the live HMM read (BULL)
+        # and the forward-projection swap replaced rec.blend_weights
+        # with the live posterior-weighted blend. Result: the headline
+        # badge said BULL even when the stored recommendation said
+        # TRANSITION; implied_asset_allocation was computed from a
+        # different blend than the prose described.
+        #
+        # New contract: the headline badge, confidence display, and
+        # implied allocation all derive from the STORED recommendation
+        # payload exclusively. No live-HMM re-classification at render
+        # time, no forward-projection blend swap. The Forward Projection
+        # tile (a separate endpoint) still does its own overlay -- only
+        # the CIO recommendation tile is locked to the stored payload.
         if rec:
+            # Ensure the confidence dict exists for downstream readers;
+            # do NOT mutate any of its fields (regime / probability /
+            # ess_warning all stay as written when the recommendation
+            # was persisted).
             conf = rec.get("confidence")
             if not isinstance(conf, dict):
                 conf = {}
                 rec["confidence"] = conf
-            await _overlay_live_regime(conf, prob_key="probability")
-            # Surface the live regime-conditional blend weights (from the
-            # cached forward projection — the same prob-weighted blend) so
-            # the tile can show the blend and flag a binding concentration
-            # constraint. Fail-open: the constraints table still renders its
-            # static rows without the weights, just no binding note.
-            try:
-                from tools.regime_meta_forward import get_cached_forward_projection
-                proj = await get_cached_forward_projection()
-                if proj and proj.get("blend_weights"):
-                    rec["blend_weights"] = proj["blend_weights"]
-            except Exception as exc:  # noqa: BLE001
-                log.warning("recommendation_blend_overlay_failed", error=str(exc))
             # Bridge #81 -- implied asset allocation + blend change
             # trigger overlays. Both reuse already-cached primitives:
             #
