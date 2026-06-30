@@ -602,12 +602,31 @@ def schedule_regime_aware_refresh(
 async def get_endpoint_recommendation() -> dict | None:
     """Read path used by /api/v1/recommendation.
 
-    Resolves the LIVE regime + confidence-bucket from detect_current_regime()
-    and the current data_hash, then prefers a cached row stored under the
-    composite key. On a cache miss, returns the most recent cached row
-    (whatever its key) and schedules a background regenerate under the live
-    key — so the tile stays fast and the next read serves the fresh prose.
-    Fail-open to get_latest_recommendation() at every step."""
+    LATEST-WINS (June 29 2026 -- bug fix per panel-presentation
+    review). Always serves the MOST RECENT cio_recommendations
+    row (MAX computed_at) regardless of which composite
+    {data_hash}_{regime}_{confidence_bucket} key it carries.
+
+    Previously this endpoint preferred the row stored under the
+    LIVE composite key, falling back to the latest row only on
+    a miss. That semantic was correct under the original
+    "freshen on every regime / confidence shift" design, but it
+    produced a visible staleness bug: if the live regime
+    flickered back to a value (BULL) for which a prior cache
+    row existed, the endpoint surfaced that stale row even when
+    a newer row under a different regime label (TRANSITION) was
+    the analyst's actual most recent considered judgment.
+
+    The new contract is simpler: the CIO recommendation IS the
+    most recently computed payload, period. The regime-aware
+    cache row is still WRITTEN by the background warm pipeline
+    (so future regime states find a hit), and the warm-on-miss
+    scheduler still fires here, but the regime-keyed row is no
+    longer consulted on the serve path.
+
+    Fail-open across the board: a DB error / cold live regime
+    falls back to get_latest_recommendation() with whatever
+    divergence overlay we could compute."""
     try:
         import asyncio
         from tools.regime_detector import detect_current_regime
@@ -624,28 +643,29 @@ async def get_endpoint_recommendation() -> dict | None:
     confidence = probs.get(regime) if regime else None
     monthly_regime = (live or {}).get("monthly_hmm_regime")
     hmm_models_agree = (live or {}).get("hmm_models_agree", True)
-    data_hash = await _current_data_hash()
-    if not data_hash:
-        return _attach_divergence(
-            await get_latest_recommendation(),
-            regime, confidence, monthly_regime, hmm_models_agree)
-    target_key = regime_cache_key(data_hash, regime, confidence)
-    # Try the composite-key cache (falls through to None on bare-hash keys
-    # too, since the bare data_hash IS the composite when regime is None).
-    rec = await get_cached_for_hash(target_key)
-    if rec is not None:
-        return _attach_divergence(
-            rec, regime, confidence, monthly_regime, hmm_models_agree)
+
+    # Serve path: the latest row by computed_at, regardless of
+    # composite key. The CIO recommendation is the analyst's
+    # most recent considered judgment; staleness of the cached
+    # row was the bug being fixed here.
     latest = await get_latest_recommendation()
-    # Schedule background regenerate (only when we have enough to compose
-    # a real composite key — otherwise the legacy bare-hash row is correct
-    # by definition).
-    if regime and confidence is not None:
-        reason = _miss_reason(
-            target_key, (latest or {}).get("data_hash"),
+
+    # Background warming preserved: when the LIVE composite key
+    # has no cached row, schedule a refresh so future reads
+    # under the same regime / confidence bucket can be served
+    # from a regime-matched row when (post-fix) we want one.
+    data_hash = await _current_data_hash()
+    if data_hash and regime and confidence is not None:
+        target_key = regime_cache_key(
             data_hash, regime, confidence)
-        schedule_regime_aware_refresh(
-            data_hash, regime, confidence, reason=reason)
+        cached_for_target = await get_cached_for_hash(target_key)
+        if cached_for_target is None:
+            reason = _miss_reason(
+                target_key, (latest or {}).get("data_hash"),
+                data_hash, regime, confidence)
+            schedule_regime_aware_refresh(
+                data_hash, regime, confidence, reason=reason)
+
     return _attach_divergence(
         latest, regime, confidence, monthly_regime, hmm_models_agree)
 
