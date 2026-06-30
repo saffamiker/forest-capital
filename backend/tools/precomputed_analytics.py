@@ -187,9 +187,18 @@ async def get_latest_metric(metric_kind: str) -> dict[str, Any] | None:
     the current data_hash has not been refreshed yet — serving the
     last refresh is better than serving nothing.
 
-    The endpoint surfaces _stale=True on the response when this
-    fallback path is taken so the user knows the analytics are
-    from a previous data ingestion.
+    _stale is now a REAL hash comparison (June 30 2026 -- bug fix).
+    Earlier versions unconditionally stamped _stale=True on every
+    returned row, which made the diversification tile (and any
+    other consumer of this function) read as "stale" even
+    immediately after a successful refresh_all_analytics() run.
+    Now: _stale is True only when the stored row's data_hash
+    differs from the current strategy_results_cache hash. If the
+    current-hash lookup fails (DB error / cache empty), we
+    fail-open to _stale=True — matching the fail-open convention
+    used by every other accessor in this module + the macro /
+    research cache (a defensive "treat unknown as stale" beats a
+    silent green light on a misconfigured environment).
     """
     try:
         from sqlalchemy import text
@@ -219,7 +228,22 @@ async def get_latest_metric(metric_kind: str) -> dict[str, Any] | None:
             payload["_computed_at"] = (
                 computed_at.isoformat() if computed_at else None)
             payload["_data_hash"] = row_hash
-            payload["_stale"] = True
+            # Conditional stale flag: True only when the stored
+            # row's hash differs from the current strategy hash.
+            # Fail-open to True when the current hash is
+            # unavailable (None) so we never silently flip a
+            # stale row to fresh on a degraded environment.
+            try:
+                from tools.cache import get_latest_strategy_hash
+                current_hash = await get_latest_strategy_hash()
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "precomputed_analytics_stale_check_failed",
+                    metric_kind=metric_kind, error=str(exc))
+                current_hash = None
+            payload["_stale"] = (
+                current_hash is None
+                or row_hash != current_hash)
             return payload
     except Exception as exc:  # noqa: BLE001
         log.warning("precomputed_analytics_latest_failed",
