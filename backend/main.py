@@ -10232,19 +10232,41 @@ async def get_context_freshness(
       analytics_context    — last refresh of the narrative cache
                               (rebuilds on every analytics refresh
                               tick)
-      diversification_context — last refresh of the structured
-                              diversification cache
-
-    Diversification context doesn't carry an explicit timestamp
-    field today; the strategy cache's computed_at is reported as a
-    proxy since the diversification refresh always trails it.
+      diversification_context — MAX(computed_at) across the seven
+                              diversification metric_kind rows in
+                              analytics_metrics_cache. Reads the
+                              REAL write timestamp written by
+                              tools.precomputed_analytics.
+                              refresh_diversification_metrics
+                              (correlation_matrices, tail_risk,
+                              capture_ratios, drawdown_duration,
+                              crisis_performance,
+                              marginal_contribution_to_risk,
+                              return_distribution).
+                              June 30 2026 -- bug fix. The prior
+                              implementation proxied off
+                              MAX(computed_at) FROM strategy_results_
+                              cache under the assumption that the
+                              diversification refresh always trailed
+                              a strategy backtest. That assumption
+                              is now false: refresh_all_analytics
+                              can update analytics_metrics_cache
+                              without writing a new
+                              strategy_results_cache row when the
+                              underlying market-data hash did not
+                              change. The dashboard badge then read
+                              "stale" indefinitely even immediately
+                              after a confirmed refresh.
     """
     from tools.analytics_context import get_analytics_freshness
     from tools.research_engine import last_research_run_at
     macro_at = await last_research_run_at()
     analytics_at = get_analytics_freshness()
-    # Diversification refresh shadows the strategy cache; report
-    # the strategy cache's latest computed_at as the freshness proxy.
+    # Diversification refresh writes one row per metric_kind in
+    # analytics_metrics_cache (see refresh_diversification_metrics in
+    # tools/precomputed_analytics.py). The seven kinds below are the
+    # exact set that refresh writes; MAX(computed_at) across them is
+    # the real freshness timestamp.
     diversification_at: str | None = None
     try:
         from sqlalchemy import text
@@ -10253,7 +10275,15 @@ async def get_context_freshness(
             async with AsyncSessionLocal() as s:
                 r = await s.execute(text(
                     "SELECT MAX(computed_at) "
-                    "FROM strategy_results_cache"))
+                    "FROM analytics_metrics_cache "
+                    "WHERE metric_kind IN ("
+                    "  'correlation_matrices', "
+                    "  'tail_risk', "
+                    "  'capture_ratios', "
+                    "  'drawdown_duration', "
+                    "  'crisis_performance', "
+                    "  'marginal_contribution_to_risk', "
+                    "  'return_distribution')"))
                 row = r.fetchone()
                 if row and row[0]:
                     diversification_at = row[0].isoformat()

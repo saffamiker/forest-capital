@@ -197,3 +197,96 @@ class TestFreshnessEndpoint:
         finally:
             app.dependency_overrides.pop(require_auth, None)
             ac._set_cache_for_test("")
+
+    def test_diversification_reads_analytics_metrics_cache_timestamp(
+            self, monkeypatch):
+        """June 30 2026 incident pin -- the endpoint must reflect the
+        REAL diversification write timestamp from
+        analytics_metrics_cache, NOT proxy off strategy_results_cache.
+
+        Scenario from prod (2026-06-30):
+          * strategy_results_cache.MAX(computed_at) = 2026-06-29T16:43:37
+            (older -- the underlying market data hash did not change)
+          * analytics_metrics_cache.MAX(computed_at) for the seven
+            diversification metric_kind rows = 2026-06-30T18:01:53
+            (newer -- only the derived analytics were recomputed)
+        Endpoint must return the NEWER timestamp on
+        diversification_context. The prior implementation returned the
+        OLDER strategy_results_cache value and read "stale" on the
+        dashboard.
+        """
+        import datetime as _dt
+        import sys
+        import types
+
+        from auth import require_auth
+        from main import app
+
+        async def _fake_auth():
+            return {"email": "viewer@queens.edu",
+                    "permissions": ["view_analytics"]}
+
+        # The scenario: a fresh write to analytics_metrics_cache for the
+        # diversification metric_kinds. The fake session captures the
+        # SQL so we can pin that the endpoint now hits the correct
+        # table + WHERE clause, and returns a fresh timestamp.
+        fresh_ts = _dt.datetime(
+            2026, 6, 30, 18, 1, 53, tzinfo=_dt.timezone.utc)
+        captured_sql: list[str] = []
+
+        class _FakeResult:
+            def __init__(self, ts):
+                self._ts = ts
+
+            def fetchone(self):
+                return (self._ts,)
+
+        class _FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+            async def execute(self, stmt, *_a, **_kw):
+                captured_sql.append(str(stmt))
+                return _FakeResult(fresh_ts)
+
+        fake_db = types.ModuleType("database")
+        fake_db.AsyncSessionLocal = lambda: _FakeSession()  # noqa: E731
+        monkeypatch.setitem(sys.modules, "database", fake_db)
+
+        app.dependency_overrides[require_auth] = _fake_auth
+        try:
+            c = self._client()
+            r = c.get("/api/v1/context/freshness")
+            assert r.status_code == 200
+            body = r.json()
+            # 1. The fresh timestamp from analytics_metrics_cache is
+            #    surfaced -- NOT the stale strategy_results_cache one.
+            assert body["diversification_context"] == (
+                "2026-06-30T18:01:53+00:00")
+            # 2. Source-pin: the SELECT now targets the correct table
+            #    and filters by the seven diversification metric_kinds.
+            assert any(
+                "analytics_metrics_cache" in s for s in captured_sql), (
+                    f"endpoint must SELECT FROM analytics_metrics_cache; "
+                    f"got: {captured_sql}")
+            assert not any(
+                "strategy_results_cache" in s for s in captured_sql), (
+                    "endpoint must NOT proxy off strategy_results_cache "
+                    "anymore; the bug was this exact proxy")
+            for metric_kind in (
+                "correlation_matrices",
+                "tail_risk",
+                "capture_ratios",
+                "drawdown_duration",
+                "crisis_performance",
+                "marginal_contribution_to_risk",
+                "return_distribution",
+            ):
+                assert any(metric_kind in s for s in captured_sql), (
+                    f"diversification metric_kind '{metric_kind}' must "
+                    f"appear in the WHERE clause")
+        finally:
+            app.dependency_overrides.pop(require_auth, None)
